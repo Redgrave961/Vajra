@@ -146,34 +146,64 @@ LONG WINAPI commit_on_touch(EXCEPTION_POINTERS* ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-LONG WINAPI crash_report(EXCEPTION_POINTERS* ep)
+void crash_frame(int i, DWORD64 pc)
 {
-    const EXCEPTION_RECORD* er = ep->ExceptionRecord;
-    char* exe = reinterpret_cast<char*>(GetModuleHandleA(nullptr));
-    HMODULE fault = nullptr;
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       static_cast<LPCSTR>(er->ExceptionAddress), &fault);
-    char module[MAX_PATH] = "?";
-    if (fault) GetModuleFileNameA(fault, module, sizeof module);
-    std::fprintf(stderr, "\n[crash] code 0x%08lX in %s+0x%llX, thread %lu, last HLE 0x%08X (%s)\n", (unsigned long)er->ExceptionCode, module,
-                 (unsigned long long)(static_cast<char*>(er->ExceptionAddress) - reinterpret_cast<char*>(fault)), GetCurrentThreadId(),
-                 g_last_hle_nid, g_last_hle_name ? g_last_hle_name : "");
-    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
-        std::fprintf(stderr, "[crash] %s of 0x%llX\n", er->ExceptionInformation[0] ? "write" : "read",
-                     (unsigned long long)er->ExceptionInformation[1]);
-    void* frames[32];
-    const USHORT n = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
-    for (USHORT i = 0; i < n; i++) {
-        HMODULE m = nullptr;
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           static_cast<LPCSTR>(frames[i]), &m);
-        if (reinterpret_cast<char*>(m) == exe)
-            std::fprintf(stderr, "[crash]   #%u rva 0x%llX\n", i, (unsigned long long)(static_cast<char*>(frames[i]) - exe));
-    }
-    std::fflush(stderr);
-    return EXCEPTION_EXECUTE_HANDLER;
+    HMODULE m = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(pc), &m);
+    char path[MAX_PATH] = "?";
+    if (m) GetModuleFileNameA(m, path, sizeof path);
+    const char* name = std::strrchr(path, '\\');
+    std::fprintf(stderr, "[crash]   #%d %s+0x%llX\n", i, name ? name + 1 : path, (unsigned long long)(pc - reinterpret_cast<DWORD64>(m)));
 }
 
+void crash_dump(const EXCEPTION_POINTERS* ep, const char* kind)
+{
+    static volatile LONG once;
+    if (InterlockedExchange(&once, 1)) return;
+    const EXCEPTION_RECORD* er = ep->ExceptionRecord;
+    std::fprintf(stderr, "\n[crash] %s 0x%08lX, thread %lu, last HLE 0x%08X (%s)\n", kind, (unsigned long)er->ExceptionCode, GetCurrentThreadId(),
+                 g_last_hle_nid, g_last_hle_name ? g_last_hle_name : "");
+    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2)
+        std::fprintf(stderr, "[crash] %s of 0x%llX\n", er->ExceptionInformation[0] ? "write" : "read", (unsigned long long)er->ExceptionInformation[1]);
+    CONTEXT ctx = *ep->ContextRecord;
+    for (int i = 0; i < 48 && ctx.Rip; i++) {
+        crash_frame(i, ctx.Rip);
+        DWORD64 image = 0;
+        PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(ctx.Rip, &image, nullptr);
+        if (!f) {
+            ctx.Rip = *reinterpret_cast<DWORD64*>(ctx.Rsp);
+            ctx.Rsp += 8;
+            continue;
+        }
+        void* data;
+        DWORD64 frame;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx.Rip, f, &ctx, &data, &frame, nullptr);
+    }
+    std::fflush(stderr);
+}
+
+LONG WINAPI crash_fatal(EXCEPTION_POINTERS* ep)
+{
+    switch (ep->ExceptionRecord->ExceptionCode) {
+    case 0xC0000374u:
+    case 0xC0000409u:
+    case 0xC0000420u:
+    case 0xC0000421u:
+    case 0xC00000FDu:
+    case 0xC0000417u:
+        crash_dump(ep, "fatal");
+        break;
+    default:
+        break;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+LONG WINAPI crash_report(EXCEPTION_POINTERS* ep)
+{
+    crash_dump(ep, "unhandled");
+    return EXCEPTION_EXECUTE_HANDLER;
+}
 DWORD WINAPI debug_console(LPVOID param)
 {
     const char* path = static_cast<const char*>(param);
@@ -253,6 +283,7 @@ int main(int argc, char** argv)
     ULONG guarantee = 256 * 1024;
     SetThreadStackGuarantee(&guarantee);
     AddVectoredExceptionHandler(1, commit_on_touch);
+    AddVectoredExceptionHandler(0, crash_fatal);
     vm_base = static_cast<uint8_t*>(VirtualAlloc(nullptr, k_vm_size, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE));
     ppu_vm_size = 0;
 #else
