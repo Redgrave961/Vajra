@@ -1,10 +1,12 @@
 param(
     [string]$Prx = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\firmware\libsre.prx"),
-    [string]$Base = "0x30000000"
+    [string]$Base = "0x30000000",
+    [string]$DevFlash = $(if ($env:PS3_DEV_FLASH) { $env:PS3_DEV_FLASH } else { "E:\RPCS3\dev_flash" })
 )
 $root = Split-Path $PSScriptRoot -Parent
 $py = Join-Path $root "venv\Scripts\python.exe"
 $tools = Join-Path $root "ps3recomp\tools"
+$firmware = Join-Path $root "data\firmware"
 $meta = Join-Path $PSScriptRoot "meta\libsre"
 $out = Join-Path $PSScriptRoot "recompiled_prx\libsre"
 $env:TEMP = "E:\temp"
@@ -31,6 +33,14 @@ $codeEnd = "0x{0:X8}" -f ($lastStub + 0x20)
     --jobs ([Environment]::ProcessorCount) --output $out
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+$pics = @()
+foreach ($p in "flashMP3.pic", "flashATRAC.pic") {
+    $dst = Join-Path $firmware $p
+    $src = Join-Path $DevFlash "sys\external\$p"
+    if (-not (Test-Path $dst) -and (Test-Path $src)) { Copy-Item $src $dst }
+    if (Test-Path $dst) { $pics += "--pic"; $pics += $dst }
+}
+
 $spuOut = Join-Path $PSScriptRoot "recompiled_prx\libsre_spu"
 if (Test-Path $spuOut) { Remove-Item $spuOut -Recurse -Force }
 & $py (Join-Path $tools "lift_firmware_spu.py") --image (Join-Path $meta "libsre_image.bin") --base $Base --name libsre `
@@ -38,5 +48,5 @@ if (Test-Path $spuOut) { Remove-Item $spuOut -Recurse -Force }
     --body 0x23680:0x1E40:0xA00:0xA00:0x1C00 `
     --body 0x26300:0x3E30:0xA00:0xA00:0x3D20 `
     --body 0x2A180:0x3E30:0xA00:0xA00:0x3CF0 `
-    --out $spuOut
+    @pics --out $spuOut
 exit $LASTEXITCODE

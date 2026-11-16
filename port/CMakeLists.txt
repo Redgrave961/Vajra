@@ -53,7 +53,12 @@ add_custom_command(
 
 include("${PS3RECOMP_DIR}/cmake/PS3RecompSPU.cmake")
 ps3recomp_generate_spu("${CMAKE_CURRENT_BINARY_DIR}/generated_spu" ${PORT_SPU_INPUTS})
-set(SPU_SOURCES ${SPU_GENERATED_SOURCES} ${FIRMWARE_SPU_SOURCES} "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
+set(SPU_JOB_SOURCES "")
+if(PORT_LIBSRE)
+    list(GET PORT_SPU_INPUTS 0 PORT_EBOOT)
+    ps3recomp_generate_spu_jobs("${CMAKE_CURRENT_BINARY_DIR}/generated_spujobs" "${PORT_EBOOT}")
+endif()
+set(SPU_SOURCES ${SPU_GENERATED_SOURCES} ${SPU_JOB_SOURCES} ${FIRMWARE_SPU_SOURCES} "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
 
 add_executable(${PROJECT_NAME}
     "${PS3RECOMP_DIR}/runtime/ppu/tests/boot_main.cpp"
