@@ -11,3 +11,4 @@
 *.iso
 *.log
 __pycache__/
+/port/recompiled_prx/

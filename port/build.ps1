@@ -4,7 +4,8 @@ param(
     [string]$Lto = "thin",
     [string]$Arch = "native",
     [string]$Pgo = "",
-    [string]$Elf = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\dev_bdvd\PS3_GAME\USRDIR\EBOOT.elf")
+    [string]$Elf = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\dev_bdvd\PS3_GAME\USRDIR\EBOOT.elf"),
+    [switch]$Hle
 )
 $root = Split-Path $PSScriptRoot -Parent
 $port = $PSScriptRoot
@@ -35,6 +36,12 @@ if ($Pgo -eq "gen") {
     $cflags += " /clang:-fprofile-use=$($Pgo -replace '\\','/') /clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date"
 }
 
+$libsreOpt = "OFF"
+if (-not $Hle) {
+    if (-not (Test-Path (Join-Path $port "recompiled_prx\libsre_spu\sources.cmake"))) { "no lifted libsre: run lift_libsre.ps1, or pass -Hle"; exit 1 }
+    $libsreOpt = "ON"
+}
+
 & cmake -S $port -B $build -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl `
@@ -43,6 +50,7 @@ if ($Pgo -eq "gen") {
     "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=$lflags" `
     "-DPS3RECOMP_OPT_FLAG=$opt" `
     "-DPORT_SPU_INPUTS=$Elf" `
+    "-DPORT_LIBSRE=$libsreOpt" `
     "-DPS3RECOMP_DIR=$root\ps3recomp" `
     "-DPython3_EXECUTABLE=$root\venv\Scripts\python.exe"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
