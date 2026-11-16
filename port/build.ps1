@@ -4,8 +4,7 @@ param(
     [string]$Lto = "thin",
     [string]$Arch = "native",
     [string]$Pgo = "",
-    [string]$Elf = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\dev_bdvd\PS3_GAME\USRDIR\EBOOT.elf"),
-    [switch]$Hle
+    [string]$Elf = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\dev_bdvd\PS3_GAME\USRDIR\EBOOT.elf")
 )
 $root = Split-Path $PSScriptRoot -Parent
 $port = $PSScriptRoot
@@ -40,10 +39,8 @@ $vcpkg = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { "E:\tools\vcpkg" }
 $sdlPrefix = Join-Path $vcpkg "installed\x64-windows-static-md"
 if (-not (Test-Path (Join-Path $sdlPrefix "share\sdl3"))) { "SDL3 missing: $vcpkg\vcpkg install sdl3:x64-windows-static-md"; exit 1 }
 
-$libsreOpt = "OFF"
-if (-not $Hle) {
-    if (-not (Test-Path (Join-Path $port "recompiled_prx\libsre_spu\sources.cmake"))) { "no lifted libsre: run lift_libsre.ps1, or pass -Hle"; exit 1 }
-    $libsreOpt = "ON"
+foreach ($m in "libsre", "libresc", "libsre_spu") {
+    if (-not (Test-Path (Join-Path $port "recompiled_prx\$m"))) { "no lifted ${m}: run lift_firmware.ps1"; exit 1 }
 }
 
 & cmake -S $port -B $build -G Ninja `
@@ -54,7 +51,6 @@ if (-not $Hle) {
     "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=$lflags" `
     "-DPS3RECOMP_OPT_FLAG=$opt" `
     "-DPORT_SPU_INPUTS=$Elf" `
-    "-DPORT_LIBSRE=$libsreOpt" `
     "-DPS3RECOMP_PAD_SDL=ON" `
     "-DCMAKE_PREFIX_PATH=$($sdlPrefix -replace '\\','/')" `
     "-DPS3RECOMP_DIR=$root\ps3recomp" `

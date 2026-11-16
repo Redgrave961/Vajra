@@ -12,9 +12,8 @@ endif()
 
 set(PS3RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../ps3recomp" CACHE PATH "ps3recomp toolkit")
 set(RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/recompiled" CACHE PATH "Lifted PPU output (lift.ps1)")
-set(PRX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/recompiled_prx" CACHE PATH "Lifted firmware PRX output (lift_libsre.ps1)")
+set(PRX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/recompiled_prx" CACHE PATH "Lifted firmware PRX output (lift_firmware.ps1)")
 set(PORT_SPU_INPUTS "" CACHE STRING "Decrypted ELF(s) to discover and lift SPU programs from")
-option(PORT_LIBSRE "Run the lifted firmware libsre instead of the HLE SPURS library" ON)
 get_filename_component(PS3RECOMP_DIR "${PS3RECOMP_DIR}" ABSOLUTE)
 get_filename_component(RECOMP_DIR "${RECOMP_DIR}" ABSOLUTE)
 get_filename_component(PRX_DIR "${PRX_DIR}" ABSOLUTE)
@@ -28,17 +27,22 @@ endif()
 
 file(GLOB RECOMP_SOURCES CONFIGURE_DEPENDS "${RECOMP_DIR}/*.cpp")
 
+set(PRX_MODULES libsre libresc)
 set(PRX_SOURCES "")
-set(FIRMWARE_SPU_SOURCES "")
-if(PORT_LIBSRE)
-    if(NOT EXISTS "${PRX_DIR}/libsre/libsre_recomp.cpp" OR NOT EXISTS "${PRX_DIR}/libsre_spu/sources.cmake")
-        message(FATAL_ERROR "No lifted libsre in ${PRX_DIR}: run lift_libsre.ps1 or set -DPORT_LIBSRE=OFF")
+foreach(m IN LISTS PRX_MODULES)
+    if(NOT EXISTS "${PRX_DIR}/${m}/${m}_recomp.cpp")
+        message(FATAL_ERROR "No lifted ${m} in ${PRX_DIR}: run lift_firmware.ps1")
     endif()
-    set(PRX_SOURCES "${PRX_DIR}/libsre/libsre_recomp.cpp" "${PRX_DIR}/libsre/libsre_module.c")
-    include("${PRX_DIR}/libsre_spu/sources.cmake")
-    set(PS3RECOMP_SPU_RETURN_ENTRIES ON)
-    set(PS3RECOMP_SPU_GUEST_REGIONS ON)
+    list(APPEND PRX_SOURCES "${PRX_DIR}/${m}/${m}_recomp.cpp" "${PRX_DIR}/${m}/${m}_module.c")
+    set_source_files_properties("${PRX_DIR}/${m}/${m}_recomp.cpp" PROPERTIES INCLUDE_DIRECTORIES "${PRX_DIR}/${m}")
+endforeach()
+if(NOT EXISTS "${PRX_DIR}/libsre_spu/sources.cmake")
+    message(FATAL_ERROR "No lifted libsre SPU code in ${PRX_DIR}: run lift_firmware.ps1")
 endif()
+set(FIRMWARE_SPU_SOURCES "")
+include("${PRX_DIR}/libsre_spu/sources.cmake")
+set(PS3RECOMP_SPU_RETURN_ENTRIES ON)
+set(PS3RECOMP_SPU_GUEST_REGIONS ON)
 
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk" EXCLUDE_FROM_ALL)
 
@@ -53,11 +57,8 @@ add_custom_command(
 
 include("${PS3RECOMP_DIR}/cmake/PS3RecompSPU.cmake")
 ps3recomp_generate_spu("${CMAKE_CURRENT_BINARY_DIR}/generated_spu" ${PORT_SPU_INPUTS})
-set(SPU_JOB_SOURCES "")
-if(PORT_LIBSRE)
-    list(GET PORT_SPU_INPUTS 0 PORT_EBOOT)
-    ps3recomp_generate_spu_jobs("${CMAKE_CURRENT_BINARY_DIR}/generated_spujobs" "${PORT_EBOOT}")
-endif()
+list(GET PORT_SPU_INPUTS 0 PORT_EBOOT)
+ps3recomp_generate_spu_jobs("${CMAKE_CURRENT_BINARY_DIR}/generated_spujobs" "${PORT_EBOOT}")
 set(SPU_SOURCES ${SPU_GENERATED_SOURCES} ${SPU_JOB_SOURCES} ${FIRMWARE_SPU_SOURCES} "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
 
 add_executable(${PROJECT_NAME}
@@ -84,11 +85,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${PS3RECOMP_DIR}/runtime/prx"
     "${PS3RECOMP_DIR}/libs/video")
 
-if(PORT_LIBSRE)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE PORT_HAVE_LIBSRE)
-endif()
-
-target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime dbghelp user32 gdi32 winmm)
+target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime dbghelp winmm)
 set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
 
 target_compile_options(${PROJECT_NAME} PRIVATE
@@ -98,10 +95,6 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     /clang:-ffp-contract=off)
 
 set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "/w;/bigobj")
-if(PORT_LIBSRE)
-    set_source_files_properties("${PRX_DIR}/libsre/libsre_recomp.cpp" PROPERTIES
-        INCLUDE_DIRECTORIES "${PRX_DIR}/libsre")
-endif()
 set_source_files_properties(${SPU_SOURCES} PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
     COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT
