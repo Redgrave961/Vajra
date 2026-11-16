@@ -1,7 +1,7 @@
 /data/
 /analysis/
 /venv/
-/port/build/
+/port/build*/
 /port/recompiled/
 /port/meta/
 *.elf

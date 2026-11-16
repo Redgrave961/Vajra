@@ -4,11 +4,12 @@ param(
     [string]$Lto = "thin",
     [string]$Arch = "native",
     [string]$Pgo = "",
-    [string]$Elf = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\dev_bdvd\PS3_GAME\USRDIR\EBOOT.elf")
+    [string]$Elf = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\dev_bdvd\PS3_GAME\USRDIR\EBOOT.elf"),
+    [string]$BuildDir = ""
 )
 $root = Split-Path $PSScriptRoot -Parent
 $port = $PSScriptRoot
-$build = Join-Path $port "build"
+$build = if ($BuildDir) { $BuildDir } else { Join-Path $port "build" }
 $env:TEMP = "E:\temp"
 $env:TMP = "E:\temp"
 
