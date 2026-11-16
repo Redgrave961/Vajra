@@ -36,6 +36,10 @@ if ($Pgo -eq "gen") {
     $cflags += " /clang:-fprofile-use=$($Pgo -replace '\\','/') /clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date"
 }
 
+$vcpkg = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { "E:\tools\vcpkg" }
+$sdlPrefix = Join-Path $vcpkg "installed\x64-windows-static-md"
+if (-not (Test-Path (Join-Path $sdlPrefix "share\sdl2"))) { "SDL2 missing: $vcpkg\vcpkg install sdl2:x64-windows-static-md"; exit 1 }
+
 $libsreOpt = "OFF"
 if (-not $Hle) {
     if (-not (Test-Path (Join-Path $port "recompiled_prx\libsre_spu\sources.cmake"))) { "no lifted libsre: run lift_libsre.ps1, or pass -Hle"; exit 1 }
@@ -51,6 +55,8 @@ if (-not $Hle) {
     "-DPS3RECOMP_OPT_FLAG=$opt" `
     "-DPORT_SPU_INPUTS=$Elf" `
     "-DPORT_LIBSRE=$libsreOpt" `
+    "-DPS3RECOMP_PAD_SDL2=ON" `
+    "-DCMAKE_PREFIX_PATH=$($sdlPrefix -replace '\\','/')" `
     "-DPS3RECOMP_DIR=$root\ps3recomp" `
     "-DPython3_EXECUTABLE=$root\venv\Scripts\python.exe"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
