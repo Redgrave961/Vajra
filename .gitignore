@@ -10,3 +10,4 @@
 *.pkg
 *.iso
 *.log
+__pycache__/
