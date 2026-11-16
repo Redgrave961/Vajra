@@ -38,7 +38,7 @@ if ($Pgo -eq "gen") {
 
 $vcpkg = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { "E:\tools\vcpkg" }
 $sdlPrefix = Join-Path $vcpkg "installed\x64-windows-static-md"
-if (-not (Test-Path (Join-Path $sdlPrefix "share\sdl2"))) { "SDL2 missing: $vcpkg\vcpkg install sdl2:x64-windows-static-md"; exit 1 }
+if (-not (Test-Path (Join-Path $sdlPrefix "share\sdl3"))) { "SDL3 missing: $vcpkg\vcpkg install sdl3:x64-windows-static-md"; exit 1 }
 
 $libsreOpt = "OFF"
 if (-not $Hle) {
@@ -55,7 +55,7 @@ if (-not $Hle) {
     "-DPS3RECOMP_OPT_FLAG=$opt" `
     "-DPORT_SPU_INPUTS=$Elf" `
     "-DPORT_LIBSRE=$libsreOpt" `
-    "-DPS3RECOMP_PAD_SDL2=ON" `
+    "-DPS3RECOMP_PAD_SDL=ON" `
     "-DCMAKE_PREFIX_PATH=$($sdlPrefix -replace '\\','/')" `
     "-DPS3RECOMP_DIR=$root\ps3recomp" `
     "-DPython3_EXECUTABLE=$root\venv\Scripts\python.exe"
