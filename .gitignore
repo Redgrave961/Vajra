@@ -1,0 +1,12 @@
+/data/
+/analysis/
+/venv/
+/port/build/
+/port/recompiled/
+/port/meta/
+*.elf
+*.self
+*.sprx
+*.pkg
+*.iso
+*.log
