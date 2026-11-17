@@ -16,6 +16,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
+#else
+#include <sys/mman.h>
 #endif
 
 extern "C" {
@@ -287,8 +289,9 @@ int main(int argc, char** argv)
     vm_base = static_cast<uint8_t*>(VirtualAlloc(nullptr, k_vm_size, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE));
     ppu_vm_size = 0;
 #else
-    vm_base = static_cast<uint8_t*>(std::calloc(1, 0xE0000000u));
-    ppu_vm_size = 0xE0000000u;
+    void* vm = mmap(nullptr, k_vm_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    vm_base = vm == MAP_FAILED ? nullptr : static_cast<uint8_t*>(vm);
+    ppu_vm_size = 0;
 #endif
     if (!vm_base) {
         std::printf("guest memory reservation failed\n");
