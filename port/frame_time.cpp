@@ -1,20 +1,19 @@
-#include "ppu_recomp.h"
+#include "guest.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <iterator>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
-extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
-extern "C" void ps3_indirect_call(ppu_context* ctx);
-
 namespace {
 
 constexpr uint32_t k_delta_seconds = 0x019B8690;
+constexpr uint32_t k_current_time = 0x019FED10;
 constexpr uint32_t k_gnatives = 0x01A01824;
 constexpr uint32_t k_gnames = 0x01A0B014;
 constexpr uint32_t k_gprop_addr = 0x019B1BD4;
@@ -25,8 +24,11 @@ constexpr uint8_t k_empty_parm = 0x4A;
 constexpr uint32_t k_frame = 0x100;
 constexpr uint32_t k_slot_bits = 10;
 constexpr uint32_t k_slot_mask = (1u << k_slot_bits) - 1;
+constexpr uint32_t k_timers = 0xA0;
+constexpr uint32_t k_timer_size = 0x1C;
+constexpr double k_tick = 1.0 / 30;
 
-enum class Mode : uint8_t { Add, Ratio, Press, Lerp, LerpRev, Homing };
+enum class Mode : uint8_t { Add, Ratio, Press, Lerp, LerpRev, Homing, SmaReset, SmaRate, Scale, Approach, LerpScale, LerpDt, Ramp, Clamp, TimerTick };
 
 struct Site {
     const char* path;
@@ -59,28 +61,25 @@ std::atomic<uint32_t> g_version{0};
 std::mutex g_writer;
 uint32_t g_site_code[std::size(k_sites)];
 thread_local bool t_rotation_site;
+thread_local bool t_timer_site;
+thread_local std::unordered_map<uint32_t, std::deque<float>> t_frame_times;
 
-double tick_scale()
+double read_f64(uint32_t ea)
 {
-    const uint64_t bits = vm_read64(k_delta_seconds);
-    double seconds;
-    std::memcpy(&seconds, &bits, sizeof seconds);
-    return seconds * 30.0;
-}
-
-uint32_t to_bits(float v)
-{
-    uint32_t bits;
-    std::memcpy(&bits, &v, sizeof bits);
-    return bits;
-}
-
-float from_bits(uint32_t bits)
-{
-    float v;
+    const uint64_t bits = vm_read64(ea);
+    double v;
     std::memcpy(&v, &bits, sizeof v);
     return v;
 }
+
+}
+
+double tick_scale()
+{
+    return read_f64(k_delta_seconds) * 30.0;
+}
+
+namespace {
 
 float read_f32(uint32_t ea)
 {
@@ -91,35 +90,6 @@ void write_f32(uint32_t ea, float v)
 {
     vm_write32(ea, to_bits(v));
 }
-
-void drain(ppu_context* ctx)
-{
-    while (g_trampoline_fn) {
-        void (*next)(void*) = g_trampoline_fn;
-        g_trampoline_fn = nullptr;
-        next(ctx);
-    }
-}
-
-void run(void (*body)(ppu_context*), ppu_context* ctx)
-{
-    body(ctx);
-    drain(ctx);
-}
-
-struct GuestFrame {
-    ppu_context* ctx;
-    uint64_t caller;
-    uint32_t base;
-
-    explicit GuestFrame(ppu_context* c) : ctx(c), caller(c->gpr[1]), base((uint32_t)c->gpr[1] - k_frame)
-    {
-        vm_write64(base, caller);
-        ctx->gpr[1] = base;
-    }
-
-    ~GuestFrame() { ctx->gpr[1] = caller; }
-};
 
 uint32_t script(uint32_t stack)
 {
@@ -138,9 +108,7 @@ void step(ppu_context* ctx, uint32_t stack, uint32_t out)
     ctx->gpr[3] = self;
     ctx->gpr[4] = stack;
     ctx->gpr[5] = out;
-    ctx->ctr = vm_read32(function);
-    ps3_indirect_call(ctx);
-    drain(ctx);
+    guest_call(ctx, function);
 }
 
 uint32_t probe(ppu_context* ctx, uint32_t stack, uint32_t code, uint32_t out)
@@ -242,26 +210,37 @@ bool object_path(uint32_t object, std::string& path)
 
 float corrected_alpha(Mode mode, float alpha, double k)
 {
-    if (mode == Mode::Homing)
+    if (mode == Mode::Homing || mode == Mode::Scale)
         return (float)(alpha * k);
-    if (!(alpha > 0 && alpha < 1))
+    const double a = mode == Mode::LerpDt ? alpha / k : alpha;
+    if (!(a > 0 && a < 1))
         return alpha;
-    return (float)(mode == Mode::Lerp ? 1 - std::pow(1 - (double)alpha, k) : std::pow((double)alpha, k));
+    return (float)(mode == Mode::LerpRev ? std::pow(a, k) : 1 - std::pow(1 - a, k));
 }
 
 uint32_t float_step(Mode mode, uint32_t before_bits, uint32_t after_bits, double k, double press)
 {
-    const double b = from_bits(before_bits), a = from_bits(after_bits);
-    return to_bits((float)(mode == Mode::Ratio ? (b != 0 && a / b >= 0 ? b * std::pow(a / b, k) : a)
+    const double b = from_bits(before_bits), a = from_bits(after_bits), c = a / b;
+    return to_bits((float)(mode == Mode::Ratio ? (b != 0 && c >= 0 ? b * std::pow(c, k) : a)
+                           : mode == Mode::LerpScale ? (c > 0 && c < 1 ? b * (1 - std::pow(1 - c, k)) : a)
                            : mode == Mode::Press ? a + press * (1 - k)
                                                  : b + (a - b) * k));
 }
 
-uint32_t whole_step(uint64_t key, uint32_t before, uint32_t after, double k)
+double whole_delta(const Site* site, int32_t delta, double k, double press)
+{
+    if (site->mode == Mode::Ramp)
+        return delta * k + press * k * (1 - k) / 2;
+    if (site->mode == Mode::Clamp && std::abs(delta) < (int32_t)site->extra)
+        return std::copysign(std::min<double>(std::abs(delta), site->extra * k), delta);
+    return delta * k;
+}
+
+uint32_t whole_step(uint64_t key, uint32_t before, double delta)
 {
     static thread_local std::unordered_map<uint64_t, double> carry;
     double& acc = carry[key];
-    acc += (int32_t)(after - before) * k;
+    acc += delta;
     const double whole = std::floor(acc);
     acc -= whole;
     return before + (uint32_t)(int64_t)whole;
@@ -273,8 +252,12 @@ void compound(void (*body)(ppu_context*), ppu_context* ctx, const Shape& shape)
     const Site* site = lookup(stack);
     if (!site)
         return run(body, ctx);
+    if (site->mode == Mode::SmaReset) {
+        t_frame_times.erase(vm_read32(stack + 0x14));
+        return run(body, ctx);
+    }
     const uint64_t self = ctx->gpr[3], result = ctx->gpr[5];
-    const GuestFrame frame(ctx);
+    const GuestFrame frame(ctx, k_frame);
     const uint32_t scratch = frame.base + 0x70;
     const uint32_t lvalue = probe(ctx, stack, vm_read32(stack + 0x18), scratch);
     const uint32_t old_at = lvalue ? lvalue : scratch;
@@ -287,15 +270,16 @@ void compound(void (*body)(ppu_context*), ppu_context* ctx, const Shape& shape)
     run(body, ctx);
     const double k = tick_scale();
     double press = 0;
-    if (site->mode == Mode::Press) {
+    if (site->mode == Mode::Press || site->mode == Mode::Ramp) {
         probe(ctx, stack, script(stack) + site->extra, scratch);
-        press = read_f32(scratch);
+        press = shape.integer ? (double)(int32_t)vm_read32(scratch) : read_f32(scratch);
     }
+    const uint64_t key = (uint64_t)vm_read32(stack + 0x14) << 32 | (uint32_t)(site - k_sites) << 2;
     const uint32_t new_at = shape.returns_new ? (uint32_t)result : lvalue;
     for (uint32_t i = 0; i < shape.count; ++i) {
         const uint32_t after = vm_read32(new_at + 4 * i);
         const uint32_t value = shape.integer
-            ? whole_step((uint64_t)(lvalue + 4 * i) << 32 | (uint32_t)(site - k_sites), before[i], after, k)
+            ? whole_step(key | i, before[i], whole_delta(site, (int32_t)(after - before[i]), k, press))
             : float_step(site->mode, before[i], after, k, press);
         if (shape.assigns && lvalue)
             vm_write32(lvalue + 4 * i, value);
@@ -339,6 +323,13 @@ void homing(ppu_context* ctx, uint32_t stack, const Site* site, uint32_t directi
         write_f32(result + 4 * i, y[i] - x[i]);
 }
 
+float approach(ppu_context* ctx, uint32_t stack, const Site* site, float step, double k, uint32_t scratch)
+{
+    probe(ctx, stack, script(stack) + site->extra, scratch);
+    const double distance = std::hypot(read_f32(scratch), read_f32(scratch + 4)), c = step / distance;
+    return c > 0 && c < 1 ? (float)(distance * (1 - std::pow(1 - c, k))) : step;
+}
+
 void lerp_op(void (*body)(ppu_context*), ppu_context* ctx, const char* signature)
 {
     const uint32_t stack = (uint32_t)ctx->gpr[4];
@@ -346,7 +337,7 @@ void lerp_op(void (*body)(ppu_context*), ppu_context* ctx, const char* signature
     if (!site)
         return run(body, ctx);
     const uint64_t self = ctx->gpr[3], result = ctx->gpr[5];
-    const GuestFrame frame(ctx);
+    const GuestFrame frame(ctx, k_frame);
     const uint32_t values = frame.base + 0x70, stream = values + 0x20, proxy = stream + 0x30;
     bool empty = false;
     uint32_t alpha = 0, at = values;
@@ -365,7 +356,8 @@ void lerp_op(void (*body)(ppu_context*), ppu_context* ctx, const char* signature
     const double k = tick_scale();
     if (site->mode == Mode::Homing && k > 1)
         return homing(ctx, stack, site, values, read_f32(alpha), k, (uint32_t)result, stream);
-    write_f32(alpha, corrected_alpha(site->mode, read_f32(alpha), k));
+    write_f32(alpha, site->mode == Mode::Approach ? approach(ctx, stack, site, read_f32(alpha), k, stream)
+                                                  : corrected_alpha(site->mode, read_f32(alpha), k));
     uint32_t out = stream;
     at = values;
     for (const char* p = signature; *p; at += param_size(*p++)) {
@@ -411,6 +403,20 @@ void velocity_decay(void (*body)(ppu_context*), ppu_context* ctx, uint32_t facto
     }
 }
 
+float window_frame_time(uint32_t owner, uint32_t length, float dt)
+{
+    std::deque<float>& times = t_frame_times[owner];
+    times.push_back(dt);
+    while (times.size() > length)
+        times.pop_front();
+    while (times.size() < length)
+        times.push_front(times.front());
+    double sum = 0, weight = 0;
+    for (const float time : times)
+        sum += time * ++weight;
+    return (float)(2 * sum / (weight * (weight + 1)));
+}
+
 void mash_meter(void (*body)(ppu_context*), ppu_context* ctx, uint32_t drain_field, uint32_t press_field)
 {
     const uint32_t self = (uint32_t)ctx->gpr[3];
@@ -423,6 +429,39 @@ void mash_meter(void (*body)(ppu_context*), ppu_context* ctx, uint32_t drain_fie
     write_f32(self + press_field, press);
 }
 
+struct Timer {
+    double due;
+    double armed;
+    double dilation = 1;
+    bool chained;
+};
+
+double timer_rate(uint32_t actor, uint64_t name, uint32_t object, double rate)
+{
+    static thread_local std::unordered_map<uint64_t, Timer> timers;
+    float armed_rate = 0, count = 0;
+    for (uint32_t at = vm_read32(actor + k_timers), end = at + vm_read32(actor + k_timers + 4) * k_timer_size; at != end; at += k_timer_size)
+        if (vm_read64(at + 4) == name && vm_read32(at + 0x18) == object) {
+            armed_rate = read_f32(at + 0xC);
+            count = read_f32(at + 0x10);
+        }
+    const double now = read_f64(k_current_time);
+    const bool fired = armed_rate > 0 && count > armed_rate;
+    Timer& timer = timers[(uint64_t)actor << 32 | (uint32_t)(name >> 32)];
+    const bool measured = fired && timer.chained && now > timer.armed;
+    if (measured)
+        timer.dilation = count / (now - timer.armed);
+    timer.due = (fired && now > timer.armed ? std::max(timer.due, now - k_tick) : now) + (std::floor(rate / k_tick / timer.dilation) + 1) * k_tick;
+    timer.armed = now;
+    timer.chained = fired;
+    return std::max((timer.due - now - (measured ? k_tick / 4 : k_tick * 3 / 4)) * timer.dilation, 1e-6);
+}
+
+}
+
+bool frame_site(uint32_t stack)
+{
+    return lookup(stack) != nullptr;
 }
 
 void func_00078E88(ppu_context* ctx)
@@ -491,6 +530,11 @@ void func_00057E28(ppu_context* ctx)
     compound(func_00057E28_lifted, ctx, k_post_increment);
 }
 
+void func_00057A34(ppu_context* ctx)
+{
+    compound(func_00057A34_lifted, ctx, k_int);
+}
+
 void func_0005B730(ppu_context* ctx)
 {
     lerp_op(func_0005B730_lifted, ctx, "ffa");
@@ -511,6 +555,11 @@ void func_0005188C(ppu_context* ctx)
     lerp_op(func_0005188C_lifted, ctx, "va");
 }
 
+void func_0004E3B4(ppu_context* ctx)
+{
+    lerp_op(func_0004E3B4_lifted, ctx, "ra");
+}
+
 void func_00062E98(ppu_context* ctx)
 {
     const uint32_t stack = (uint32_t)ctx->gpr[4];
@@ -518,7 +567,7 @@ void func_00062E98(ppu_context* ctx)
     if (!site)
         return run(func_00062E98_lifted, ctx);
     const uint32_t result = (uint32_t)ctx->gpr[5];
-    const GuestFrame frame(ctx);
+    const GuestFrame frame(ctx, k_frame);
     const uint32_t a = frame.base + 0x70, b = a + 0x10, alpha = b + 0x10, shortest = alpha + 4, out = a + 0x30;
     step(ctx, stack, a);
     step(ctx, stack, b);
@@ -534,6 +583,21 @@ void func_00062E98(ppu_context* ctx)
     run(vm_read32(shortest) ? func_00086450 : func_000865C8, ctx);
     for (uint32_t i = 0; i < 16; i += 4)
         vm_write32(result + i, vm_read32(out + i));
+}
+
+void func_00058AE0(ppu_context* ctx)
+{
+    const uint32_t stack = (uint32_t)ctx->gpr[4];
+    const Site* site = lookup(stack);
+    if (!site)
+        return run(func_00058AE0_lifted, ctx);
+    const uint32_t result = (uint32_t)ctx->gpr[5], owner = vm_read32(stack + 0x14);
+    const GuestFrame frame(ctx, k_frame);
+    const uint32_t a = frame.base + 0x70, b = a + 4;
+    step(ctx, stack, a);
+    step(ctx, stack, b);
+    vm_write32(stack + 0x18, vm_read32(stack + 0x18) + 1);
+    write_f32(result, read_f32(a) / window_frame_time(owner, vm_read32(owner + site->extra + 4), read_f32(b)));
 }
 
 void func_014F1F64(ppu_context* ctx)
@@ -612,6 +676,23 @@ void func_008CC0B0(ppu_context* ctx)
 void func_008D1048(ppu_context* ctx)
 {
     velocity_decay(func_008D1048_lifted, ctx, 0x008D1040);
+}
+
+void func_011368C4(ppu_context* ctx)
+{
+    t_timer_site = lookup((uint32_t)ctx->gpr[4]);
+    run(func_011368C4_lifted, ctx);
+    t_timer_site = false;
+}
+
+void func_00498718(ppu_context* ctx)
+{
+    if (t_timer_site) {
+        t_timer_site = false;
+        const uint32_t actor = (uint32_t)ctx->gpr[3];
+        ctx->fpr[1] = (float)timer_rate(actor, ctx->gpr[6], ctx->gpr[7] ? (uint32_t)ctx->gpr[7] : actor, ctx->fpr[1]);
+    }
+    run(func_00498718_lifted, ctx);
 }
 
 void func_008C9B20(ppu_context* ctx)

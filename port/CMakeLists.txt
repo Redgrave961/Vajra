@@ -61,9 +61,53 @@ list(GET PORT_SPU_INPUTS 0 PORT_EBOOT)
 ps3recomp_generate_spu_jobs("${CMAKE_CURRENT_BINARY_DIR}/generated_spujobs" "${PORT_EBOOT}")
 set(SPU_SOURCES ${SPU_GENERATED_SOURCES} ${SPU_JOB_SOURCES} ${FIRMWARE_SPU_SOURCES} "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
 
+get_filename_component(PORT_GAME_DIR "${PORT_EBOOT}" DIRECTORY)
+get_filename_component(PORT_GAME_DIR "${PORT_GAME_DIR}" DIRECTORY)
+set(PORT_ICON "${CMAKE_CURRENT_BINARY_DIR}/AsurasWrath.ico")
+set(PORT_RC "${CMAKE_CURRENT_BINARY_DIR}/AsurasWrath.rc")
+add_custom_command(
+    OUTPUT "${PORT_ICON}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_icon.py" "${PORT_GAME_DIR}/ICON0.PNG" "${PORT_ICON}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_icon.py" "${PORT_GAME_DIR}/ICON0.PNG"
+    COMMENT "Building the icon from the game's ICON0.PNG")
+file(WRITE "${PORT_RC}"
+"1 ICON \"AsurasWrath.ico\"
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK \"StringFileInfo\"
+  BEGIN
+    BLOCK \"040904B0\"
+    BEGIN
+      VALUE \"FileDescription\", \"Asura's Wrath\"
+      VALUE \"ProductName\", \"Asura's Wrath\"
+      VALUE \"InternalName\", \"AsurasWrath\"
+      VALUE \"OriginalFilename\", \"AsurasWrath.exe\"
+      VALUE \"FileVersion\", \"1.0.0.0\"
+      VALUE \"ProductVersion\", \"1.0.0.0\"
+    END
+  END
+  BLOCK \"VarFileInfo\"
+  BEGIN
+    VALUE \"Translation\", 0x409, 1200
+  END
+END
+")
+set_source_files_properties("${PORT_RC}" PROPERTIES OBJECT_DEPENDS "${PORT_ICON}")
 add_executable(${PROJECT_NAME}
+    "${PORT_RC}"
     main.cpp
     frame_time.cpp
+    native_frame.cpp
+    native_octree.cpp
+    native_engine.cpp
+    native_fence.cpp
+    native_script.cpp
+    native_script_core.cpp
+    pc_options.cpp
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_hle.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"
@@ -87,7 +131,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${PS3RECOMP_DIR}/libs/video")
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime dbghelp winmm)
-set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
+set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX WIN32_EXECUTABLE TRUE OUTPUT_NAME AsurasWrath)
+target_link_options(${PROJECT_NAME} PRIVATE /ENTRY:mainCRTStartup)
 
 target_compile_options(${PROJECT_NAME} PRIVATE
     /W4 -Wno-unused-parameter

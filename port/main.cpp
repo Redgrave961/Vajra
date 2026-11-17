@@ -1,10 +1,6 @@
-#include "ppu_recomp.h"
+#include "guest.h"
 #include "win32_compat.h"
-
-#ifndef PPU_CONTEXT_H
-#define PPU_CONTEXT_H
-#endif
-
+#include "pc_options.h"
 #include "rsx_core.h"
 #include "vk/rsx_vk.h"
 
@@ -12,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -41,7 +39,6 @@ int ppu_run(uint32_t entry_opd, uint32_t stack_top);
 void ppu_report_guest_lrs(void);
 void cellGame_init_boot(const char* vfs_root);
 const char* cellGame_get_title(void);
-void np_psnr_setup(const char* username, const char* server);
 
 typedef void (*ps3_guest_caller_fn)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 extern ps3_guest_caller_fn g_ps3_guest_caller;
@@ -257,6 +254,91 @@ DWORD WINAPI debug_console(LPVOID param)
 extern "C" char* (__cdecl* __imp_getenv)(const char*) = cached_getenv;
 #endif
 
+namespace {
+
+std::filesystem::path executable_dir()
+{
+#ifdef _WIN32
+    wchar_t path[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    return std::filesystem::path(std::wstring(path, n)).parent_path();
+#else
+    return std::filesystem::read_symlink("/proc/self/exe").parent_path();
+#endif
+}
+
+void default_env(const char* name, const std::filesystem::path& value)
+{
+#ifdef _WIN32
+    if (GetEnvironmentVariableA(name, nullptr, 0)) return;
+    SetEnvironmentVariableW(std::filesystem::path(name).c_str(), value.c_str());
+#else
+    setenv(name, value.c_str(), 0);
+#endif
+}
+
+std::string g_eboot;
+
+bool skipped_intro(uint32_t name)
+{
+    static const char* const k_intros[] = {
+        "00_AUTOSAVE",     "00_AUTOSAVE_DEU", "00_AUTOSAVE_ESN", "00_AUTOSAVE_FRA",  "00_AUTOSAVE_ITA",
+        "00_AUTOSAVE_JPN", "00_EXAMINATION",  "20_BINKLOGO",     "20_SPEEDTREELOGO", "20_UE3LOGO",
+        "30_GORE",         "40_CAPCOMLOGO",   "40_CC2LOGO",
+    };
+    for (const char* intro : k_intros) {
+        uint32_t i = 0;
+        for (uint16_t c; intro[i] && (c = vm_read16(name + 2 * i)) && (c >= 'a' && c <= 'z' ? c - 32 : c) == (uint8_t)intro[i]; i++) {}
+        if (!intro[i] && !vm_read16(name + 2 * i)) return true;
+    }
+    return false;
+}
+
+bool resolve_layout(const std::filesystem::path& exe)
+{
+    const std::filesystem::path eboot = std::filesystem::path("dev_bdvd") / "PS3_GAME" / "USRDIR" / "EBOOT.elf";
+    for (std::filesystem::path dir = exe; ; dir = dir.parent_path()) {
+        const std::filesystem::path data = dir / "data";
+        if (std::filesystem::exists(data / eboot)) {
+            default_env("PS3_VFS_ROOT", data / "dev_bdvd");
+            default_env("PS3_HDD0_ROOT", data / "dev_hdd0");
+            default_env("PS3_HDD1_ROOT", data / "dev_hdd1");
+            default_env("PS3_GAMEDATA_ROOT", data);
+            default_env("PS3_DEV_FLASH", data / "dev_flash");
+            default_env("PS3_VERBOSE", "0");
+            g_eboot = (data / eboot).string();
+            return true;
+        }
+        if (dir == dir.parent_path()) return false;
+    }
+}
+
+#ifdef _WIN32
+void attach_log(const std::filesystem::path& exe)
+{
+    const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    if (err && err != INVALID_HANDLE_VALUE) return;
+    const std::string log = (exe / "asura.log").string();
+    std::freopen(log.c_str(), "w", stderr);
+    std::freopen(log.c_str(), "a", stdout);
+}
+#endif
+
+}
+
+void func_0013A02C(ppu_context* ctx)
+{
+    const uint32_t player = (uint32_t)ctx->gpr[3];
+    if (!skipped_intro((uint32_t)ctx->gpr[6])) return run(func_0013A02C_lifted, ctx);
+    const uint32_t started = vm_read32(player + 0xC);
+    ctx->gpr[3] = started;
+    guest_call(ctx, vm_read32(vm_read32(started) + 0xC));
+    ctx->gpr[3] = player;
+    ctx->gpr[4] = 1;
+    run(func_0013B2E0, ctx);
+    ctx->gpr[3] = 1;
+}
+
 void unlock_frame_rate()
 {
 #ifdef _WIN32
@@ -276,26 +358,23 @@ void unlock_frame_rate()
 }
 int main(int argc, char** argv)
 {
-    unlock_frame_rate();
+    const std::filesystem::path exe = executable_dir();
+#ifdef _WIN32
+    attach_log(exe);
+#endif
+    const bool found = resolve_layout(exe);
+    if (pc_options_boot()) unlock_frame_rate();
     const char* elf = nullptr;
-    const char* username = nullptr;
-    const char* psnr = nullptr;
-    for (int i = 1; i < argc; i++) {
-        const char* a = argv[i];
-        const char** flag = !std::strncmp(a, "--username", 10) ? &username : !std::strncmp(a, "--psnr", 6) ? &psnr : nullptr;
-        if (!flag) {
-            if (!elf) elf = a;
-            continue;
-        }
-        if (const char* eq = std::strchr(a, '=')) *flag = eq + 1;
-        else if (i + 1 < argc) *flag = argv[++i];
-    }
+    if (argc > 1) elf = argv[1];
+    if (!elf && found) elf = g_eboot.c_str();
     if (!elf) {
-        std::printf("usage: %s <EBOOT.elf> [--username NAME] [--psnr host[:port]]\n", argv[0]);
+        std::fprintf(stderr, "game data not found: expected data\\dev_bdvd\\PS3_GAME\\USRDIR\\EBOOT.elf next to %s or a parent folder\n", argv[0]);
+#ifdef _WIN32
+        MessageBoxA(nullptr, "Game data not found. Place the data folder (data\\dev_bdvd\\PS3_GAME\\USRDIR\\EBOOT.elf) next to the game or in a parent folder.", "Asura's Wrath", MB_OK | MB_ICONERROR);
+#endif
         return 2;
     }
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    np_psnr_setup(username, psnr);
 
 #ifdef _WIN32
     timeBeginPeriod(1);

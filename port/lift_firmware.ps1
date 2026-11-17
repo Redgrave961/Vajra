@@ -1,6 +1,6 @@
 param(
     [string]$Firmware = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\firmware"),
-    [string]$DevFlash = $(if ($env:PS3_DEV_FLASH) { $env:PS3_DEV_FLASH } else { "E:\RPCS3\dev_flash" })
+    [string]$DevFlash = $(if ($env:PS3_DEV_FLASH) { $env:PS3_DEV_FLASH } else { Join-Path $PSScriptRoot "..\data\dev_flash" })
 )
 $root = Split-Path $PSScriptRoot -Parent
 $py = Join-Path $root "venv\Scripts\python.exe"
