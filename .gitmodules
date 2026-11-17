@@ -1,0 +1,3 @@
+[submodule "ps3recomp"]
+	path = ps3recomp
+	url = https://github.com/Redgrave961/ps3recomp.git
