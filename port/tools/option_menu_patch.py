@@ -474,7 +474,6 @@ def pause_cycle_set_param(g):
     label = cycle_select(g, p, active)
     if_(g, get(THIS, 'm_active'), lambda g: g.stmt(store(state, 'on')))
     g.emit(setm(get(THIS, 'mcInst_TextL', 'mcInst_Text', 'mcInst_Text'), 'text', label))
-    g.emit(setm(get(THIS, 'mcInst_TextL'), '_visible', True))
     g.emit(setm(get(THIS, 'mcInst_TextR'), '_visible', False))
     g.emit(setm(get(THIS, 'mcInst_Cursor'), '_visible', False))
     g.stmt(call(get(THIS, 'mcInst_TextL'), 'gotoAndPlay', state))
@@ -487,6 +486,18 @@ def pause_page_ctor(g):
 
 
 def pause_page_init(g):
+    n, i = R(2), R(3)
+    g.stmt(store(n, ei('PCOpt_Rows')))
+    loop(g, i, n, lambda g: g.stmt(call(THIS, 'attachMovie', 'TextR', add('mcInst_Sel', add(i, 1)),
+                                        call(THIS, 'getNextHighestDepth'))))
+
+
+def pause_page_active(g):
+    if_(g, eq(get(THIS, 'm_details', 'length'), 0), pause_page_fill)
+    base_call(PM, 'DetailCamera', 'Active')(g)
+
+
+def pause_page_fill(g):
     n, i, item, s, count, getf, param, on, off = (R(k) for k in range(2, 11))
     page = get(PM, 'DetailGraphics')
     g.stmt(store(n, ei('PCOpt_Rows')))
@@ -505,21 +516,13 @@ def pause_page_init(g):
         g.emit(setm(get(s, 'mcInst_TextL'), '_x', 0))
 
     def row(g):
-        g.stmt(store(item, call(THIS, 'attachMovie', 'TextR', add('mcInst_Sel', add(i, 1)), call(THIS, 'getNextHighestDepth'))))
+        g.stmt(store(item, member(THIS, add('mcInst_Sel', add(i, 1)))))
         row_values(g, i, count, getf, param)
         if_(g, eq(count, 0), toggle, cycle)
         g.stmt(call(THIS, 'AddDetail', get(PM, 'OptionSelectItem', 'TYPE_CHOICE'), ei('PCOpt_Title', i), on, off,
                     ei('PCOpt_Help', i), add('PCOpt_Set', i), getf))
 
-        def reveal(g):
-            for side in ('mcInst_TextL', 'mcInst_TextR'):
-                g.emit(setm(get(item, 'mcInst_Select', side), '_visible', True))
-
-        if_(g, eq(count, 0), reveal)
-
     loop(g, i, n, row)
-    g.emit(setm(THIS, 'm_cursor', 0))
-    g.stmt(call(THIS, 'Layout'))
 
 
 def pause_selector_init(g):
@@ -648,7 +651,8 @@ def pause_tags():
     define_class(g, PM, 'DetailGraphics', 'DetailCamera', 2, pause_page_ctor)
     g.emit(setm(get(PM, 'DetailGraphics'), 'CycleSetParam', func(['Prm', 'bActive', 'bOpen'], 6, pause_cycle_set_param)))
     g.emit(setm(get(PM, 'DetailGraphics'), 'CycleParamMax', func([], 2, lambda g: ret(g, get(THIS, 'm_count')))))
-    method(g, PM, 'DetailGraphics', 'Init', [], 11, pause_page_init)
+    method(g, PM, 'DetailGraphics', 'Init', [], 4, pause_page_init)
+    method(g, PM, 'DetailGraphics', 'Active', [], 11, pause_page_active)
     method(g, PM, 'DetailGraphics', 'Layout', [], 8, layout(PAUSE_VISIBLE, PAUSE_PITCH, PAUSE_FIRST, (
         (lambda i: member(THIS, add('mcInst_Sel', add(i, 1))), 0),
         (lambda i: get(member(THIS, add('mcInst_Sel', add(i, 1))), 'mcInst_Title'), None),
