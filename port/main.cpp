@@ -257,8 +257,26 @@ DWORD WINAPI debug_console(LPVOID param)
 extern "C" char* (__cdecl* __imp_getenv)(const char*) = cached_getenv;
 #endif
 
+void unlock_frame_rate()
+{
+#ifdef _WIN32
+    const char* args = env_os("PS3_ARGV");
+#else
+    const char* args = std::getenv("PS3_ARGV");
+#endif
+    char line[512];
+    std::snprintf(line, sizeof line, "%s%s-novsync", args ? args : "", args && *args ? ";" : "");
+#ifdef _WIN32
+    SetEnvironmentVariableA("PS3_ARGV", line);
+    SetEnvironmentVariableA("PS3_FREE_FLIPS", "1");
+#else
+    setenv("PS3_ARGV", line, 1);
+    setenv("PS3_FREE_FLIPS", "1", 1);
+#endif
+}
 int main(int argc, char** argv)
 {
+    unlock_frame_rate();
     const char* elf = nullptr;
     const char* username = nullptr;
     const char* psnr = nullptr;

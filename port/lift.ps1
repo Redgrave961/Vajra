@@ -20,5 +20,6 @@ New-Item -ItemType Directory -Force $out | Out-Null
 & $py (Join-Path $tools "ppu_lifter.py") $Elf `
     --functions (Join-Path $meta "$name.functions.json") `
     --hle-stubs (Join-Path $meta "$name.imports.json") `
+    --wrap (Join-Path $PSScriptRoot "wrap.json") `
     --jobs ([Environment]::ProcessorCount) --chunks $Chunks --output $out
 exit $LASTEXITCODE

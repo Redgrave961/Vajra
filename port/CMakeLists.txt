@@ -63,6 +63,7 @@ set(SPU_SOURCES ${SPU_GENERATED_SOURCES} ${SPU_JOB_SOURCES} ${FIRMWARE_SPU_SOURC
 
 add_executable(${PROJECT_NAME}
     main.cpp
+    frame_time.cpp
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_hle.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"
