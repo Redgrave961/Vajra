@@ -43,6 +43,7 @@ set(FIRMWARE_SPU_SOURCES "")
 include("${PRX_DIR}/libsre_spu/sources.cmake")
 set(PS3RECOMP_SPU_RETURN_ENTRIES ON)
 set(PS3RECOMP_SPU_GUEST_REGIONS ON)
+set(PS3RECOMP_SPU_MERGE_CHUNKS ON)
 
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk" EXCLUDE_FROM_ALL)
 
@@ -59,7 +60,7 @@ include("${PS3RECOMP_DIR}/cmake/PS3RecompSPU.cmake")
 ps3recomp_generate_spu("${CMAKE_CURRENT_BINARY_DIR}/generated_spu" ${PORT_SPU_INPUTS})
 list(GET PORT_SPU_INPUTS 0 PORT_EBOOT)
 ps3recomp_generate_spu_jobs("${CMAKE_CURRENT_BINARY_DIR}/generated_spujobs" "${PORT_EBOOT}")
-set(SPU_SOURCES ${SPU_GENERATED_SOURCES} ${SPU_JOB_SOURCES} ${FIRMWARE_SPU_SOURCES} "${PS3RECOMP_DIR}/runtime/spu/spu_dispatch_mt.c")
+set(SPU_SOURCES ${SPU_GENERATED_SOURCES} ${SPU_JOB_SOURCES} ${FIRMWARE_SPU_SOURCES})
 
 get_filename_component(PORT_GAME_DIR "${PORT_EBOOT}" DIRECTORY)
 get_filename_component(PORT_GAME_DIR "${PORT_GAME_DIR}" DIRECTORY)
@@ -105,6 +106,7 @@ add_executable(${PROJECT_NAME}
     native_octree.cpp
     native_engine.cpp
     native_fence.cpp
+    native_ring.cpp
     native_script.cpp
     native_script_core.cpp
     pc_options.cpp
@@ -143,5 +145,4 @@ target_compile_options(${PROJECT_NAME} PRIVATE
 set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "/w;/bigobj")
 set_source_files_properties(${SPU_SOURCES} PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
-    COMPILE_DEFINITIONS SPU_USE_DISPATCH_MT
     COMPILE_OPTIONS "${PS3RECOMP_OPT_FLAG}")
