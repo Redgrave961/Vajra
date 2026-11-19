@@ -36,6 +36,7 @@ Vec load(const ppu_mm& m, uint32_t ea)
 {
     Vec v;
     std::memcpy(v.b, m.vb + (ea & ~15u), 16);
+    vmx_rev(v.b, v.b);
     return v;
 }
 
@@ -43,6 +44,7 @@ Vec splat(const uint8_t* word)
 {
     Vec v;
     for (int i = 0; i < 16; i += 4) std::memcpy(v.b + i, word, 4);
+    vmx_rev(v.b, v.b);
     return v;
 }
 
@@ -65,6 +67,7 @@ struct ElementBox {
         std::memcpy(line + 16, m.vb + ((elem + 11) & ~15u), 16);
         Vec a, d, s, ge;
         std::memcpy(a.b, line + (elem & 15), 16);
+        vmx_rev(a.b, a.b);
         a = andc(a, mask);
         const Vec r = andc(splat(m.vb + (uint32_t)(elem + 12)), mask);
         vmx_vsubfp(&d, &a, &center, vscr);

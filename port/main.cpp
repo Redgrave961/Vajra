@@ -1,8 +1,11 @@
+#include "button_prompts.h"
+#include "game_files.h"
 #include "guest.h"
 #include "win32_compat.h"
 #include "pc_options.h"
 #include "rsx_core.h"
 #include "vk/rsx_vk.h"
+#include "vm_track.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -29,6 +32,7 @@ extern int g_sys_process_exit_called;
 extern int32_t g_sys_process_exit_code;
 
 uint32_t ppu_load_elf(const char* path);
+uint32_t ppu_load_elf_image(const uint8_t* file, uint64_t size);
 void ppu_recomp_register(void);
 void ps3_load_prx_modules(void);
 void ppu_hle_init(void);
@@ -134,15 +138,6 @@ char* __cdecl cached_getenv(const char* name)
     }
     ReleaseSRWLockExclusive(&g_env_lock);
     return const_cast<char*>(value);
-}
-
-LONG WINAPI commit_on_touch(EXCEPTION_POINTERS* ep)
-{
-    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
-    const uintptr_t fault = ep->ExceptionRecord->ExceptionInformation[1], base = (uintptr_t)vm_base;
-    if (!vm_base || fault < base || fault >= base + k_vm_size) return EXCEPTION_CONTINUE_SEARCH;
-    if (VirtualAlloc((void*)(fault & ~(uintptr_t)0xFFFF), 0x10000, MEM_COMMIT, PAGE_READWRITE)) return EXCEPTION_CONTINUE_EXECUTION;
-    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 void crash_frame(int i, DWORD64 pc)
@@ -277,8 +272,6 @@ void default_env(const char* name, const std::filesystem::path& value)
 #endif
 }
 
-std::string g_eboot;
-
 bool skipped_intro(uint32_t name)
 {
     static const char* const k_intros[] = {
@@ -294,23 +287,14 @@ bool skipped_intro(uint32_t name)
     return false;
 }
 
-bool resolve_layout(const std::filesystem::path& exe)
+void use_game_files(const game_files& files)
 {
-    const std::filesystem::path eboot = std::filesystem::path("dev_bdvd") / "PS3_GAME" / "USRDIR" / "EBOOT.elf";
-    for (std::filesystem::path dir = exe; ; dir = dir.parent_path()) {
-        const std::filesystem::path data = dir / "data";
-        if (std::filesystem::exists(data / eboot)) {
-            default_env("PS3_VFS_ROOT", data / "dev_bdvd");
-            default_env("PS3_HDD0_ROOT", data / "dev_hdd0");
-            default_env("PS3_HDD1_ROOT", data / "dev_hdd1");
-            default_env("PS3_GAMEDATA_ROOT", data);
-            default_env("PS3_DEV_FLASH", data / "dev_flash");
-            default_env("PS3_VERBOSE", "0");
-            g_eboot = (data / eboot).string();
-            return true;
-        }
-        if (dir == dir.parent_path()) return false;
-    }
+    default_env("PS3_VFS_ROOT", files.bdvd);
+    default_env("PS3_HDD0_ROOT", files.hdd0);
+    default_env("PS3_HDD1_ROOT", files.hdd1);
+    default_env("PS3_GAMEDATA_ROOT", files.user);
+    default_env("PS3_DEV_FLASH", files.flash);
+    default_env("PS3_VERBOSE", "0");
 }
 
 #ifdef _WIN32
@@ -362,18 +346,11 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     attach_log(exe);
 #endif
-    const bool found = resolve_layout(exe);
+    game_files files;
+    if (!load_game_files(exe, files)) return 2;
+    use_game_files(files);
     if (pc_options_boot()) unlock_frame_rate();
-    const char* elf = nullptr;
-    if (argc > 1) elf = argv[1];
-    if (!elf && found) elf = g_eboot.c_str();
-    if (!elf) {
-        std::fprintf(stderr, "game data not found: expected data\\dev_bdvd\\PS3_GAME\\USRDIR\\EBOOT.elf next to %s or a parent folder\n", argv[0]);
-#ifdef _WIN32
-        MessageBoxA(nullptr, "Game data not found. Place the data folder (data\\dev_bdvd\\PS3_GAME\\USRDIR\\EBOOT.elf) next to the game or in a parent folder.", "Asura's Wrath", MB_OK | MB_ICONERROR);
-#endif
-        return 2;
-    }
+    const char* elf = argc > 1 ? argv[1] : nullptr;
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
 #ifdef _WIN32
@@ -381,9 +358,9 @@ int main(int argc, char** argv)
     SetUnhandledExceptionFilter(crash_report);
     ULONG guarantee = 256 * 1024;
     SetThreadStackGuarantee(&guarantee);
-    AddVectoredExceptionHandler(1, commit_on_touch);
+    vm_track_install();
     AddVectoredExceptionHandler(0, crash_fatal);
-    vm_base = static_cast<uint8_t*>(VirtualAlloc(nullptr, k_vm_size, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE));
+    vm_base = static_cast<uint8_t*>(VirtualAlloc(nullptr, k_vm_size, MEM_RESERVE, PAGE_READWRITE));
     ppu_vm_size = 0;
 #else
     void* vm = mmap(nullptr, k_vm_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
@@ -395,14 +372,16 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const uint32_t entry = ppu_load_elf(elf);
+    const uint32_t entry = elf ? ppu_load_elf(elf) : ppu_load_elf_image(files.elf.data(), files.elf.size());
+    std::vector<uint8_t>().swap(files.elf);
     if (!entry) {
-        std::printf("cannot load %s\n", elf);
+        std::printf("cannot load %s\n", elf ? elf : "the update's EBOOT");
         return 1;
     }
-    set_vfs_root(elf);
+    set_vfs_root(elf ? elf : "");
     cellGame_init_boot(ppu_vfs_root);
     rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title()));
+    use_button_prompts();
 
     ppu_recomp_register();
     ps3_load_prx_modules();

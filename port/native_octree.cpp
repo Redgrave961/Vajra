@@ -50,7 +50,8 @@ struct Search {
 
     __m128 vec3(uint32_t a) const
     {
-        if (vm_mm_ok(&m, a, 16)) return _mm_castsi128_ps(vmx_ldw(m.vb + a));
+        if (vm_mm_ok(&m, a, 16))
+            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12)));
         return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), 0));
     }
 

@@ -101,7 +101,11 @@ set_source_files_properties("${PORT_RC}" PROPERTIES OBJECT_DEPENDS "${PORT_ICON}
 add_executable(${PROJECT_NAME}
     "${PORT_RC}"
     main.cpp
+    button_prompts.cpp
     frame_time.cpp
+    game_files.cpp
+    firmware.cpp
+    setup_window.cpp
     native_frame.cpp
     native_octree.cpp
     native_engine.cpp
@@ -132,7 +136,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${PS3RECOMP_DIR}/runtime/prx"
     "${PS3RECOMP_DIR}/libs/video")
 
-target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime dbghelp winmm)
+find_package(SDL3 CONFIG REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime SDL3::SDL3 dbghelp winmm)
 set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX WIN32_EXECUTABLE TRUE OUTPUT_NAME AsurasWrath)
 target_link_options(${PROJECT_NAME} PRIVATE /ENTRY:mainCRTStartup)
 
@@ -140,8 +145,11 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     /W4 -Wno-unused-parameter
     -fno-strict-aliasing
     -fwrapv
+    /Zc:tlsGuards-
     /clang:-ffp-contract=off)
 
+file(SHA256 "${PORT_EBOOT}" PORT_EBOOT_SHA256)
+set_source_files_properties(game_files.cpp PROPERTIES COMPILE_DEFINITIONS PORT_EBOOT_SHA256="${PORT_EBOOT_SHA256}")
 set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "/w;/bigobj")
 set_source_files_properties(${SPU_SOURCES} PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
