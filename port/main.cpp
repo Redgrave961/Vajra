@@ -245,7 +245,7 @@ DWORD WINAPI debug_console(LPVOID param)
 
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(ASURA_PGO_GEN)
 extern "C" char* (__cdecl* __imp_getenv)(const char*) = cached_getenv;
 #endif
 
@@ -266,7 +266,7 @@ void default_env(const char* name, const std::filesystem::path& value)
 {
 #ifdef _WIN32
     if (GetEnvironmentVariableA(name, nullptr, 0)) return;
-    SetEnvironmentVariableW(std::filesystem::path(name).c_str(), value.c_str());
+    _wputenv_s(std::filesystem::path(name).c_str(), value.c_str());
 #else
     setenv(name, value.c_str(), 0);
 #endif
@@ -333,8 +333,8 @@ void unlock_frame_rate()
     char line[512];
     std::snprintf(line, sizeof line, "%s%s-novsync", args ? args : "", args && *args ? ";" : "");
 #ifdef _WIN32
-    SetEnvironmentVariableA("PS3_ARGV", line);
-    SetEnvironmentVariableA("PS3_FREE_FLIPS", "1");
+    _putenv_s("PS3_ARGV", line);
+    _putenv_s("PS3_FREE_FLIPS", "1");
 #else
     setenv("PS3_ARGV", line, 1);
     setenv("PS3_FREE_FLIPS", "1", 1);

@@ -3,13 +3,16 @@ param(
     [ValidateSet("thin", "full")]
     [string]$Lto = "thin",
     [string]$Arch = "native",
-    [string]$Pgo = "",
+    [ValidateSet("auto", "gen", "off")]
+    [string]$Pgo = "auto",
     [string]$Elf = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\dev_bdvd\PS3_GAME\USRDIR\EBOOT.elf"),
     [string]$BuildDir = ""
 )
 $root = Split-Path $PSScriptRoot -Parent
 $port = $PSScriptRoot
-$build = if ($BuildDir) { $BuildDir } else { Join-Path $port "build" }
+$build = if ($BuildDir) { $BuildDir } elseif ($Pgo -eq "gen") { Join-Path $port "build-pgo" } else { Join-Path $port "build" }
+$pgoDir = Join-Path $root "pgo"
+$pgoData = Join-Path $pgoDir "asura.profdata"
 $env:TEMP = "E:\temp"
 $env:TMP = "E:\temp"
 
@@ -30,10 +33,19 @@ if ($Lto -eq "full") {
 }
 
 if ($Pgo -eq "gen") {
-    $cflags += " /clang:-fprofile-generate"
+    New-Item -ItemType Directory -Force (Join-Path $pgoDir "raw") | Out-Null
+    Get-ChildItem (Join-Path $pgoDir "raw") -Filter *.profraw | Remove-Item -Force
+    $cflags += " /clang:-fprofile-instr-generate=$($pgoDir -replace '\\','/')/raw/asura-%p.profraw /DASURA_PGO_GEN"
     $lflags += " `"$(Join-Path $resource 'lib\windows\clang_rt.profile-x86_64.lib')`""
-} elseif ($Pgo) {
-    $cflags += " /clang:-fprofile-use=$($Pgo -replace '\\','/') /clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date"
+} elseif ($Pgo -eq "auto") {
+    $raw = @(Get-ChildItem (Join-Path $pgoDir "raw") -Filter *.profraw -ErrorAction SilentlyContinue)
+    if ($raw.Count -and (-not (Test-Path $pgoData) -or ($raw | Where-Object { $_.LastWriteTime -gt (Get-Item $pgoData).LastWriteTime }))) {
+        & (Join-Path $llvm "llvm-profdata.exe") merge -o $pgoData $raw.FullName
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    if (Test-Path $pgoData) {
+        $cflags += " /clang:-fprofile-instr-use=$($pgoData -replace '\\','/') /clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date /clang:-Wno-backend-plugin"
+    }
 }
 
 $vcpkg = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { "E:\tools\vcpkg" }
@@ -48,6 +60,7 @@ foreach ($m in "libsre", "libresc", "libsre_spu") {
     -DCMAKE_BUILD_TYPE=Release `
     -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl `
     "-DCMAKE_LINKER=$llvm/lld-link.exe" "-DCMAKE_AR=$llvm/llvm-lib.exe" "-DCMAKE_RC_COMPILER=$llvm/llvm-rc.exe" "-DCMAKE_MT=$llvm/llvm-mt.exe" `
+    "-DCMAKE_C_FLAGS=/DWIN32 /D_WINDOWS" "-DCMAKE_CXX_FLAGS=/DWIN32 /D_WINDOWS /EHsc" `
     "-DCMAKE_C_FLAGS_RELEASE=$cflags" "-DCMAKE_CXX_FLAGS_RELEASE=$cflags" `
     "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=$lflags" `
     "-DPS3RECOMP_OPT_FLAG=$opt" `
