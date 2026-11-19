@@ -3,6 +3,7 @@
 #include <initializer_list>
 
 #include "prx_loader.h"
+#include "spurs.h"
 
 struct ppu_context;
 
@@ -24,5 +25,6 @@ extern "C" void ps3_load_prx_modules(void)
             return;
         }
     }
+    spurs_register(0x30021480u, 0x30023680u, 0x3002A180u, 0x30026300u);
     libsre_spu_register();
 }

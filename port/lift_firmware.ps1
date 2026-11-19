@@ -33,7 +33,6 @@ function Lift-Prx([string]$Name, [string]$Base) {
 
 Lift-Prx "libsre" "0x30000000"
 Lift-Prx "libresc" "0x30100000"
-$libsreMeta = Join-Path $PSScriptRoot "meta\libsre"
 
 $pics = @()
 foreach ($p in "flashMP3.pic", "flashATRAC.pic") {
@@ -45,10 +44,5 @@ foreach ($p in "flashMP3.pic", "flashATRAC.pic") {
 
 $spuOut = Join-Path $PSScriptRoot "recompiled_prx\libsre_spu"
 if (Test-Path $spuOut) { Remove-Item $spuOut -Recurse -Force }
-& $py (Join-Path $tools "lift_firmware_spu.py") --image (Join-Path $libsreMeta "libsre_image.bin") --base 0x30000000 --name libsre `
-    --body 0x21480:0x2200:0xA00:0xA00:0x2110 `
-    --body 0x23680:0x1E40:0xA00:0xA00:0x1C00 `
-    --body 0x26300:0x3E30:0xA00:0xA00:0x3D20 `
-    --body 0x2A180:0x3E30:0xA00:0xA00:0x3CF0 `
-    @pics --out $spuOut
+& $py (Join-Path $tools "lift_firmware_spu.py") --name libsre @pics --out $spuOut
 exit $LASTEXITCODE
