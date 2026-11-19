@@ -2,7 +2,7 @@ param(
     [int]$Jobs = [Environment]::ProcessorCount,
     [ValidateSet("thin", "full")]
     [string]$Lto = "thin",
-    [string]$Arch = "native",
+    [string]$Arch = "x86-64-v3",
     [ValidateSet("auto", "gen", "off")]
     [string]$Pgo = "auto",
     [string]$Elf = (Join-Path (Split-Path $PSScriptRoot -Parent) "data\dev_bdvd\PS3_GAME\USRDIR\EBOOT.elf"),
