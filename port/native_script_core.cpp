@@ -66,13 +66,19 @@ struct Vm {
 
     explicit Vm(ppu_context* c) : ctx(c), m(ppu_mm_take()) {}
 
-    uint8_t r8(uint32_t a) const { return vm_read8_mm(&m, a); }
-    uint16_t r16(uint32_t a) const { return vm_read16_mm(&m, a); }
-    uint32_t r32(uint32_t a) const { return vm_read32_mm(&m, a); }
-    uint64_t r64(uint32_t a) const { return vm_read64_mm(&m, a); }
-    void w8(uint32_t a, uint8_t v) const { vm_write8_mm(&m, a, v); }
-    void w32(uint32_t a, uint32_t v) const { vm_write32_mm(&m, a, v); }
-    void w64(uint32_t a, uint64_t v) const { vm_write64_mm(&m, a, v); }
+    const ppu_mm* mm() const
+    {
+        __builtin_assume_separate_storage(m.vb, this);
+        return &m;
+    }
+
+    uint8_t r8(uint32_t a) const { return vm_read8_mm(mm(), a); }
+    uint16_t r16(uint32_t a) const { return vm_read16_mm(mm(), a); }
+    uint32_t r32(uint32_t a) const { return vm_read32_mm(mm(), a); }
+    uint64_t r64(uint32_t a) const { return vm_read64_mm(mm(), a); }
+    void w8(uint32_t a, uint8_t v) const { vm_write8_mm(mm(), a, v); }
+    void w32(uint32_t a, uint32_t v) const { vm_write32_mm(mm(), a, v); }
+    void w64(uint32_t a, uint64_t v) const { vm_write64_mm(mm(), a, v); }
 
     void frame(uint32_t sp, uint32_t size, uint64_t lr) const
     {
