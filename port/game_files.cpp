@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>

@@ -64,12 +64,8 @@ uint32_t next_cp(const std::string& s, size_t& i)
 
 bool load_font(font& f, std::initializer_list<const char*> names)
 {
-#ifdef _WIN32
     const char* windir = std::getenv("WINDIR");
     const std::filesystem::path dir = std::filesystem::path(windir ? windir : "C:\\Windows") / "Fonts";
-#else
-    const std::filesystem::path dir = "/";
-#endif
     for (const char* name : names) {
         std::ifstream in(dir / name, std::ios::binary);
         if (!in) continue;
@@ -106,17 +102,7 @@ public:
     bool open()
     {
         if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) return false;
-#ifdef _WIN32
         if (!load_font(regular, { "segoeui.ttf" }) || !load_font(bold, { "seguisb.ttf", "segoeuib.ttf", "segoeui.ttf" })) return false;
-#else
-        const auto sans = { "usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "usr/share/fonts/TTF/DejaVuSans.ttf",
-                            "usr/share/fonts/dejavu/DejaVuSans.ttf", "usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-                            "usr/share/fonts/noto/NotoSans-Regular.ttf", "usr/share/fonts/google-noto/NotoSans-Regular.ttf" };
-        const auto sans_bold = { "usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-                                 "usr/share/fonts/dejavu/DejaVuSans-Bold.ttf", "usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-                                 "usr/share/fonts/noto/NotoSans-Bold.ttf", "usr/share/fonts/google-noto/NotoSans-Bold.ttf" };
-        if (!load_font(regular, sans) || !load_font(bold, sans_bold)) return false;
-#endif
         const float ds = std::max(1.f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
         window = SDL_CreateWindow("Asura's Wrath", (int)(k_w * ds), (int)(k_h * ds), SDL_WINDOW_HIGH_PIXEL_DENSITY);
         renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;

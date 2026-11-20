@@ -14,12 +14,8 @@
 #include <filesystem>
 #include <string>
 
-#ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
-#else
-#include <sys/mman.h>
-#endif
 
 extern "C" {
 uint8_t* vm_base = nullptr;
@@ -78,7 +74,6 @@ void set_vfs_root(const char* eboot)
     ppu_vfs_root = g_root;
 }
 
-#ifdef _WIN32
 struct env_slot {
     const char* volatile key;
     const char* value;
@@ -241,11 +236,10 @@ DWORD WINAPI debug_console(LPVOID param)
         if (o) std::fclose(o);
     }
 }
-#endif
 
 }
 
-#if defined(_WIN32) && !defined(ASURA_PGO_GEN)
+#ifndef ASURA_PGO_GEN
 extern "C" char* (__cdecl* __imp_getenv)(const char*) = cached_getenv;
 #endif
 
@@ -253,23 +247,15 @@ namespace {
 
 std::filesystem::path executable_dir()
 {
-#ifdef _WIN32
     wchar_t path[MAX_PATH];
     const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
     return std::filesystem::path(std::wstring(path, n)).parent_path();
-#else
-    return std::filesystem::read_symlink("/proc/self/exe").parent_path();
-#endif
 }
 
 void default_env(const char* name, const std::filesystem::path& value)
 {
-#ifdef _WIN32
     if (GetEnvironmentVariableA(name, nullptr, 0)) return;
     _wputenv_s(std::filesystem::path(name).c_str(), value.c_str());
-#else
-    setenv(name, value.c_str(), 0);
-#endif
 }
 
 bool skipped_intro(uint32_t name)
@@ -297,7 +283,6 @@ void use_game_files(const game_files& files)
     default_env("PS3_VERBOSE", "0");
 }
 
-#ifdef _WIN32
 void attach_log(const std::filesystem::path& exe)
 {
     const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
@@ -306,7 +291,6 @@ void attach_log(const std::filesystem::path& exe)
     std::freopen(log.c_str(), "w", stderr);
     std::freopen(log.c_str(), "a", stdout);
 }
-#endif
 
 }
 
@@ -325,27 +309,16 @@ void func_0013A02C(ppu_context* ctx)
 
 void unlock_frame_rate()
 {
-#ifdef _WIN32
     const char* args = env_os("PS3_ARGV");
-#else
-    const char* args = std::getenv("PS3_ARGV");
-#endif
     char line[512];
     std::snprintf(line, sizeof line, "%s%s-novsync", args ? args : "", args && *args ? ";" : "");
-#ifdef _WIN32
     _putenv_s("PS3_ARGV", line);
     _putenv_s("PS3_FREE_FLIPS", "1");
-#else
-    setenv("PS3_ARGV", line, 1);
-    setenv("PS3_FREE_FLIPS", "1", 1);
-#endif
 }
 int main(int argc, char** argv)
 {
     const std::filesystem::path exe = executable_dir();
-#ifdef _WIN32
     attach_log(exe);
-#endif
     game_files files;
     if (!load_game_files(exe, files)) return 2;
     use_game_files(files);
@@ -353,7 +326,6 @@ int main(int argc, char** argv)
     const char* elf = argc > 1 ? argv[1] : nullptr;
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-#ifdef _WIN32
     timeBeginPeriod(1);
     SetUnhandledExceptionFilter(crash_report);
     ULONG guarantee = 256 * 1024;
@@ -362,11 +334,6 @@ int main(int argc, char** argv)
     AddVectoredExceptionHandler(0, crash_fatal);
     vm_base = static_cast<uint8_t*>(VirtualAlloc(nullptr, k_vm_size, MEM_RESERVE, PAGE_READWRITE));
     ppu_vm_size = 0;
-#else
-    void* vm = mmap(nullptr, k_vm_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    vm_base = vm == MAP_FAILED ? nullptr : static_cast<uint8_t*>(vm);
-    ppu_vm_size = 0;
-#endif
     if (!vm_base) {
         std::printf("guest memory reservation failed\n");
         return 1;
@@ -391,9 +358,7 @@ int main(int argc, char** argv)
     lv2_init_syscalls();
     g_ps3_guest_caller = guest_caller;
 
-#ifdef _WIN32
     if (const char* dbg = std::getenv("PS3_DEBUG"); dbg && *dbg) CreateThread(nullptr, 0, debug_console, const_cast<char*>(dbg), 0, nullptr);
-#endif
 
     ppu_run(entry, k_stack_top);
     return g_sys_process_exit_called ? (int)g_sys_process_exit_code : 0;
