@@ -42,6 +42,7 @@ if ($Pgo -eq "gen") {
     if ($raw.Count -and (-not (Test-Path $pgoData) -or ($raw | Where-Object { $_.LastWriteTime -gt (Get-Item $pgoData).LastWriteTime }))) {
         & (Join-Path $llvm "llvm-profdata.exe") merge -o $pgoData $raw.FullName
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if (Test-Path (Join-Path $build "build.ninja")) { & cmake --build $build --target clean }
     }
     if (Test-Path $pgoData) {
         $cflags += " /clang:-fprofile-instr-use=$($pgoData -replace '\\','/') /clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date /clang:-Wno-backend-plugin"
