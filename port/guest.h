@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ppu_recomp.h"
+#include "vm_page_map.h"
 
 #include <bit>
 

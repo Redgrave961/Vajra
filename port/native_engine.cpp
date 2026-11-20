@@ -100,6 +100,7 @@ void func_00F297C8(ppu_context* ctx)
         ((uint64_t)src < dst + n && (uint64_t)dst < src + n))
         return func_00F297C8_lifted(ctx);
     std::memcpy(m.vb + dst, m.vb + src, n);
+    vm_track_write(dst, n);
     ctx->gpr[3] = dst;
 }
 
@@ -111,6 +112,7 @@ void func_00F35E2C(ppu_context* ctx)
     const uint8_t c = (uint8_t)ctx->gpr[4];
     if (n >= 0x80000000u || !plain_store(m, dst, (uint32_t)n)) return func_00F35E2C_lifted(ctx);
     std::memset(m.vb + dst, c, n);
+    vm_track_write(dst, n);
 }
 
 void func_000E5170(ppu_context* ctx)

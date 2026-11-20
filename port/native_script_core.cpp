@@ -117,7 +117,10 @@ struct Vm {
     void zero(uint32_t sp, uint64_t lr, uint32_t dst, uint32_t n)
     {
         if (!n) return;
-        if (plain_store(m, dst, n)) memset(m.vb + dst, 0, n);
+        if (plain_store(m, dst, n)) {
+            memset(m.vb + dst, 0, n);
+            vm_track_write(dst, n);
+        }
         else call(sp, lr, func_00F35E2C, dst, 0, n);
     }
 };

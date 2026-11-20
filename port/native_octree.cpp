@@ -142,6 +142,7 @@ struct Search {
             const uint32_t record[k_result_size / 4] = {__builtin_bswap32(r32(octree + 0xC)), __builtin_bswap32(actor), f, f, f, f, f, f, f, ~0u, 0, 0,
                                                         __builtin_bswap32(prim), 0, 0, 0, 0, ~0u, 0};
             memcpy(m.vb + result, record, k_result_size);
+            vm_track_write(result, k_result_size);
             w32(octree + 0xC, result);
             w32(actor + 0x18C, tag);
             return;
