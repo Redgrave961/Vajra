@@ -1,9 +1,6 @@
 #include "guest.h"
 #include "pc_options.h"
-#include "rsx_core.h"
 #include "vk/rsx_vk.h"
-
-#include <windows.h>
 
 #include <algorithm>
 #include <atomic>
@@ -130,11 +127,9 @@ void apply_resolution(uint32_t value) { rsx_vk_set_resolution_scale(value, 720);
 void apply_frame_rate(uint32_t value)
 {
     const bool console = value == 30;
-    rsx_core_set_frame_limit(console ? 0 : value);
-    rsx_vk_set_free_flips(!console);
+    rsx_vk_set_frame_rate(!console, console ? 0 : value);
     if (g_settings_parsed) vm_write32(k_use_vsync, console);
 }
-void apply_vsync(uint32_t value) { rsx_vk_set_vsync((int)value); }
 void apply_motion_blur(uint32_t value) { g_motion_blur.store(value != 0, std::memory_order_relaxed); }
 void apply_depth_of_field(uint32_t value) { g_depth_of_field.store(value != 0, std::memory_order_relaxed); }
 void apply_bloom(uint32_t value) { g_bloom.store(value != 0, std::memory_order_relaxed); }
@@ -153,7 +148,6 @@ const Option k_options[] = {
     { "display", "Display Mode", "Windowed, borderless window, or exclusive fullscreen at the display's native mode.", display_choices, "borderless", nullptr, apply_display },
     { "resolution", "Resolution", "Internal rendering resolution.", resolution_choices, nullptr, parse_resolution, apply_resolution },
     { "frame_rate", "Frame Rate", "Frame rate limit. 30 uses the console's original pacing.", frame_rate_choices, "unlimited", parse_frame_rate, apply_frame_rate },
-    { "vsync", "VSync", "Paces frames to the display refresh. Off shows each new frame as soon as it is ready.", switch_choices, "off", nullptr, apply_vsync },
     { "motion_blur", "Motion Blur", "Blur from camera and object motion.", switch_choices, "on", nullptr, apply_motion_blur },
     { "depth_of_field", "Depth of Field", "Blur outside the camera's focus, mainly in cutscenes.", switch_choices, "on", nullptr, apply_depth_of_field },
     { "bloom", "Bloom", "Glow around bright lights.", switch_choices, "on", nullptr, apply_bloom },
@@ -163,19 +157,11 @@ constexpr uint32_t k_rows = (uint32_t)std::size(k_options);
 std::string g_saved[k_rows];
 std::optional<uint32_t> g_applied[k_rows];
 std::mutex g_settings_lock;
-
-std::string settings_path()
-{
-    char path[MAX_PATH];
-    const DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
-    std::string dir(path, n);
-    dir.resize(dir.find_last_of("\\/") + 1);
-    return dir + "asura_settings.ini";
-}
+std::filesystem::path g_settings_path;
 
 void load()
 {
-    FILE* f = std::fopen(settings_path().c_str(), "r");
+    FILE* f = std::fopen(g_settings_path.string().c_str(), "r");
     if (!f) return;
     char line[128];
     while (std::fgets(line, sizeof line, f)) {
@@ -218,7 +204,7 @@ void sync(uint32_t row)
 
 void save()
 {
-    FILE* f = std::fopen(settings_path().c_str(), "w");
+    FILE* f = std::fopen(g_settings_path.string().c_str(), "w");
     if (!f) return;
     for (uint32_t r = 0; r < k_rows; r++) {
         const Choices list = k_options[r].choices();
@@ -392,9 +378,10 @@ void build_menu(ppu_context* ctx, const uint8_t* swf, Menu& menu)
 
 }
 
-void pc_options_boot()
+void pc_options_boot(const std::filesystem::path& dir)
 {
     std::lock_guard<std::mutex> hold(g_settings_lock);
+    g_settings_path = dir / "asura_settings.ini";
     load();
     rsx_vk_on_display_toggle(display_toggled);
     rsx_vk_on_display_modes(display_modes_changed);

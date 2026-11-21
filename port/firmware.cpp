@@ -1,13 +1,22 @@
-﻿#include "firmware.h"
+#include "firmware.h"
 
 #include "../ps3recomp/libs/filesystem/ps3_aes.h"
 
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <thread>
 #include <vector>
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <spawn.h>
+#include <sys/wait.h>
+
+extern char** environ;
+#endif
 
 extern "C" char* stbi_zlib_decode_malloc_guesssize_headerflag(const char* buffer, int len, int initial_size, int* outlen, int parse_header);
 
@@ -151,6 +160,7 @@ bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& pro
     std::error_code ec;
     std::filesystem::create_directories(pup.parent_path(), ec);
     std::filesystem::remove(pup, ec);
+#ifdef _WIN32
     std::wstring cmd = L"curl.exe -fsSL --retry 3 -o \"" + pup.wstring() + L"\" " + std::filesystem::path(k_url).wstring();
     STARTUPINFOW si = { sizeof si };
     PROCESS_INFORMATION pi = {};
@@ -164,6 +174,21 @@ bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& pro
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+#else
+    const std::string out = pup.string();
+    const char* argv[] = { "curl", "-fsSL", "--retry", "3", "-o", out.c_str(), k_url, nullptr };
+    pid_t pid;
+    if (posix_spawnp(&pid, "curl", nullptr, nullptr, const_cast<char* const*>(argv), environ)) {
+        error = "curl not found";
+        return false;
+    }
+    int status = 0;
+    while (!waitpid(pid, &status, WNOHANG)) {
+        progress = (float)std::filesystem::file_size(pup, ec) / (float)k_size;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+#endif
     if (code) {
         error = "Download failed";
         return false;

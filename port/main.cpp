@@ -1,7 +1,6 @@
 #include "button_prompts.h"
 #include "game_files.h"
 #include "guest.h"
-#include "win32_compat.h"
 #include "pc_options.h"
 #include "rsx_core.h"
 #include "vk/rsx_vk.h"
@@ -10,12 +9,28 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
 
+#ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
+#else
+#include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_init.h>
+#include <algorithm>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <unwind.h>
+#endif
 
 extern "C" {
 uint8_t* vm_base = nullptr;
@@ -74,6 +89,7 @@ void set_vfs_root(const char* eboot)
     ppu_vfs_root = g_root;
 }
 
+#ifdef _WIN32
 struct env_slot {
     const char* volatile key;
     const char* value;
@@ -193,14 +209,119 @@ LONG WINAPI crash_report(EXCEPTION_POINTERS* ep)
     crash_dump(ep, "unhandled");
     return EXCEPTION_EXECUTE_HANDLER;
 }
-DWORD WINAPI debug_console(LPVOID param)
+
+void install_crash_report()
 {
-    const char* path = static_cast<const char*>(param);
+    SetUnhandledExceptionFilter(crash_report);
+    ULONG guarantee = 256 * 1024;
+    SetThreadStackGuarantee(&guarantee);
+    vm_track_install();
+    AddVectoredExceptionHandler(0, crash_fatal);
+}
+#else
+constexpr size_t k_alt_stack = 256 * 1024;
+
+struct alt_stack {
+    void* base = nullptr;
+    ~alt_stack()
+    {
+        if (!base) return;
+        const stack_t off{ nullptr, SS_DISABLE, 0 };
+        sigaltstack(&off, nullptr);
+        munmap(base, k_alt_stack);
+    }
+};
+
+thread_local alt_stack t_alt;
+thread_local uintptr_t t_stack_lo;
+thread_local size_t t_stack_guard;
+
+void guard_thread()
+{
+    void* base = mmap(nullptr, k_alt_stack, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
+    if (base == MAP_FAILED) return;
+    t_alt.base = base;
+    const stack_t ss{ base, 0, k_alt_stack };
+    sigaltstack(&ss, nullptr);
+    pthread_attr_t a;
+    if (pthread_getattr_np(pthread_self(), &a)) return;
+    void* lo;
+    size_t size;
+    pthread_attr_getstack(&a, &lo, &size);
+    pthread_attr_getguardsize(&a, &t_stack_guard);
+    pthread_attr_destroy(&a);
+    t_stack_lo = reinterpret_cast<uintptr_t>(lo);
+}
+
+struct thread_start {
+    void* (*fn)(void*);
+    void* arg;
+};
+
+void* guarded_start(void* p)
+{
+    const thread_start s = *static_cast<thread_start*>(p);
+    delete static_cast<thread_start*>(p);
+    guard_thread();
+    return s.fn(s.arg);
+}
+
+struct crash_walk {
+    uintptr_t from;
+    int i;
+};
+
+_Unwind_Reason_Code crash_frame(_Unwind_Context* uc, void* arg)
+{
+    crash_walk& w = *static_cast<crash_walk*>(arg);
+    const uintptr_t pc = _Unwind_GetIP(uc);
+    if (!pc || w.i >= 48) return _URC_END_OF_STACK;
+    if (w.i < 0 && pc != w.from) return _URC_NO_REASON;
+    Dl_info info{};
+    const char* name = dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_fname ? info.dli_fname : "?";
+    const char* base = std::strrchr(name, '/');
+    w.i = w.i < 0 ? 0 : w.i;
+    std::fprintf(stderr, "[crash]   #%d %s+0x%llX\n", w.i++, base ? base + 1 : name, (unsigned long long)(pc - reinterpret_cast<uintptr_t>(info.dli_fbase)));
+    return _URC_NO_REASON;
+}
+
+void crash_signal(int sig, siginfo_t* si, void* ctx)
+{
+    const ucontext_t* uc = static_cast<const ucontext_t*>(ctx);
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(si->si_addr), guard = std::max<size_t>(t_stack_guard, (size_t)getpagesize());
+    const bool fault = sig == SIGSEGV || sig == SIGBUS;
+    if (fault && t_stack_lo && addr < t_stack_lo && addr >= t_stack_lo - guard)
+        std::fprintf(stderr, "\n[crash] stack overflow, thread %ld, last HLE 0x%08X (%s)\n", (long)gettid(), g_last_hle_nid, g_last_hle_name ? g_last_hle_name : "");
+    else
+        std::fprintf(stderr, "\n[crash] signal %d (%s), thread %ld, last HLE 0x%08X (%s)\n", sig, strsignal(sig), (long)gettid(), g_last_hle_nid,
+                     g_last_hle_name ? g_last_hle_name : "");
+    if (fault)
+        std::fprintf(stderr, "[crash] %s of 0x%llX at 0x%llX\n", uc->uc_mcontext.gregs[REG_ERR] & 2 ? "write" : "read", (unsigned long long)addr,
+                     (unsigned long long)uc->uc_mcontext.gregs[REG_RIP]);
+    crash_walk w{ (uintptr_t)uc->uc_mcontext.gregs[REG_RIP], -1 };
+    _Unwind_Backtrace(crash_frame, &w);
+    std::fflush(stderr);
+    raise(sig);
+}
+
+void install_crash_report()
+{
+    guard_thread();
+    struct sigaction sa {};
+    sa.sa_sigaction = crash_signal;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    for (const int sig : { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT }) sigaction(sig, &sa, nullptr);
+}
+#endif
+
+void debug_console(const char* path)
+{
     char out_path[1024];
     std::snprintf(out_path, sizeof out_path, "%s.out", path);
-    const ULONGLONG t0 = GetTickCount64();
+    const auto t0 = std::chrono::steady_clock::now();
     for (;;) {
-        Sleep(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         FILE* f = std::fopen(path, "rb");
         if (!f) continue;
         char cmd[256] = {};
@@ -215,7 +336,7 @@ DWORD WINAPI debug_console(LPVOID param)
         unsigned a = 0, b = 0;
         std::fprintf(o, "> %s\n", cmd);
         if (!std::strcmp(cmd, "stat")) {
-            std::fprintf(o, "  uptime   %.1f s\n  flips    %u\n  last HLE 0x%08X (%s)\n", (GetTickCount64() - t0) / 1000.0,
+            std::fprintf(o, "  uptime   %.1f s\n  flips    %u\n  last HLE 0x%08X (%s)\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
                          rsx_core_frames_presented(), g_last_hle_nid, g_last_hle_name ? g_last_hle_name : "");
         } else if (!std::strcmp(cmd, "threads")) {
             for (unsigned t = 0; t < 64u; t++)
@@ -239,12 +360,25 @@ DWORD WINAPI debug_console(LPVOID param)
 
 }
 
-#ifndef ASURA_PGO_GEN
+#if defined(_WIN32) && !defined(ASURA_PGO_GEN)
 extern "C" char* getenv(const char* name) { return cached_getenv(name); }
+#endif
+
+#ifndef _WIN32
+extern "C" int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*fn)(void*), void* arg);
+
+extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*fn)(void*), void* arg)
+{
+    thread_start* start = new thread_start{ fn, arg };
+    const int rc = __real_pthread_create(thread, attr, guarded_start, start);
+    if (rc) delete start;
+    return rc;
+}
 #endif
 
 namespace {
 
+#ifdef _WIN32
 std::filesystem::path executable_dir()
 {
     wchar_t path[MAX_PATH];
@@ -257,6 +391,54 @@ void default_env(const char* name, const std::filesystem::path& value)
     if (GetEnvironmentVariableA(name, nullptr, 0)) return;
     _wputenv_s(std::filesystem::path(name).c_str(), value.c_str());
 }
+
+void attach_log(const std::filesystem::path& exe)
+{
+    const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
+    if (err && err != INVALID_HANDLE_VALUE) return;
+    const std::string log = (exe / "asura.log").string();
+    std::freopen(log.c_str(), "w", stderr);
+    std::freopen(log.c_str(), "a", stdout);
+}
+
+void precise_timers() { timeBeginPeriod(1); }
+
+uint8_t* reserve_guest_memory() { return static_cast<uint8_t*>(VirtualAlloc(nullptr, k_vm_size, MEM_RESERVE, PAGE_READWRITE)); }
+
+std::filesystem::path desktop_identity() { return {}; }
+#else
+std::filesystem::path executable_dir()
+{
+    const char* image = std::getenv("APPIMAGE");
+    return std::filesystem::path(image && *image ? image : std::filesystem::read_symlink("/proc/self/exe")).parent_path();
+}
+
+void default_env(const char* name, const std::filesystem::path& value) { setenv(name, value.c_str(), 0); }
+
+void attach_log(const std::filesystem::path& exe)
+{
+    struct stat st;
+    if (isatty(STDERR_FILENO) || (!fstat(STDERR_FILENO, &st) && (S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode)))) return;
+    const std::string log = (exe / "asura.log").string();
+    std::freopen(log.c_str(), "w", stderr);
+    std::freopen(log.c_str(), "a", stdout);
+}
+
+void precise_timers() { prctl(PR_SET_TIMERSLACK, 1ul); }
+
+uint8_t* reserve_guest_memory()
+{
+    void* p = mmap(nullptr, k_vm_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    return p == MAP_FAILED ? nullptr : static_cast<uint8_t*>(p);
+}
+
+std::filesystem::path desktop_identity()
+{
+    SDL_SetAppMetadata("Asura's Wrath", "1.0.0.0", "AsurasWrath");
+    SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
+    return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "AsurasWrath.png";
+}
+#endif
 
 bool skipped_intro(uint32_t name)
 {
@@ -283,15 +465,6 @@ void use_game_files(const game_files& files)
     default_env("PS3_VERBOSE", "0");
 }
 
-void attach_log(const std::filesystem::path& exe)
-{
-    const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
-    if (err && err != INVALID_HANDLE_VALUE) return;
-    const std::string log = (exe / "asura.log").string();
-    std::freopen(log.c_str(), "w", stderr);
-    std::freopen(log.c_str(), "a", stdout);
-}
-
 }
 
 void func_0013A02C(ppu_context* ctx)
@@ -311,20 +484,17 @@ int main(int argc, char** argv)
 {
     const std::filesystem::path exe = executable_dir();
     attach_log(exe);
+    const std::filesystem::path icon = desktop_identity();
     game_files files;
-    if (!load_game_files(exe, files)) return 2;
+    if (!load_game_files(exe, icon, files)) return 2;
     use_game_files(files);
-    pc_options_boot();
+    pc_options_boot(exe);
     const char* elf = argc > 1 ? argv[1] : nullptr;
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-    timeBeginPeriod(1);
-    SetUnhandledExceptionFilter(crash_report);
-    ULONG guarantee = 256 * 1024;
-    SetThreadStackGuarantee(&guarantee);
-    vm_track_install();
-    AddVectoredExceptionHandler(0, crash_fatal);
-    vm_base = static_cast<uint8_t*>(VirtualAlloc(nullptr, k_vm_size, MEM_RESERVE, PAGE_READWRITE));
+    precise_timers();
+    install_crash_report();
+    vm_base = reserve_guest_memory();
     ppu_vm_size = 0;
     if (!vm_base) {
         std::printf("guest memory reservation failed\n");
@@ -339,7 +509,7 @@ int main(int argc, char** argv)
     }
     set_vfs_root(elf ? elf : "");
     cellGame_init_boot(ppu_vfs_root);
-    rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title()));
+    rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title(), (exe / "vk_pipelines.bin").string().c_str(), icon.string().c_str()));
     use_button_prompts();
 
     ppu_recomp_register();
@@ -350,7 +520,7 @@ int main(int argc, char** argv)
     lv2_init_syscalls();
     g_ps3_guest_caller = guest_caller;
 
-    if (const char* dbg = std::getenv("PS3_DEBUG"); dbg && *dbg) CreateThread(nullptr, 0, debug_console, const_cast<char*>(dbg), 0, nullptr);
+    if (const char* dbg = std::getenv("PS3_DEBUG"); dbg && *dbg) std::thread(debug_console, dbg).detach();
 
     ppu_run(entry, k_stack_top);
     return g_sys_process_exit_called ? (int)g_sys_process_exit_code : 0;

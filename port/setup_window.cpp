@@ -1,4 +1,4 @@
-﻿#include "setup_window.h"
+#include "setup_window.h"
 
 #include "firmware.h"
 
@@ -7,6 +7,11 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #define STBTT_STATIC
 #include "../ps3recomp/third_party/stb/stb_truetype.h"
+
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <fontconfig/fontconfig.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -62,19 +67,55 @@ uint32_t next_cp(const std::string& s, size_t& i)
     return cp;
 }
 
-bool load_font(font& f, std::initializer_list<const char*> names)
+bool read_font(font& f, const std::filesystem::path& file, int index)
+{
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return false;
+    f.ttf.assign(std::istreambuf_iterator<char>(in), {});
+    const int offset = stbtt_GetFontOffsetForIndex(f.ttf.data(), index);
+    return offset >= 0 && stbtt_InitFont(&f.info, f.ttf.data(), offset);
+}
+
+#ifdef _WIN32
+bool load_font(font& f, bool bold)
 {
     const char* windir = std::getenv("WINDIR");
     const std::filesystem::path dir = std::filesystem::path(windir ? windir : "C:\\Windows") / "Fonts";
-    for (const char* name : names) {
-        std::ifstream in(dir / name, std::ios::binary);
-        if (!in) continue;
-        f.ttf.assign(std::istreambuf_iterator<char>(in), {});
-        if (stbtt_InitFont(&f.info, f.ttf.data(), stbtt_GetFontOffsetForIndex(f.ttf.data(), 0))) return true;
-    }
+    for (const char* name : bold ? std::initializer_list<const char*>{ "seguisb.ttf", "segoeuib.ttf", "segoeui.ttf" } : std::initializer_list<const char*>{ "segoeui.ttf" })
+        if (read_font(f, dir / name, 0)) return true;
     return false;
 }
-
+#else
+bool load_font(font& f, bool bold)
+{
+    static void* const fc = dlopen("libfontconfig.so.1", RTLD_NOW);
+    if (!fc) return false;
+    const auto init = reinterpret_cast<decltype(&FcInitLoadConfigAndFonts)>(dlsym(fc, "FcInitLoadConfigAndFonts"));
+    const auto parse = reinterpret_cast<decltype(&FcNameParse)>(dlsym(fc, "FcNameParse"));
+    const auto substitute = reinterpret_cast<decltype(&FcConfigSubstitute)>(dlsym(fc, "FcConfigSubstitute"));
+    const auto defaults = reinterpret_cast<decltype(&FcDefaultSubstitute)>(dlsym(fc, "FcDefaultSubstitute"));
+    const auto match = reinterpret_cast<decltype(&FcFontMatch)>(dlsym(fc, "FcFontMatch"));
+    const auto get_string = reinterpret_cast<decltype(&FcPatternGetString)>(dlsym(fc, "FcPatternGetString"));
+    const auto get_integer = reinterpret_cast<decltype(&FcPatternGetInteger)>(dlsym(fc, "FcPatternGetInteger"));
+    const auto destroy = reinterpret_cast<decltype(&FcPatternDestroy)>(dlsym(fc, "FcPatternDestroy"));
+    if (!init || !parse || !substitute || !defaults || !match || !get_string || !get_integer || !destroy) return false;
+    static FcConfig* const config = init();
+    FcPattern* pattern = parse(reinterpret_cast<const FcChar8*>(bold ? "sans-serif:weight=180:variable=false" : "sans-serif:weight=80:variable=false"));
+    if (!config || !pattern) return false;
+    substitute(config, pattern, FcMatchPattern);
+    defaults(pattern);
+    FcResult result;
+    FcPattern* found = match(config, pattern, &result);
+    destroy(pattern);
+    if (!found) return false;
+    FcChar8* file = nullptr;
+    int index = 0;
+    get_integer(found, FC_INDEX, 0, &index);
+    const bool ok = get_string(found, FC_FILE, 0, &file) == FcResultMatch && read_font(f, reinterpret_cast<const char*>(file), index & 0xFFFF);
+    destroy(found);
+    return ok;
+}
+#endif
 struct button {
     SDL_FRect r;
     std::string label;
@@ -99,14 +140,18 @@ class setup_ui {
 public:
     setup_ui(const std::filesystem::path& exe, game_paths& paths, game_check check) : exe(exe), paths(paths), check(std::move(check)) {}
 
-    bool open()
+    bool open(const std::filesystem::path& icon)
     {
         if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) return false;
-        if (!load_font(regular, { "segoeui.ttf" }) || !load_font(bold, { "seguisb.ttf", "segoeuib.ttf", "segoeui.ttf" })) return false;
+        if (!load_font(regular, false) || !load_font(bold, true)) return false;
         const float ds = std::max(1.f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
         window = SDL_CreateWindow("Asura's Wrath", (int)(k_w * ds), (int)(k_h * ds), SDL_WINDOW_HIGH_PIXEL_DENSITY);
         renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
         if (!renderer) return false;
+        if (SDL_Surface* image = icon.empty() ? nullptr : SDL_LoadPNG(icon.string().c_str())) {
+            SDL_SetWindowIcon(window, image);
+            SDL_DestroySurface(image);
+        }
         SDL_SetRenderVSync(renderer, 1);
         int pw = 0, ph = 0;
         SDL_GetCurrentRenderOutputSize(renderer, &pw, &ph);
@@ -519,8 +564,8 @@ private:
 
 }
 
-bool run_setup(const std::filesystem::path& exe, game_paths& paths, game_check check)
+bool run_setup(const std::filesystem::path& exe, const std::filesystem::path& icon, game_paths& paths, game_check check)
 {
     setup_ui ui(exe, paths, std::move(check));
-    return ui.open() && ui.run();
+    return ui.open(icon) && ui.run();
 }

@@ -1,4 +1,4 @@
-﻿#include "game_files.h"
+#include "game_files.h"
 
 #include "firmware.h"
 #include "setup_window.h"
@@ -321,12 +321,12 @@ game_check check_game_paths(const std::filesystem::path& exe, const game_paths& 
     return mount(exe, paths, exe / "user" / "check" / std::to_string(++n)).check;
 }
 
-bool load_game_files(const std::filesystem::path& exe, game_files& out)
+bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out)
 {
     game_paths paths = read_paths(exe);
     const game_check first = check_game_paths(exe, paths);
     if (!first.ready()) {
-        if (!run_setup(exe, paths, first)) return false;
+        if (!run_setup(exe, icon, paths, first)) return false;
         write_paths(exe, paths);
     }
     std::error_code ec;

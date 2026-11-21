@@ -1,6 +1,9 @@
 {
   "dependencies": [
-    "sdl3",
+    {
+      "name": "sdl3",
+      "default-features": false
+    },
     "volk",
     "vulkan-headers",
     "vulkan-memory-allocator"

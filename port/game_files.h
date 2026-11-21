@@ -30,4 +30,4 @@ struct game_check {
 std::filesystem::path add_game_items(const std::filesystem::path& exe, game_paths& paths, const std::vector<std::filesystem::path>& items);
 game_check check_game_paths(const std::filesystem::path& exe, const game_paths& paths);
 std::filesystem::path firmware_dir(const std::filesystem::path& exe, const game_paths& paths);
-bool load_game_files(const std::filesystem::path& exe, game_files& out);
+bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out);

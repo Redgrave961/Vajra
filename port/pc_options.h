@@ -1,3 +1,5 @@
 #pragma once
 
-void pc_options_boot();
+#include <filesystem>
+
+void pc_options_boot(const std::filesystem::path& dir);
