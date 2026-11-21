@@ -240,7 +240,7 @@ DWORD WINAPI debug_console(LPVOID param)
 }
 
 #ifndef ASURA_PGO_GEN
-extern "C" char* (__cdecl* __imp_getenv)(const char*) = cached_getenv;
+extern "C" char* getenv(const char* name) { return cached_getenv(name); }
 #endif
 
 namespace {

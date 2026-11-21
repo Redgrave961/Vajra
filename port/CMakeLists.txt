@@ -6,8 +6,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    message(FATAL_ERROR "Build with clang-cl (see build.ps1)")
+if(NOT MINGW OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "Build with llvm-mingw (see build.ps1)")
 endif()
 
 set(PS3RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../ps3recomp" CACHE PATH "ps3recomp toolkit")
@@ -139,18 +139,18 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 find_package(SDL3 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime SDL3::SDL3 dbghelp winmm)
 set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX WIN32_EXECUTABLE TRUE OUTPUT_NAME AsurasWrath)
-target_link_options(${PROJECT_NAME} PRIVATE /ENTRY:mainCRTStartup)
+target_link_options(${PROJECT_NAME} PRIVATE -static)
 
 target_compile_options(${PROJECT_NAME} PRIVATE
-    /W4 -Wno-unused-parameter
+    -Wall -Wextra -Wno-unused-parameter
     -fno-strict-aliasing
+    -fms-volatile
     -fwrapv
-    /Zc:tlsGuards-
-    /clang:-ffp-contract=off)
+    -ffp-contract=off)
 
 file(SHA256 "${PORT_EBOOT}" PORT_EBOOT_SHA256)
 set_source_files_properties(game_files.cpp PROPERTIES COMPILE_DEFINITIONS PORT_EBOOT_SHA256="${PORT_EBOOT_SHA256}")
-set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "/w;/bigobj")
+set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
 set_source_files_properties(${SPU_SOURCES} PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
     COMPILE_OPTIONS "${PS3RECOMP_OPT_FLAG}")

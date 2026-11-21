@@ -86,7 +86,7 @@ struct Vm {
         w64(sp + 0x10, lr);
     }
 
-    uint32_t alloca(uint32_t sp, uint32_t size) const
+    uint32_t stack_alloc(uint32_t sp, uint32_t size) const
     {
         const uint64_t chain = r64(sp);
         sp -= (((size + 7) & ~7u) + 0x7F) & ~0xFu;
@@ -257,7 +257,7 @@ void call_script(Vm& v, uint32_t f, uint32_t self, uint32_t stack, uint32_t resu
     const uint32_t size = v.r32(function + 0x48);
     uint32_t sp = f, frame = 0;
     if (size) {
-        sp = v.alloca(f, size);
+        sp = v.stack_alloc(f, size);
         frame = sp + 0x70;
         v.zero(sp, 0x00040870, frame, size);
     }
@@ -284,7 +284,7 @@ void call_script(Vm& v, uint32_t f, uint32_t self, uint32_t stack, uint32_t resu
             uint32_t addr;
             if (v.r64(prop + 0x48) & 0x100) {
                 next(v, sp, 0x00040958, v.r32(stack + 0x14), stack, 0);
-                sp = v.alloca(sp, 0x10);
+                sp = v.stack_alloc(sp, 0x10);
                 addr = v.r32(k_prop_addr);
                 if (!addr) addr = v.r32(prop + 0x54) + frame;
                 v.w32(sp + 0x74, addr);
@@ -319,7 +319,7 @@ void call_script(Vm& v, uint32_t f, uint32_t self, uint32_t stack, uint32_t resu
         v.w32(k_prop_addr, 0);
         v.w32(k_prop_object, 0);
         if (v.r64(prop + 0x48) & 0x100) {
-            next_sp = v.alloca(sp, 0x10);
+            next_sp = v.stack_alloc(sp, 0x10);
             v.w32(next_sp + 0x70, prop);
             v.w32(next_sp + 0x74, frame + v.r32(prop + 0x54));
             link_out(v, last, next_sp + 0x70);
@@ -507,7 +507,7 @@ void struct_member(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t st
         const uint32_t align = v.r32(owner + 0x58);
         const uint32_t size = (v.r32(owner + 0x48) + align - 1) & ~(align - 1);
         if (size) {
-            sp = v.alloca(f, size);
+            sp = v.stack_alloc(f, size);
             copy = sp + 0x70;
         }
         v.zero(sp, 0x00048AF8, copy, size);
@@ -1424,7 +1424,7 @@ void eat_return_value(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stac
     const uint32_t size = v.r32(prop + 0x40) * v.r32(prop + 0x44);
     uint32_t sp = f, temp = 0;
     if (size) {
-        sp = v.alloca(f, size);
+        sp = v.stack_alloc(f, size);
         temp = sp + 0x70;
     }
     v.zero(sp, 0x000474C0, temp, size);
@@ -2103,7 +2103,7 @@ uint32_t dyn_item(Vm& v, uint32_t f, uint32_t& sp, uint64_t lr_zero, uint64_t lr
 {
     uint32_t size = v.r32(inner + 0x44), temp = 0;
     if (size) {
-        sp = v.alloca(f, size);
+        sp = v.stack_alloc(f, size);
         temp = sp + 0x70;
         size = v.r32(inner + 0x44);
     }
@@ -2312,7 +2312,7 @@ void dyn_find(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, 
     const uint32_t size = v.r32(inner + 0x44);
     uint32_t sp = f, temp = 0;
     if (size) {
-        sp = v.alloca(f, size);
+        sp = v.stack_alloc(f, size);
         temp = sp + 0x70;
     }
     v.zero(sp, 0x00043BB4, temp, size);
@@ -2350,7 +2350,7 @@ void dyn_find_struct(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t 
     const uint32_t size = v.r32(member + 0x44) * v.r32(member + 0x40);
     uint32_t sp = f, temp = 0;
     if (size) {
-        sp = v.alloca(f, size);
+        sp = v.stack_alloc(f, size);
         temp = sp + 0x70;
     }
     v.zero(sp, 0x00043F6C, temp, size);
@@ -2418,11 +2418,11 @@ void dyn_sort(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, 
     if ((int32_t)v.r32(array + 4) <= 0) return;
     uint32_t sp = f, parms = 0, temp = 0;
     if (const uint32_t size = v.r32(function + 0x48)) {
-        sp = v.alloca(sp, size);
+        sp = v.stack_alloc(sp, size);
         parms = sp + 0x70;
     }
     if (const uint32_t size = v.r32(inner + 0x44)) {
-        sp = v.alloca(sp, size);
+        sp = v.stack_alloc(sp, size);
         temp = sp + 0x70;
     }
     bool swapped;
@@ -2494,9 +2494,9 @@ void struct_compare(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t s
     const uint32_t size = (v.r32(strukt + 0x48) + align - 1) & ~(align - 1);
     uint32_t sp = f, a = 0, b = 0;
     if (size) {
-        sp = v.alloca(sp, size);
+        sp = v.stack_alloc(sp, size);
         a = sp + 0x70;
-        sp = v.alloca(sp, size);
+        sp = v.stack_alloc(sp, size);
         b = sp + 0x70;
     }
     v.zero(sp, s.zero_a, a, size);

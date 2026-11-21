@@ -6,7 +6,7 @@ Static recompilation of Asura's Wrath (PS3, BLES01227, update 1.02) on [ps3recom
 
 - Your own BLES01227 disc image and the official 1.02 update
 - RPCS3 with PS3 firmware installed (decryption, `dev_flash`)
-- clang-cl, lld-link, CMake, Ninja, Python 3.10+
+- [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (UCRT x86_64) in `E:\tools\llvm-mingw` (or `build.ps1 -Tools <dir>`), vcpkg in `<tools>\vcpkg`, CMake, Ninja, Python 3.10+. No Visual Studio or Windows SDK.
 
 ## Layout
 
@@ -25,5 +25,5 @@ ps3recomp/       toolkit
 1. Copy the disc's `PS3_GAME` and `PS3_DISC.SFB` to `data/dev_bdvd`, the 1.02 update to `data/dev_hdd0/game/BLES01227`.
 2. `rpcs3 --decrypt data/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN` (writes `EBOOT.elf` beside it).
 3. `python -m venv venv`, `venv\Scripts\pip install -r ps3recomp/requirements.txt`
-4. `port\lift.ps1` and `port\lift_firmware.ps1`, then `port\build.ps1` (ThinLTO, `-O3`, `-march=native`).
+4. `port\lift.ps1` and `port\lift_firmware.ps1`, then `port\build.ps1` (builds SDL3, volk, Vulkan-Headers and VMA with vcpkg for `x64-llvm-mingw`, then the game: ThinLTO, `-O3`, `-march=x86-64-v3`, static exe).
 5. Start `port\build\AsurasWrath.exe`. It finds `data/` next to it or in a parent folder; the log goes to `asura.log` beside the exe.

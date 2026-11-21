@@ -12,4 +12,5 @@
 *.log
 __pycache__/
 /port/recompiled_prx/
+/port/vcpkg_installed/
 /pgo/
