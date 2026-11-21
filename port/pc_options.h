@@ -1,3 +1,3 @@
 #pragma once
 
-bool pc_options_boot();
+void pc_options_boot();

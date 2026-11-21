@@ -29,6 +29,7 @@ constexpr uint32_t k_value_size = 0x10;
 constexpr uint32_t k_proxy_blur[] = { 0x14, 0x18, 0x1C };
 constexpr uint32_t k_proxy_bloom_scale = 0x38;
 constexpr uint32_t k_proxy_motion_blur = 0x110;
+constexpr uint32_t k_use_vsync = 0x01A56E04;
 constexpr char k_prefix[] = "PCOpt_";
 
 struct Choice {
@@ -119,7 +120,7 @@ Choices frame_rate_choices()
 
 enum : uint32_t { row_display = 0, row_frame_rate = 2 };
 
-bool g_unlocked;
+bool g_settings_parsed;
 std::atomic<bool> g_motion_blur{ true };
 std::atomic<bool> g_depth_of_field{ true };
 std::atomic<bool> g_bloom{ true };
@@ -128,7 +129,10 @@ void apply_display(uint32_t value) { rsx_vk_set_display((rsx_vk_display)value); 
 void apply_resolution(uint32_t value) { rsx_vk_set_resolution_scale(value, 720); }
 void apply_frame_rate(uint32_t value)
 {
-    if (g_unlocked && value != 30) rsx_core_set_frame_limit(value);
+    const bool console = value == 30;
+    rsx_core_set_frame_limit(console ? 0 : value);
+    rsx_vk_set_free_flips(!console);
+    if (g_settings_parsed) vm_write32(k_use_vsync, console);
 }
 void apply_vsync(uint32_t value) { rsx_vk_set_vsync((int)value); }
 void apply_motion_blur(uint32_t value) { g_motion_blur.store(value != 0, std::memory_order_relaxed); }
@@ -148,7 +152,7 @@ struct Option {
 const Option k_options[] = {
     { "display", "Display Mode", "Windowed, borderless window, or exclusive fullscreen at the display's native mode.", display_choices, "borderless", nullptr, apply_display },
     { "resolution", "Resolution", "Internal rendering resolution.", resolution_choices, nullptr, parse_resolution, apply_resolution },
-    { "frame_rate", "Frame Rate", "Frame rate limit. 30 uses the console's original pacing; switching to or from 30 takes effect after restarting the game.", frame_rate_choices, "unlimited", parse_frame_rate, apply_frame_rate },
+    { "frame_rate", "Frame Rate", "Frame rate limit. 30 uses the console's original pacing.", frame_rate_choices, "unlimited", parse_frame_rate, apply_frame_rate },
     { "vsync", "VSync", "Paces frames to the display refresh. Off shows each new frame as soon as it is ready.", switch_choices, "off", nullptr, apply_vsync },
     { "motion_blur", "Motion Blur", "Blur from camera and object motion.", switch_choices, "on", nullptr, apply_motion_blur },
     { "depth_of_field", "Depth of Field", "Blur outside the camera's focus, mainly in cutscenes.", switch_choices, "on", nullptr, apply_depth_of_field },
@@ -388,16 +392,21 @@ void build_menu(ppu_context* ctx, const uint8_t* swf, Menu& menu)
 
 }
 
-bool pc_options_boot()
+void pc_options_boot()
 {
     std::lock_guard<std::mutex> hold(g_settings_lock);
     load();
-    const auto rate = value(row_frame_rate);
-    g_unlocked = rate != 30u;
     rsx_vk_on_display_toggle(display_toggled);
     rsx_vk_on_display_modes(display_modes_changed);
     for (uint32_t r = 0; r < k_rows; r++) sync(r);
-    return g_unlocked;
+}
+
+void func_001F8100(ppu_context* ctx)
+{
+    run(func_001F8100_lifted, ctx);
+    std::lock_guard<std::mutex> hold(g_settings_lock);
+    g_settings_parsed = true;
+    vm_write32(k_use_vsync, g_applied[row_frame_rate] == 30u);
 }
 
 void func_014749B8(ppu_context* ctx)

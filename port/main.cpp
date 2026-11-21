@@ -307,14 +307,6 @@ void func_0013A02C(ppu_context* ctx)
     ctx->gpr[3] = 1;
 }
 
-void unlock_frame_rate()
-{
-    const char* args = env_os("PS3_ARGV");
-    char line[512];
-    std::snprintf(line, sizeof line, "%s%s-novsync", args ? args : "", args && *args ? ";" : "");
-    _putenv_s("PS3_ARGV", line);
-    _putenv_s("PS3_FREE_FLIPS", "1");
-}
 int main(int argc, char** argv)
 {
     const std::filesystem::path exe = executable_dir();
@@ -322,7 +314,7 @@ int main(int argc, char** argv)
     game_files files;
     if (!load_game_files(exe, files)) return 2;
     use_game_files(files);
-    if (pc_options_boot()) unlock_frame_rate();
+    pc_options_boot();
     const char* elf = argc > 1 ? argv[1] : nullptr;
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
