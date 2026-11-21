@@ -187,7 +187,10 @@ OM = var('OptionMenu')
 PM = var('PauseMenu')
 EI = get(var('flash'), 'external', 'ExternalInterface')
 GAME = var('BCGame')
+BASE = var('Base')
 TAG = 'PCOpt'
+TAGS = (TAG, 'PCOptKbm')
+CLAUSES = ('CLAUSE_ID_GRAPHICS', 'CLAUSE_ID_KBM')
 
 
 def ei(name, *args): return call(EI, 'call', name, *args)
@@ -249,14 +252,72 @@ def register(g, pkg, symbol, cls):
     g.stmt(call(var('Object'), 'registerClass', symbol, get(pkg, cls)))
 
 
-def base_call(pkg, cls, name):
-    return lambda g: g.stmt(call(get(proto(pkg, cls), name), 'call', THIS))
+def base_call(pkg, cls, name, *args):
+    return lambda g: g.stmt(call(get(proto(pkg, cls), name), 'call', THIS, *args))
 
 
-def row_values(g, i, count, getf, param):
-    g.stmt(store(count, ei('PCOpt_Count', i)))
-    g.stmt(store(getf, add('PCOpt_Get', i)))
+def row_values(g, row, count, getf, param):
+    g.stmt(store(count, ei('PCOpt_Count', row)))
+    g.stmt(store(getf, add('PCOpt_Get', row)))
     g.stmt(store(param, call(GAME, 'CallInt', getf)))
+
+
+def page_rows(g, n, page_mc):
+    page = get(page_mc, 'm_page')
+    g.stmt(store(n, ei('PCOpt_Rows', page)))
+    g.emit(setm(page_mc, 'm_first', ei('PCOpt_First', page)))
+
+
+def bind_input(pkg, base):
+    def body(g):
+        details, path, result = R(2), R(3), R(4)
+        pushed = lambda button: call(BASE, 'IsButtonPush', details, get(GAME, button))
+
+        def capturing(g):
+            if_(g, pushed('GAMEPAD_CANCEL'), lambda g: g.stmt(ei('PCOpt_Capture', 1)))
+            ret(g, True)
+
+        def decided(g):
+            g.emit(setm(THIS, 'm_capture', True))
+            g.emit(setm(THIS, 'onEnterFrame', get(THIS, 'CapturePoll')))
+
+        def acted(g):
+            g.stmt(call(GAME, 'PlaySoundDecide'))
+            if_(g, eq(result, 1), decided)
+            g.stmt(call(THIS, 'Refresh'))
+            ret(g, True)
+
+        def decide(g):
+            g.stmt(store(result, ei('PCOpt_Decide', add(get(THIS, 'm_first'), get(THIS, 'm_cursor')))))
+            if_(g, less(0, result), acted)
+
+        if_(g, get(THIS, 'm_capture'), capturing)
+        if_(g, pushed('GAMEPAD_DECIDE'), decide)
+        ret(g, call(get(proto(pkg, base), 'handleInput'), 'call', THIS, details, path))
+    return body
+
+
+def refresh_help(field, rest):
+    def body(g):
+        i = R(2)
+        loop(g, i, get(THIS, 'm_details', 'length'), lambda g: g.emit(setm(
+            member(get(THIS, 'm_details'), i), field, ei('PCOpt_Help', add(get(THIS, 'm_first'), i)))))
+        rest(g)
+    return body
+
+
+def flag_wrap(g, pkg, cls, name, on):
+    wrap(g, pkg, cls, name)
+    method(g, pkg, cls, name, [], 2, lambda g: (g.stmt(ei('PCOpt_Diagram', on)), g.stmt(call(THIS, 'PCOpt_' + name))))
+
+
+def capture_poll(g):
+    def done(g):
+        g.emit(setm(THIS, 'm_capture', False))
+        g.emit(setm(THIS, 'onEnterFrame', UNDEFINED))
+        g.stmt(call(THIS, 'Refresh'))
+
+    if_(g, eq(ei('PCOpt_Capture', 0), 0), done)
 
 
 def cycle_select(g, p, active):
@@ -347,13 +408,13 @@ def title_cycle_set_param(g):
 
 
 def title_page_ctor(g):
-    for k, v in (('m_input', False), ('m_repeat', 0), ('m_cursor', 0), ('m_active', False)):
+    for k, v in (('m_input', False), ('m_repeat', 0), ('m_cursor', 0), ('m_active', False), ('m_capture', False)):
         g.emit(setm(THIS, k, v))
 
 
 def title_page_init(g):
-    n, i, title, sel, s, count, getf, param = (R(k) for k in range(2, 10))
-    g.stmt(store(n, ei('PCOpt_Rows')))
+    n, i, title, sel, s, count, getf, param, row = (R(k) for k in range(2, 11))
+    page_rows(g, n, THIS)
     g.emit(setm(THIS, 'm_details', new('Array')))
 
     def toggle(g):
@@ -362,22 +423,23 @@ def title_page_init(g):
 
     def cycle(g):
         g.stmt(store(s, call(THIS, 'attachMovie', 'PCOpt_Cycle', sel, call(THIS, 'getNextHighestDepth'))))
-        g.emit(setm(s, 'm_row', i))
+        g.emit(setm(s, 'm_row', row))
         g.emit(setm(s, 'm_count', count))
         g.stmt(call(s, 'SetParam', param))
 
-    def row(g):
+    def entry(g):
+        g.stmt(store(row, add(get(THIS, 'm_first'), i)))
         g.stmt(store(title, add('mcInst_Title', i)))
         g.stmt(store(sel, add('mcInst_Sel', i)))
-        row_values(g, i, count, getf, param)
+        row_values(g, row, count, getf, param)
         g.stmt(call(THIS, 'attachMovie', 'mc_Text', title, call(THIS, 'getNextHighestDepth')))
-        g.stmt(call(THIS, 'SetDetailTitle', title, ei('PCOpt_Title', i)))
+        g.stmt(call(THIS, 'SetDetailTitle', title, ei('PCOpt_Title', row)))
         if_(g, eq(count, 0), toggle, cycle)
         g.stmt(call(get(THIS, 'm_details'), 'push', obj(
             ('Title', title), ('Sel', sel), ('KeepParam', param), ('GetFunc', getf),
-            ('SetFunc', add('PCOpt_Set', i)), ('HelpText', ei('PCOpt_Help', i)))))
+            ('SetFunc', add('PCOpt_Set', row)), ('HelpText', ei('PCOpt_Help', row)))))
 
-    loop(g, i, n, row)
+    loop(g, i, n, entry)
     g.emit(setm(THIS, 'm_cursor', 0))
     g.stmt(call(THIS, 'Layout'))
 
@@ -386,43 +448,52 @@ def title_details_init(g):
     page = R(2)
     main = get(OM, 'OptionMain')
     g.stmt(call(THIS, 'PCOpt_Init'))
-    g.stmt(store(page, call(THIS, 'attachMovie', 'PCOpt_Page', 'mcInst_DetailPC', call(THIS, 'getNextHighestDepth'))))
-    g.stmt(call(page, 'Init'))
-    g.stmt(call(page, 'SetMenuMC', get(THIS, 'm_instMenu')))
-    g.emit(setm(page, '_visible', False))
     g.emit(setm(get(THIS, 'm_detailList'), get(main, 'CLAUSE_ID_DEFAULT'), obj(('Lb', 'detail07'))))
-    g.emit(setm(get(THIS, 'm_detailList'), get(main, 'CLAUSE_ID_GRAPHICS'), obj(('mc', page), ('Lb', 'detail07'))))
+    for k, clause in enumerate(CLAUSES):
+        g.stmt(store(page, call(THIS, 'attachMovie', 'PCOpt_Page', 'mcInst_DetailPC%d' % k, call(THIS, 'getNextHighestDepth'))))
+        g.emit(setm(page, 'm_page', k))
+        g.stmt(call(page, 'Init'))
+        g.stmt(call(page, 'SetMenuMC', get(THIS, 'm_instMenu')))
+        g.emit(setm(page, '_visible', False))
+        g.emit(setm(get(THIS, 'm_detailList'), get(main, clause), obj(('mc', page), ('Lb', 'detail07'))))
 
 
 def title_details_set(g):
     cid = R(2)
     g.stmt(call(THIS, 'PCOpt_SetDetails', cid))
-    g.emit(setm(get(THIS, 'mcInst_DetailPC'), '_visible', eq(cid, get(OM, 'OptionMain', 'CLAUSE_ID_GRAPHICS'))))
+    for k, clause in enumerate(CLAUSES):
+        g.emit(setm(get(THIS, 'mcInst_DetailPC%d' % k), '_visible', eq(cid, get(OM, 'OptionMain', clause))))
 
 
 def title_selector_add(g):
-    cid, label, help_, count, k = R(2), R(3), R(4), R(5), R(6)
+    cid, label, help_, count, k, slot = R(2), R(3), R(4), R(5), R(6), R(7)
     main = get(OM, 'OptionMain')
+
+    def add_page(k):
+        return lambda g: g.stmt(call(THIS, 'PCOpt_AddSelect', get(main, CLAUSES[k]), ei('PCOpt_Page', k), ei('PCOpt_PageHelp', k)))
 
     def graphics(g):
         g.stmt(store(count, add(get(THIS, 'm_items', 'length'), 2)))
-        g.stmt(call(THIS, 'attachMovie', 'mc_Text', add('mcInst_Sel', count), call(THIS, 'getNextHighestDepth')))
 
-        def slot(g):
-            g.emit(setm(member(THIS, add('mcInst_Sel', add(k, 1))), '_y',
-                        sub(div(mul(k, TITLE_LIST_SPAN), sub(count, 1)), TITLE_LIST_SPAN / 2)))
+        def place_slot(g):
+            g.stmt(store(slot, add('mcInst_Sel', add(k, 1))))
+            if_(g, eq(member(THIS, slot), UNDEFINED),
+                lambda g: g.stmt(call(THIS, 'attachMovie', 'mc_Text', slot, call(THIS, 'getNextHighestDepth'))))
+            g.emit(setm(member(THIS, slot), '_y', sub(div(mul(k, TITLE_LIST_SPAN), sub(count, 1)), TITLE_LIST_SPAN / 2)))
 
-        loop(g, k, count, slot)
-        g.stmt(call(THIS, 'PCOpt_AddSelect', get(main, 'CLAUSE_ID_GRAPHICS'), ei('PCOpt_Page'), ei('PCOpt_PageHelp')))
+        loop(g, k, count, place_slot)
+        add_page(0)(g)
 
     if_(g, eq(cid, get(main, 'CLAUSE_ID_DEFAULT')), graphics)
     g.stmt(call(THIS, 'PCOpt_AddSelect', cid, label, help_))
+    if_(g, eq(cid, get(main, 'CLAUSE_ID_OPERATION')), add_page(1))
 
 
 def title_tags():
     g = Gen()
     main = get(OM, 'OptionMain')
-    g.emit(setm(main, 'CLAUSE_ID_GRAPHICS', add(get(main, 'CLAUSE_ID_DEFAULT'), 1)))
+    for k, clause in enumerate(CLAUSES):
+        g.emit(setm(main, clause, add(get(main, 'CLAUSE_ID_DEFAULT'), k + 1)))
 
     define_class(g, OM, 'OptionCycle', 'OptionChoice', 2, lambda g: None)
     method(g, OM, 'OptionCycle', 'SetParam', ['Prm', 'bActive', 'bOpen'], 5, title_cycle_set_param)
@@ -430,15 +501,19 @@ def title_tags():
     register(g, OM, 'PCOpt_Cycle', 'OptionCycle')
 
     define_class(g, OM, 'DetailGraphics', 'OptionDetail', 2, title_page_ctor)
-    method(g, OM, 'DetailGraphics', 'Init', [], 10, title_page_init)
+    method(g, OM, 'DetailGraphics', 'Init', [], 11, title_page_init)
     method(g, OM, 'DetailGraphics', 'Layout', [], 8, layout(TITLE_VISIBLE, TITLE_PITCH, TITLE_FIRST, (
         (lambda i: member(THIS, get(member(get(THIS, 'm_details'), i), 'Title')), 0),
         (lambda i: member(THIS, get(member(get(THIS, 'm_details'), i), 'Sel')), TITLE_SEL_DY))))
     method(g, OM, 'DetailGraphics', 'SetCursor', [], 2, scrolled_cursor(OM, 'OptionDetail'))
     method(g, OM, 'DetailGraphics', 'DefaultSetting', [], 2,
-           lambda g: (g.stmt(ei('PCOpt_Default')), base_call(OM, 'OptionDetail', 'DefaultSetting')(g)))
+           lambda g: (g.stmt(ei('PCOpt_Default', get(THIS, 'm_page'))), base_call(OM, 'OptionDetail', 'DefaultSetting')(g)))
     method(g, OM, 'DetailGraphics', 'IsChangeParam', [], 2, lambda g: ret(g, False))
     method(g, OM, 'DetailGraphics', 'Reset', [], 2, lambda g: None)
+    method(g, OM, 'DetailGraphics', 'handleInput', ['details', 'pathToFocus'], 5, bind_input(OM, 'OptionDetail'))
+    method(g, OM, 'DetailGraphics', 'CapturePoll', [], 2, capture_poll)
+    method(g, OM, 'DetailGraphics', 'Refresh', [], 3, refresh_help('HelpText', lambda g: (
+        base_call(OM, 'OptionDetail', 'DefaultSetting')(g), g.stmt(call(THIS, 'SetCursor')))))
     register(g, OM, 'PCOpt_Page', 'DetailGraphics')
 
     wrap(g, OM, 'OptionDetails', 'Init')
@@ -446,7 +521,10 @@ def title_tags():
     wrap(g, OM, 'OptionDetails', 'SetDetails')
     method(g, OM, 'OptionDetails', 'SetDetails', ['ClauseID'], 3, title_details_set)
     wrap(g, OM, 'OptionSelector', 'AddSelect')
-    method(g, OM, 'OptionSelector', 'AddSelect', ['ClauseID', 'Text', 'HelpText'], 7, title_selector_add)
+    method(g, OM, 'OptionSelector', 'AddSelect', ['ClauseID', 'Text', 'HelpText'], 8, title_selector_add)
+    flag_wrap(g, OM, 'OptionMain', 'OpenOperation', 1)
+    flag_wrap(g, OM, 'OptionMain', 'CloseOperation', 0)
+    flag_wrap(g, OM, 'OptionMain', 'Close', 0)
 
     choice = place(1, TITLE_CHOICE, matrix(), 'mcInst_ChoiceL')
     return (sprite(TITLE_PAGE, b'') + sprite(TITLE_CYCLE, choice)
@@ -466,6 +544,7 @@ PAUSE_BASE_DEPTH = 9
 PAUSE_ITEM_DEPTH = 10
 PAUSE_BASE_SLOTS = 3
 CONTROLS_LABEL = 'loop'
+OPERATION_LABEL = 'operation'
 
 
 def pause_cycle_set_param(g):
@@ -481,26 +560,37 @@ def pause_cycle_set_param(g):
 
 
 def pause_page_ctor(g):
-    for k, v in (('m_details', new('Array')), ('m_input', False), ('m_repeat', 0), ('m_cursor', 0)):
+    for k, v in (('m_details', new('Array')), ('m_input', False), ('m_repeat', 0), ('m_cursor', 0), ('m_capture', False)):
         g.emit(setm(THIS, k, v))
 
 
 def pause_page_init(g):
     n, i = R(2), R(3)
-    g.stmt(store(n, ei('PCOpt_Rows')))
+    page_rows(g, n, THIS)
     loop(g, i, n, lambda g: g.stmt(call(THIS, 'attachMovie', 'TextR', add('mcInst_Sel', add(i, 1)),
                                         call(THIS, 'getNextHighestDepth'))))
 
 
-def pause_page_active(g):
+def pause_page_refresh(g):
+    i = R(2)
+
+    def entry(g):
+        g.stmt(call(member(THIS, add('mcInst_Sel', add(i, 1))), 'SetParam',
+                    call(GAME, 'CallInt', get(member(get(THIS, 'm_details'), i), 'GetFunc')), False, False))
+
+    loop(g, i, get(THIS, 'm_details', 'length'), entry)
+    g.stmt(call(THIS, 'SetCursor'))
+
+
+def pause_page_show(g):
     if_(g, eq(get(THIS, 'm_details', 'length'), 0), pause_page_fill)
-    base_call(PM, 'DetailCamera', 'Active')(g)
+    g.stmt(call(THIS, 'Layout'))
 
 
 def pause_page_fill(g):
-    n, i, item, s, count, getf, param, on, off = (R(k) for k in range(2, 11))
+    n, i, item, s, count, getf, param, on, off, row = (R(k) for k in range(2, 12))
     page = get(PM, 'DetailGraphics')
-    g.stmt(store(n, ei('PCOpt_Rows')))
+    page_rows(g, n, THIS)
 
     def toggle(g):
         g.stmt(store(on, 'On'))
@@ -510,61 +600,71 @@ def pause_page_fill(g):
         g.stmt(store(on, ''))
         g.stmt(store(off, ''))
         g.stmt(store(s, get(item, 'mcInst_Select')))
-        for k, v in (('m_row', i), ('m_count', count), ('SetParam', get(page, 'CycleSetParam')),
+        for k, v in (('m_row', row), ('m_count', count), ('SetParam', get(page, 'CycleSetParam')),
                      ('GetParamMax', get(page, 'CycleParamMax'))):
             g.emit(setm(s, k, v))
         g.emit(setm(get(s, 'mcInst_TextL'), '_x', 0))
 
-    def row(g):
+    def entry(g):
+        g.stmt(store(row, add(get(THIS, 'm_first'), i)))
         g.stmt(store(item, member(THIS, add('mcInst_Sel', add(i, 1)))))
-        row_values(g, i, count, getf, param)
+        row_values(g, row, count, getf, param)
         if_(g, eq(count, 0), toggle, cycle)
-        g.stmt(call(THIS, 'AddDetail', get(PM, 'OptionSelectItem', 'TYPE_CHOICE'), ei('PCOpt_Title', i), on, off,
-                    ei('PCOpt_Help', i), add('PCOpt_Set', i), getf))
+        g.stmt(call(THIS, 'AddDetail', get(PM, 'OptionSelectItem', 'TYPE_CHOICE'), ei('PCOpt_Title', row), on, off,
+                    ei('PCOpt_Help', row), add('PCOpt_Set', row), getf))
 
-    loop(g, i, n, row)
+    loop(g, i, n, entry)
 
 
 def pause_selector_init(g):
     page = R(2)
     details = get(THIS, 'm_instDetails')
+    pages = get(THIS, 'm_pc')
     g.stmt(call(THIS, 'PCOpt_Init'))
-    if_(g, neq(get(THIS, 'm_pcPage'), UNDEFINED), lambda g: g.stmt(call(get(THIS, 'm_pcPage'), 'removeMovieClip')))
-    g.stmt(store(page, call(details, 'attachMovie', 'PCOpt_PausePage', 'mcInst_PCOpt', call(details, 'getNextHighestDepth'))))
-    g.stmt(call(page, 'Init'))
-    g.emit(setm(page, '_visible', False))
-    g.emit(setm(THIS, 'm_pcPage', page))
+    if_(g, neq(pages, UNDEFINED), lambda g: [g.stmt(call(member(pages, tag), 'removeMovieClip')) for tag in TAGS])
+    g.emit(setm(THIS, 'm_pc', obj()))
+    for k, tag in enumerate(TAGS):
+        g.stmt(store(page, call(details, 'attachMovie', 'PCOpt_PausePage', 'mcInst_PCOpt%d' % k, call(details, 'getNextHighestDepth'))))
+        g.emit(setm(page, 'm_page', k))
+        g.stmt(call(page, 'Init'))
+        g.emit(setm(page, '_visible', False))
+        g.emit(setm(pages, tag, page))
 
 
 def pause_selector_change(g):
     tag_, shown = R(2), R(3)
     details = get(THIS, 'm_instDetails')
+    pages = get(THIS, 'm_pc')
     g.stmt(call(THIS, 'PCOpt_ChangeOptionDetails', tag_))
-    g.stmt(store(shown, eq(tag_, TAG)))
-    g.emit(setm(get(THIS, 'm_pcPage'), '_visible', shown))
+    for tag in TAGS:
+        g.emit(setm(member(pages, tag), '_visible', eq(tag_, tag)))
+    g.stmt(store(shown, neq(member(pages, tag_), UNDEFINED)))
+    if_(g, shown, lambda g: g.stmt(call(member(pages, tag_), 'Show')))
     for clip in ('mcInst_Camera', 'mcInst_Vibration'):
         g.emit(setm(get(details, clip), '_visible', (g_not, shown)))
 
 
 def pause_selector_open(g):
-    tag_ = R(2)
+    tag_, page = R(2), R(3)
     g.stmt(call(THIS, 'PCOpt_OpenOptionDetails', tag_))
+    g.stmt(store(page, member(get(THIS, 'm_pc'), tag_)))
 
-    def graphics(g):
+    def opened(g):
         g.emit(setm(THIS, 'm_menuType', get(PM, 'OptionSelector', 'MENU_TYPE_PCOPT')))
-        g.stmt(call(get(THIS, 'm_pcPage'), 'Active'))
+        g.emit(setm(THIS, 'm_pcActive', page))
+        g.stmt(call(page, 'Active'))
 
-    if_(g, eq(tag_, TAG), graphics)
+    if_(g, neq(page, UNDEFINED), opened)
 
 
 def pause_selector_input(g):
     details, path = R(2), R(3)
 
-    def graphics(g):
-        g.stmt(call(get(THIS, 'm_pcPage'), 'handleInput', details, path))
+    def forward(g):
+        g.stmt(call(get(THIS, 'm_pcActive'), 'handleInput', details, path))
         ret(g, False)
 
-    if_(g, eq(get(THIS, 'm_menuType'), get(PM, 'OptionSelector', 'MENU_TYPE_PCOPT')), graphics)
+    if_(g, eq(get(THIS, 'm_menuType'), get(PM, 'OptionSelector', 'MENU_TYPE_PCOPT')), forward)
     ret(g, call(THIS, 'PCOpt_handleInput', details, path))
 
 
@@ -572,7 +672,14 @@ def pause_menu_add_main(g):
     args = [R(k) for k in range(2, 11)]
     g.stmt(call(THIS, 'PCOpt_AddMainSelect', *args))
     if_(g, eq(args[8], CONTROLS_LABEL), lambda g: g.stmt(call(
-        THIS, 'PCOpt_AddMainSelect', call(ei('PCOpt_Page'), 'toUpperCase'), '', True, ei('PCOpt_PageHelp'), '', '', '', '', TAG)))
+        THIS, 'PCOpt_AddMainSelect', call(ei('PCOpt_Page', 0), 'toUpperCase'), '', True, ei('PCOpt_PageHelp', 0), '', '', '', '', TAG)))
+
+
+def pause_menu_add_sub(g):
+    args = [R(k) for k in range(2, 11)]
+    g.stmt(call(THIS, 'PCOpt_AddSubSelect', *args))
+    if_(g, eq(args[8], OPERATION_LABEL), lambda g: g.stmt(call(
+        THIS, 'PCOpt_AddSubSelect', ei('PCOpt_Page', 1), '', True, ei('PCOpt_PageHelp', 1), '', '', '', '', TAGS[1])))
 
 
 def pause_menu_set_sub(g):
@@ -592,7 +699,7 @@ def pause_main_open_option(g):
 
     def graphics(g):
         g.emit(setm(THIS, 'm_pcTitle', get(pause_title(THIS), 'text')))
-        g.stmt(call(get(THIS, 'm_instSelect'), 'SetTitle', call(ei('PCOpt_Page'), 'toUpperCase')))
+        g.stmt(call(get(THIS, 'm_instSelect'), 'SetTitle', call(ei('PCOpt_Page', 0), 'toUpperCase')))
         g.stmt(store(result, call(THIS, 'PCOpt_OpenOption', TAG)))
         g.emit(setm(THIS, 'm_selOptionTag', TAG))
         ret(g, result)
@@ -652,7 +759,12 @@ def pause_tags():
     g.emit(setm(get(PM, 'DetailGraphics'), 'CycleSetParam', func(['Prm', 'bActive', 'bOpen'], 6, pause_cycle_set_param)))
     g.emit(setm(get(PM, 'DetailGraphics'), 'CycleParamMax', func([], 2, lambda g: ret(g, get(THIS, 'm_count')))))
     method(g, PM, 'DetailGraphics', 'Init', [], 4, pause_page_init)
-    method(g, PM, 'DetailGraphics', 'Active', [], 11, pause_page_active)
+    method(g, PM, 'DetailGraphics', 'Show', [], 12, pause_page_show)
+    method(g, PM, 'DetailGraphics', 'Active', [], 2,
+           lambda g: (g.stmt(call(THIS, 'Show')), base_call(PM, 'DetailCamera', 'Active')(g)))
+    method(g, PM, 'DetailGraphics', 'handleInput', ['details', 'pathToFocus'], 5, bind_input(PM, 'DetailCamera'))
+    method(g, PM, 'DetailGraphics', 'CapturePoll', [], 2, capture_poll)
+    method(g, PM, 'DetailGraphics', 'Refresh', [], 3, refresh_help('Help', pause_page_refresh))
     method(g, PM, 'DetailGraphics', 'Layout', [], 8, layout(PAUSE_VISIBLE, PAUSE_PITCH, PAUSE_FIRST, (
         (lambda i: member(THIS, add('mcInst_Sel', add(i, 1))), 0),
         (lambda i: get(member(THIS, add('mcInst_Sel', add(i, 1))), 'mcInst_Title'), None),
@@ -665,12 +777,15 @@ def pause_tags():
     wrap(g, PM, 'OptionSelector', 'ChangeOptionDetails')
     method(g, PM, 'OptionSelector', 'ChangeOptionDetails', ['OptionTag'], 4, pause_selector_change)
     wrap(g, PM, 'OptionSelector', 'OpenOptionDetails')
-    method(g, PM, 'OptionSelector', 'OpenOptionDetails', ['OptionTag'], 3, pause_selector_open)
+    method(g, PM, 'OptionSelector', 'OpenOptionDetails', ['OptionTag'], 4, pause_selector_open)
     wrap(g, PM, 'OptionSelector', 'handleInput')
     method(g, PM, 'OptionSelector', 'handleInput', ['details', 'pathToFocus'], 4, pause_selector_input)
     wrap(g, PM, 'MenuSelector', 'AddMainSelect')
     method(g, PM, 'MenuSelector', 'AddMainSelect', ['selectText', 'selectFunc', 'bEnable', 'helpText', 'dialogType',
                                                     'dialogMsg', 'dialogIdx', 'dialogImg', 'endLabel'], 11, pause_menu_add_main)
+    wrap(g, PM, 'MenuSelector', 'AddSubSelect')
+    method(g, PM, 'MenuSelector', 'AddSubSelect', ['selectText', 'selectFunc', 'bEnable', 'helpText', 'dialogType',
+                                                   'dialogMsg', 'dialogIdx', 'dialogImg', 'endLabel'], 11, pause_menu_add_sub)
     wrap(g, PM, 'MenuSelector', 'SetSelect')
     method(g, PM, 'MenuSelector', 'SetSelect', ['SelType'], 9, pause_menu_set_select)
     wrap(g, PM, 'MenuSelector', 'SetSubSelect')
@@ -679,10 +794,75 @@ def pause_tags():
     method(g, PM, 'PauseMain', 'OpenOption', ['OptionTag'], 5, pause_main_open_option)
     wrap(g, PM, 'PauseMain', 'CloseOptionDetails')
     method(g, PM, 'PauseMain', 'CloseOptionDetails', [], 3, pause_main_close_details)
+    flag_wrap(g, PM, 'PauseMain', 'OpenOperation', 1)
+    flag_wrap(g, PM, 'PauseMain', 'CloseOperation', 0)
+    flag_wrap(g, PM, 'PauseMain', 'Open', 0)
 
     slot = place(1, PAUSE_SLOT_BASE, matrix(ty=-3.0)) + place(2, PAUSE_SLOT_LINE, matrix(0.85, -217.6, 12.0))
     return (sprite(PAUSE_PAGE, b'') + sprite(PAUSE_SLOT, slot)
             + export((PAUSE_PAGE, 'PCOpt_PausePage'), (PAUSE_SLOT, 'PCOpt_PauseSlot')) + init_action(PAUSE_PAGE, g))
+
+
+MENU = var('Menu')
+
+
+def start_poll(path, resize):
+    def body(g):
+        owner, text, field = R(2), R(3), R(4)
+        g.stmt(store(owner, get(THIS, '_parent')))
+        g.stmt(store(field, get(owner, *path)))
+        g.stmt(store(text, ei('PCOpt_StartText', get(owner, 'm_pcStart'))))
+
+        def update(g):
+            g.emit(setm(field, 'text', text))
+            if resize:
+                g.emit(setm(field, 'width', get(field, 'cWidth')))
+
+        if_(g, land(neq(field, UNDEFINED), neq(get(field, 'text'), text)), update)
+    return body
+
+
+def start_watch(g, cls, text, poller):
+    g.emit(setm(THIS, 'm_pcStart', text))
+
+    def create(g):
+        g.stmt(store(poller, call(THIS, 'createEmptyMovieClip', 'mcInst_PCOptStart', call(THIS, 'getNextHighestDepth'))))
+        g.emit(setm(poller, 'onEnterFrame', get(MENU, cls, 'PCOptStartPoll')))
+
+    if_(g, eq(get(THIS, 'mcInst_PCOptStart'), UNDEFINED), create)
+
+
+def prompt_input(g):
+    details, path, result = R(2), R(3), R(4)
+    g.stmt(store(result, call(THIS, 'PCOpt_handleInput', details, path)))
+    if_(g, get(THIS, 'm_decide'), lambda g: g.stmt(ei('PCOpt_Prompt', 0)))
+    ret(g, result)
+
+
+def start_tags(page, cls, name, params, path, resize, prompt):
+    def wrapped(g):
+        args = [R(k) for k in range(2, 2 + len(params))]
+        g.stmt(call(THIS, 'PCOpt_' + name, *args))
+        start_watch(g, cls, args[1] if params else get(THIS, *path, 'text'), R(2 + len(params)))
+        if prompt:
+            g.stmt(ei('PCOpt_Prompt', 1))
+
+    g = Gen()
+    g.emit(setm(get(MENU, cls), 'PCOptStartPoll', func([], 5, start_poll(path, resize))))
+    wrap(g, MENU, cls, name)
+    method(g, MENU, cls, name, params, 3 + len(params), wrapped)
+    if prompt:
+        wrap(g, MENU, cls, 'handleInput')
+        method(g, MENU, cls, 'handleInput', ['details', 'pathToFocus'], 5, prompt_input)
+    return sprite(page, b'') + export((page, 'PCOpt_Start')) + init_action(page, g)
+
+
+def title_start_tags():
+    return start_tags(71, 'TitleSelector', 'SetStart', ['mc', 'Text', 'FuncName', 'helpText'], ('m_instStart', 'mcInst_Sel1'), True, False)
+
+
+def logo_start_tags():
+    return start_tags(30, 'TitleRogo', 'Init', [], ('m_instText', 'mcInst_Text'), False, True)
 
 
 def array(name, data):
@@ -691,7 +871,8 @@ def array(name, data):
 
 
 def write_inc(path):
-    Path(path).write_text(array('k_title_menu_tags', title_tags()) + '\n' + array('k_pause_menu_tags', pause_tags()),
+    Path(path).write_text(array('k_title_menu_tags', title_tags()) + '\n' + array('k_pause_menu_tags', pause_tags()) + '\n'
+                          + array('k_start_menu_tags', title_start_tags()) + '\n' + array('k_logo_menu_tags', logo_start_tags()),
                           encoding='ascii', newline='\n')
 
 

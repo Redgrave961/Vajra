@@ -10,6 +10,9 @@ extern "C" void ps3_indirect_call(ppu_context* ctx);
 
 double tick_scale();
 bool frame_site(uint32_t stack);
+bool camera_assist_blocked(uint32_t function);
+void note_stick_rotation();
+int mouse_route();
 
 inline float from_bits(uint32_t bits) { return std::bit_cast<float>(bits); }
 inline uint32_t to_bits(float v) { return std::bit_cast<uint32_t>(v); }

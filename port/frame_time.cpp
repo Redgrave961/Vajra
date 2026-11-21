@@ -1,4 +1,7 @@
 #include "guest.h"
+#include "pc_options.h"
+#include "vk/rsx_vk.h"
+#include "../ps3recomp/libs/input/pad_bindings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -28,7 +31,9 @@ constexpr uint32_t k_timers = 0xA0;
 constexpr uint32_t k_timer_size = 0x1C;
 constexpr double k_tick = 1.0 / 30;
 
-enum class Mode : uint8_t { Add, Ratio, Press, Lerp, LerpRev, Homing, SmaReset, SmaRate, Scale, Approach, LerpScale, LerpDt, Ramp, Clamp, TimerTick };
+constexpr double k_aim_stick_per_unit = 3.14159265358979 / 32768 / 1.2;
+
+enum class Mode : uint8_t { Add, Ratio, Press, Lerp, LerpRev, Homing, SmaReset, SmaRate, Scale, Approach, LerpScale, LerpDt, Ramp, Clamp, TimerTick, Look, LerpLook, Aim };
 
 struct Site {
     const char* path;
@@ -62,6 +67,9 @@ std::mutex g_writer;
 uint32_t g_site_code[std::size(k_sites)];
 thread_local bool t_rotation_site;
 thread_local bool t_timer_site;
+thread_local bool t_mouse_turned;
+std::atomic<bool> g_mouse_camera{false};
+std::atomic<uint32_t> g_can_assist{0};
 thread_local std::unordered_map<uint32_t, std::deque<float>> t_frame_times;
 
 double read_f64(uint32_t ea)
@@ -210,6 +218,8 @@ bool object_path(uint32_t object, std::string& path)
 
 float corrected_alpha(Mode mode, float alpha, double k)
 {
+    if (mode == Mode::LerpLook && t_mouse_turned)
+        return 1;
     if (mode == Mode::Homing || mode == Mode::Scale)
         return (float)(alpha * k);
     const double a = mode == Mode::LerpDt ? alpha / k : alpha;
@@ -246,6 +256,61 @@ uint32_t whole_step(uint64_t key, uint32_t before, double delta)
     return before + (uint32_t)(int64_t)whole;
 }
 
+std::atomic<uint64_t> g_mouse_owner_tick{0};
+std::atomic<uint64_t> g_rotation_tick{0};
+
+uint64_t tick_now()
+{
+    return vm_read64(k_current_time);
+}
+
+bool ran_recently(const std::atomic<uint64_t>& tick)
+{
+    const uint64_t bits = tick.load(std::memory_order_relaxed);
+    double at;
+    std::memcpy(&at, &bits, sizeof at);
+    return bits && read_f64(k_current_time) <= at + read_f64(k_delta_seconds);
+}
+
+void take_mouse(float* dx, float* dy)
+{
+    rsx_vk_mouse_motion(dx, dy);
+    g_mouse_owner_tick.store(tick_now(), std::memory_order_relaxed);
+}
+
+void look(void (*body)(ppu_context*), ppu_context* ctx, uint32_t stack)
+{
+    const uint64_t self = ctx->gpr[3], result = ctx->gpr[5];
+    const GuestFrame frame(ctx, k_frame);
+    const uint32_t lvalue = probe(ctx, stack, vm_read32(stack + 0x18), frame.base + 0x70);
+    const uint64_t before = lvalue ? vm_read64(lvalue) : 0;
+    ctx->gpr[3] = self;
+    ctx->gpr[4] = stack;
+    ctx->gpr[5] = result;
+    run(body, ctx);
+    float dx, dy;
+    take_mouse(&dx, &dy);
+    t_mouse_turned = dx != 0 || dy != 0;
+    if (!lvalue)
+        return;
+    if (vm_read64(lvalue) != before)
+        g_mouse_camera.store(false, std::memory_order_relaxed);
+    if (!t_mouse_turned)
+        return;
+    g_mouse_camera.store(true, std::memory_order_relaxed);
+    static thread_local float carry[2];
+    float yaw, pitch;
+    pc_options_mouse_scale(&yaw, &pitch);
+    const float turn[2] = {-dy * pitch + carry[0], dx * yaw + carry[1]};
+    for (uint32_t i = 0; i < 2; ++i) {
+        const float whole = std::round(turn[i]);
+        carry[i] = turn[i] - whole;
+        const uint32_t value = vm_read32(lvalue + 4 * i) + (uint32_t)(int32_t)whole;
+        vm_write32(lvalue + 4 * i, value);
+        vm_write32((uint32_t)result + 4 * i, value);
+    }
+}
+
 void compound(void (*body)(ppu_context*), ppu_context* ctx, const Shape& shape)
 {
     const uint32_t stack = (uint32_t)ctx->gpr[4];
@@ -256,6 +321,8 @@ void compound(void (*body)(ppu_context*), ppu_context* ctx, const Shape& shape)
         t_frame_times.erase(vm_read32(stack + 0x14));
         return run(body, ctx);
     }
+    if (site->mode == Mode::Look)
+        return look(body, ctx, stack);
     const uint64_t self = ctx->gpr[3], result = ctx->gpr[5];
     const GuestFrame frame(ctx, k_frame);
     const uint32_t scratch = frame.base + 0x70;
@@ -417,6 +484,28 @@ float window_frame_time(uint32_t owner, uint32_t length, float dt)
     return (float)(2 * sum / (weight * (weight + 1)));
 }
 
+void aim(ppu_context* ctx, uint32_t stack, uint32_t extra)
+{
+    const uint64_t self = ctx->gpr[3], result = ctx->gpr[5];
+    const GuestFrame frame(ctx, k_frame);
+    const uint32_t scratch = frame.base + 0x70;
+    const uint32_t stick = probe(ctx, stack, script(stack) + (extra >> 16), scratch);
+    probe(ctx, stack, script(stack) + (extra & 0xFFFF), scratch);
+    const double dt = read_f32(scratch);
+    ctx->gpr[3] = self;
+    ctx->gpr[4] = stack;
+    ctx->gpr[5] = result;
+    run(func_00058AE0_lifted, ctx);
+    if (!stick || !(dt > 0))
+        return;
+    float dx, dy, yaw, pitch;
+    take_mouse(&dx, &dy);
+    pc_options_mouse_scale(&yaw, &pitch);
+    const double k = k_aim_stick_per_unit / dt;
+    write_f32(stick, (float)(read_f32(stick) - dy * pitch * k));
+    write_f32(stick + 4, (float)(read_f32(stick + 4) + dx * yaw * k));
+}
+
 void mash_meter(void (*body)(ppu_context*), ppu_context* ctx, uint32_t drain_field, uint32_t press_field)
 {
     const uint32_t self = (uint32_t)ctx->gpr[3];
@@ -464,6 +553,21 @@ bool frame_site(uint32_t stack)
     return lookup(stack) != nullptr;
 }
 
+bool camera_assist_blocked(uint32_t function)
+{
+    return function == g_can_assist.load(std::memory_order_relaxed) && g_mouse_camera.load(std::memory_order_relaxed);
+}
+
+void note_stick_rotation()
+{
+    g_rotation_tick.store(tick_now(), std::memory_order_relaxed);
+}
+
+int mouse_route()
+{
+    return ran_recently(g_mouse_owner_tick) ? PAD_MOUSE_CAMERA : ran_recently(g_rotation_tick) ? PAD_MOUSE_LEFT_STICK : PAD_MOUSE_RIGHT_STICK;
+}
+
 void func_00078E88(ppu_context* ctx)
 {
     const uint32_t function = (uint32_t)ctx->gpr[3];
@@ -471,6 +575,9 @@ void func_00078E88(ppu_context* ctx)
     std::string path;
     if (!object_path(function, path))
         return;
+    if (path == "BCGame.BCCamMode_Default.CanAssistFunction")
+        g_can_assist.store(function, std::memory_order_relaxed);
+    pc_options_link(function, path);
     const Site* first = std::lower_bound(std::begin(k_sites), std::end(k_sites), path,
                                          [](const Site& site, const std::string& key) { return key.compare(site.path) > 0; });
     const Site* last = first;
@@ -591,6 +698,8 @@ void func_00058AE0(ppu_context* ctx)
     const Site* site = lookup(stack);
     if (!site)
         return run(func_00058AE0_lifted, ctx);
+    if (site->mode == Mode::Aim)
+        return aim(ctx, stack, site->extra);
     const uint32_t result = (uint32_t)ctx->gpr[5], owner = vm_read32(stack + 0x14);
     const GuestFrame frame(ctx, k_frame);
     const uint32_t a = frame.base + 0x70, b = a + 4;

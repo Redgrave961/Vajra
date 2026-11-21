@@ -1,4 +1,5 @@
 #include "guest.h"
+#include "pc_options.h"
 
 #include <algorithm>
 #include <atomic>
@@ -334,6 +335,7 @@ void call_script(Vm& v, uint32_t f, uint32_t self, uint32_t stack, uint32_t resu
     for (uint32_t p = v.r32(function + 0x84); p; p = v.r32(p + 0x3C))
         if (v.r32(v.r32(p + 0x34) + 0xC0) & 0x100000) v.call(sp, 0x00040CF8, func_000EAEEC, p, v.r32(f + 0xAC) + v.r32(p + 0x54));
     process_internal(v, sp, 0x00040E2C, self, nf, result);
+    if (result && camera_assist_blocked(function)) v.w32(result, 0);
     for (uint32_t p = v.r32(function + 0x64); p; p = v.r32(p + 0x5C)) {
         const uint64_t flags = v.r64(p + 0x48);
         if (!(flags & 0x100) || (flags & 0x10)) v.vcall(sp, 0x00040E8C, p, 0x168, v.r32(f + 0xAC) + v.r32(p + 0x54));
@@ -344,6 +346,7 @@ void call_function(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t st
 {
     const uint32_t f = sp0 - 0x940;
     v.frame(sp0, 0x940, lr0);
+    const uint32_t watch = pc_options_call(self, function);
     if (v.r16(function + 0x78)) {
         call_native(v, f, 0x000407C4, self, function, stack, result);
     } else {
@@ -360,6 +363,7 @@ void call_function(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t st
             call_script(v, f, self, stack, result, function);
         }
     }
+    if (watch && result) pc_options_returned(watch, result);
     v.w32(k_runtime_flags, v.r32(k_runtime_flags) & ~2u);
 }
 

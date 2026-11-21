@@ -173,6 +173,8 @@ add_executable(${PROJECT_NAME}
     ${PORT_PLATFORM_SOURCES}
     main.cpp
     button_prompts.cpp
+    prompt_art.cpp
+    font.cpp
     frame_time.cpp
     game_files.cpp
     firmware.cpp
