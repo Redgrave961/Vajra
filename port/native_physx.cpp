@@ -676,3 +676,130 @@ void func_00392F08(ppu_context* ctx) {
 
     ctx->gpr[3] = out_head;
 }
+
+/* ============================================================================
+ * func_005CCB00 (ppu_recomp_055.cpp:26086)
+ * P1 main: UPhysicsAsset::CalcAABB (eliminates 13 FPR + 10 GPR spills,
+ * 3x3 Newton-Raphson rsqrt loops, and temp TArray heap alloc/free).
+ * ============================================================================ */
+void func_005CCB00(ppu_context* ctx) {
+    const uint32_t out_box    = (uint32_t)ctx->gpr[3];
+    const uint32_t phys_asset = (uint32_t)ctx->gpr[4];
+    const uint32_t skel_comp  = (uint32_t)ctx->gpr[5];
+
+    GuestFrame frame(ctx, 0x1F0);
+    const uint32_t sp = frame.base;
+
+    float sx = rd_f32(skel_comp + 0x1BC) * rd_f32(skel_comp + 0x1B8);
+    float sy = rd_f32(skel_comp + 0x1C0) * rd_f32(skel_comp + 0x1B8);
+    float sz = rd_f32(skel_comp + 0x1C4) * rd_f32(skel_comp + 0x1B8);
+
+    const uint32_t owner = vm_read32(skel_comp + 0x4C);
+    if (owner != 0) {
+        const float os = rd_f32(owner + 0x6C);
+        sx *= rd_f32(owner + 0x70) * os;
+        sy *= rd_f32(owner + 0x74) * os;
+        sz *= rd_f32(owner + 0x78) * os;
+    }
+    wr_f32(sp + 0xB0, sx);
+    wr_f32(sp + 0xB4, sy);
+    wr_f32(sp + 0xB8, sz);
+
+    const float eps        = rd_f32(0x005CCAECu);
+    const float min_len_sq = rd_f32(0x005CCAF0u);
+    const float one_val    = rd_f32(0x005CCAF4u);
+
+    float bmin_x = 0.0f, bmin_y = 0.0f, bmin_z = 0.0f;
+    float bmax_x = 0.0f, bmax_y = 0.0f, bmax_z = 0.0f;
+    uint8_t bvalid = 0;
+
+    if (fabsf(sx - sy) < eps && fabsf(sy - sz) < eps) {
+        const bool all_bodies = ((vm_read32(skel_comp + 0x3A8) >> 27) & 1u) != 0;
+        const int32_t count = all_bodies ? (int32_t)vm_read32(phys_asset + 0x40)
+                                         : (int32_t)vm_read32(phys_asset + 0x88);
+        const uint32_t idx_arr  = all_bodies ? 0u : vm_read32(phys_asset + 0x84);
+        const uint32_t body_arr = vm_read32(phys_asset + 0x3C);
+
+        for (int32_t i = 0; i < count; ++i) {
+            const uint32_t body_idx = all_bodies ? (uint32_t)i : vm_read32(idx_arr + (uint32_t)i * 4u);
+            const uint32_t body = vm_read32(body_arr + body_idx * 4u);
+
+            const uint64_t fname = ((uint64_t)vm_read32(body + 0x84) << 32) | vm_read32(body + 0x88);
+            ctx->gpr[3] = skel_comp;
+            ctx->gpr[4] = fname;
+            ctx->lr = 0x005CCDC0;
+            run(func_0052A4D0, ctx);
+            if ((int32_t)ctx->gpr[3] == -1)
+                continue;
+
+            ctx->gpr[5] = (uint32_t)ctx->gpr[3];
+            ctx->gpr[3] = sp + 0x70;
+            ctx->gpr[4] = skel_comp;
+            ctx->lr = 0x005CCDD8;
+            run(func_00529DC0, ctx);
+
+            float m00 = rd_f32(sp + 0x70), m01 = rd_f32(sp + 0x74), m02 = rd_f32(sp + 0x78);
+            float m10 = rd_f32(sp + 0x80), m11 = rd_f32(sp + 0x84), m12 = rd_f32(sp + 0x88);
+            float m20 = rd_f32(sp + 0x90), m21 = rd_f32(sp + 0x94), m22 = rd_f32(sp + 0x98);
+
+            const float c0 = m11 * m22 - m12 * m21;
+            const float c1 = m01 * m22 - m02 * m21;
+            const float c2 = m01 * m12 - m02 * m11;
+            const float det = m00 * c0 - m10 * c1 + m20 * c2;
+            if (fabsf(det) <= eps)
+                continue;
+
+            const float l0 = m00 * m00 + m01 * m01 + m02 * m02;
+            const float l1 = m10 * m10 + m11 * m11 + m12 * m12;
+            const float l2 = m20 * m20 + m21 * m21 + m22 * m22;
+            const float s0 = (l0 >= min_len_sq) ? (1.0f / sqrtf(l0)) : one_val;
+            const float s1 = (l1 >= min_len_sq) ? (1.0f / sqrtf(l1)) : one_val;
+            const float s2 = (l2 >= min_len_sq) ? (1.0f / sqrtf(l2)) : one_val;
+
+            wr_f32(sp + 0x70, m00 * s0); wr_f32(sp + 0x74, m01 * s0); wr_f32(sp + 0x78, m02 * s0);
+            wr_f32(sp + 0x80, m10 * s1); wr_f32(sp + 0x84, m11 * s1); wr_f32(sp + 0x88, m12 * s1);
+            wr_f32(sp + 0x90, m20 * s2); wr_f32(sp + 0x94, m21 * s2); wr_f32(sp + 0x98, m22 * s2);
+
+            ctx->gpr[3] = sp + 0x100;
+            ctx->gpr[4] = body + 0x48;
+            ctx->gpr[5] = sp + 0x70;
+            ctx->gpr[6] = sp + 0xB0;
+            ctx->lr = 0x005CCF74;
+            run(func_005B9480, ctx);
+
+            const uint8_t nv = vm_read8(sp + 0x118);
+            if (!nv)
+                continue;
+
+            const float nx0 = rd_f32(sp + 0x100), ny0 = rd_f32(sp + 0x104), nz0 = rd_f32(sp + 0x108);
+            const float nx1 = rd_f32(sp + 0x10C), ny1 = rd_f32(sp + 0x110), nz1 = rd_f32(sp + 0x114);
+            if (!bvalid) {
+                bmin_x = nx0; bmin_y = ny0; bmin_z = nz0;
+                bmax_x = nx1; bmax_y = ny1; bmax_z = nz1;
+                bvalid = nv;
+            } else {
+                if (nx0 < bmin_x) bmin_x = nx0;
+                if (ny0 < bmin_y) bmin_y = ny0;
+                if (nz0 < bmin_z) bmin_z = nz0;
+                if (nx1 > bmax_x) bmax_x = nx1;
+                if (ny1 > bmax_y) bmax_y = ny1;
+                if (nz1 > bmax_z) bmax_z = nz1;
+            }
+        }
+    }
+
+    if (!bvalid) {
+        bmin_x = bmax_x = rd_f32(skel_comp + 0xC0);
+        bmin_y = bmax_y = rd_f32(skel_comp + 0xC4);
+        bmin_z = bmax_z = rd_f32(skel_comp + 0xC8);
+        bvalid = 1;
+    }
+
+    wr_f32(out_box + 0x00, bmin_x);
+    wr_f32(out_box + 0x04, bmin_y);
+    wr_f32(out_box + 0x08, bmin_z);
+    wr_f32(out_box + 0x0C, bmax_x);
+    wr_f32(out_box + 0x10, bmax_y);
+    wr_f32(out_box + 0x14, bmax_z);
+    vm_write32(out_box + 0x18, (uint32_t)bvalid << 24);
+}
