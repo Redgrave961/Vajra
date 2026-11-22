@@ -182,6 +182,7 @@ add_executable(${PROJECT_NAME}
     native_frame.cpp
     native_octree.cpp
     native_engine.cpp
+    native_collision.cpp
     native_fence.cpp
     native_ring.cpp
     native_script.cpp
