@@ -406,8 +406,9 @@ void call_function(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t st
             call_script(v, f, self, stack, result, function);
         }
     }
-    if (watch && result) pc_options_returned(watch, result);
-    v.w32(k_runtime_flags, v.r32(k_runtime_flags) & ~2u);
+    if (__builtin_expect(watch != 0, 0) && result) pc_options_returned(watch, result);
+    const uint32_t rf = v.r32(k_runtime_flags);
+    if (__builtin_expect((rf & 2u) != 0, 0)) v.w32(k_runtime_flags, rf & ~2u);
 }
 
 bool probing(Vm& v, uint32_t f, uint32_t self, uint32_t node)

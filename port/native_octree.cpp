@@ -287,26 +287,29 @@ struct LineSearch {
     uint32_t query;
     uint32_t call_sp;
     uint32_t tag = 0, stack = 0, ignore = 0, flags = 0;
-    __m128 lo{}, hi{}, q_start{}, q_inv{}, q_ext{};
+    __m128 lo{}, hi{}, q_start{}, q_inv{}, q_ext{}, q_start_lo{}, q_start_hi{};
     bool called = false;
 
     uint32_t r32(uint32_t a) const { return vm_read32_mm(&m, a); }
     uint64_t r64(uint32_t a) const { return vm_read64_mm(&m, a); }
     void w32(uint32_t a, uint32_t value) { vm_write32_mm(&m, a, value); }
 
+    static inline __m128i bswap32_mask()
+    {
+        return _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+    }
+
     __m128 vec4(uint32_t a) const
     {
         if (vm_mm_ok(&m, a, 16))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)),
-                                                     _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12)));
+            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
         return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), (int)r32(a + 12)));
     }
 
     __m128 vec3(uint32_t a) const
     {
         if (vm_mm_ok(&m, a, 16))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)),
-                                                     _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12)));
+            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
         return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), 0));
     }
 
@@ -330,6 +333,8 @@ struct LineSearch {
         q_start = vec3(query + 0x20);
         q_inv = vec3(query + 0x30);
         q_ext = vec3(query + 0x40);
+        q_start_lo = _mm_sub_ps(q_start, q_ext);
+        q_start_hi = _mm_add_ps(q_start, q_ext);
     }
 
     void call(uint32_t lr, void (*fn)(ppu_context*))
@@ -343,10 +348,10 @@ struct LineSearch {
         called = true;
     }
 
-    bool slab_hit(__m128 center, __m128 ext) const
+    inline bool slab_hit(__m128 center, __m128 ext) const
     {
-        const __m128 bmin = _mm_sub_ps(_mm_sub_ps(_mm_sub_ps(center, ext), q_ext), q_start);
-        const __m128 bmax = _mm_sub_ps(_mm_add_ps(_mm_add_ps(center, ext), q_ext), q_start);
+        const __m128 bmin = _mm_sub_ps(_mm_sub_ps(center, ext), q_start_hi);
+        const __m128 bmax = _mm_sub_ps(_mm_add_ps(center, ext), q_start_lo);
         const __m128 t1 = _mm_mul_ps(bmin, q_inv);
         const __m128 t2 = _mm_mul_ps(bmax, q_inv);
         const __m128 lo_t = _mm_blend_ps(_mm_min_ps(t1, t2), _mm_setzero_ps(), 8);
@@ -375,7 +380,16 @@ struct LineSearch {
         w32(prim + 0x58, tag);
         const uint32_t actor = r32(prim + 0x4C);
         if (!actor || actor == ignore) return false;
-        if (!slab_hit(vec3(prim + 0x5C), vec3(prim + 0x68))) return false;
+        __m128 p_center, p_ext;
+        if (__builtin_expect(vm_mm_ok(&m, prim + 0x5C, 28), 1)) {
+            const __m128i sh = bswap32_mask();
+            p_center = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x5C)), sh));
+            p_ext = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x68)), sh));
+        } else {
+            p_center = vec3(prim + 0x5C);
+            p_ext = vec3(prim + 0x68);
+        }
+        if (!slab_hit(p_center, p_ext)) return false;
         if (!(r32(prim + 0x12C) & 0x04000000u)) return false;
         if (!prim_collides(m, prim)) return false;
         for (uint32_t a = ignore; a; a = r32(a + 0x98))
@@ -435,18 +449,19 @@ struct LineSearch {
         }
         called = false;
         uint64_t head = r64(n);
+        uint32_t list = (uint32_t)(head >> 32);
         const int32_t count = (int32_t)(uint32_t)head;
         for (int32_t i = 0; i < count; i++) {
-            const uint32_t list = (uint32_t)(head >> 32);
             if (i + 6 < count) {
                 const uint32_t p = peek(list + 4u * (uint32_t)(i + 6));
                 touch(p + 0x4C);
                 touch(p + 0x5C);
             }
             if (test_prim(r32(list + 4u * (uint32_t)i))) return true;
-            if (called) {
+            if (__builtin_expect(called, 0)) {
                 called = false;
                 head = r64(n);
+                list = (uint32_t)(head >> 32);
             }
         }
         uint32_t kids = r32(n + 0xC);
@@ -471,7 +486,7 @@ struct LineSearch {
             if (slab_hit(child_b, half)) {
                 if (node(kids + 16u * h, child_b)) return true;
                 if (r32(query + 0xC) != 0 && (flags & 0x200u)) return true;
-                if (called) {
+                if (__builtin_expect(called, 0)) {
                     called = false;
                     kids = r32(n + 0xC);
                 }
@@ -543,7 +558,68 @@ void func_005B0EB0(ppu_context* ctx)
         }
         return !(t1 < 0.0f || t1 < t0);
     };
+    const __m128 vsx = _mm_set1_ps(sx), vsy = _mm_set1_ps(sy), vsz = _mm_set1_ps(sz);
+    const __m128 vdx = _mm_set1_ps(dx), vdy = _mm_set1_ps(dy), vdz = _mm_set1_ps(dz);
+    const __m128 vabs_mask = _mm_castsi128_ps(_mm_set1_epi32(0x7FFFFFFF));
+    const __m128 veps = _mm_set1_ps((float)k_eps);
+    const __m128 vzero = _mm_setzero_ps();
     int32_t i = 0;
+    for (; i + 3 < num_planes; i += 4) {
+        const uint32_t p = planes + 16u * (uint32_t)i;
+        if (__builtin_expect(vm_mm_ok(&m, p, 64), 1)) {
+            const __m256 p01 = _mm256_castsi256_ps(_mm256_shuffle_epi8(_mm256_loadu_si256((const __m256i*)(m.vb + p)), shuf2));
+            const __m256 p23 = _mm256_castsi256_ps(_mm256_shuffle_epi8(_mm256_loadu_si256((const __m256i*)(m.vb + p + 32)), shuf2));
+            __m128 r0 = _mm256_castps256_ps128(p01);
+            __m128 r1 = _mm256_extractf128_ps(p01, 1);
+            __m128 r2 = _mm256_castps256_ps128(p23);
+            __m128 r3 = _mm256_extractf128_ps(p23, 1);
+            _MM_TRANSPOSE4_PS(r0, r1, r2, r3); // r0=px, r1=py, r2=pz, r3=pw
+            const __m128 sdist = _mm_sub_ps(_mm_fmadd_ps(r0, vsx, _mm_fmadd_ps(r1, vsy, _mm_mul_ps(r2, vsz))), r3);
+            const __m128 ddot = _mm_fmadd_ps(r0, vdx, _mm_fmadd_ps(r1, vdy, _mm_mul_ps(r2, vdz)));
+            const __m128 par = _mm_cmplt_ps(_mm_and_ps(ddot, vabs_mask), veps);
+            const int par_mask = _mm_movemask_ps(par);
+            if (__builtin_expect(par_mask != 0, 0)) {
+                const int out_mask = _mm_movemask_ps(_mm_cmpgt_ps(sdist, vzero));
+                if (par_mask & out_mask) {
+                    ctx->gpr[3] = 1;
+                    return;
+                }
+            }
+            const __m128 vt = _mm_div_ps(_mm_sub_ps(vzero, sdist), ddot);
+            alignas(16) float ts[4], ds[4], nxs[4], nys[4], nzs[4];
+            _mm_store_ps(ts, vt);
+            _mm_store_ps(ds, ddot);
+            _mm_store_ps(nxs, r0);
+            _mm_store_ps(nys, r1);
+            _mm_store_ps(nzs, r2);
+            for (int lane = 0; lane < 4; ++lane) {
+                if (par_mask & (1 << lane)) continue;
+                const float t = ts[lane];
+                if (ds[lane] > 0.0f) {
+                    if (t < t1) t1 = t;
+                } else if (t > t0) {
+                    t0 = t;
+                    nx_hit = nxs[lane];
+                    ny_hit = nys[lane];
+                    nz_hit = nzs[lane];
+                }
+            }
+            if (t1 < 0.0f || t1 < t0) {
+                ctx->gpr[3] = 1;
+                return;
+            }
+            continue;
+        }
+        for (int k = 0; k < 4; ++k) {
+            const uint32_t pk = p + 16u * (uint32_t)k;
+            const float q[4] = {from_bits(vm_read32_mm(&m, pk)), from_bits(vm_read32_mm(&m, pk + 4)),
+                                from_bits(vm_read32_mm(&m, pk + 8)), from_bits(vm_read32_mm(&m, pk + 12))};
+            if (!step_plane(q)) {
+                ctx->gpr[3] = 1;
+                return;
+            }
+        }
+    }
     for (; i + 1 < num_planes; i += 2) {
         const uint32_t p = planes + 16u * (uint32_t)i;
         alignas(32) float pl[8];
