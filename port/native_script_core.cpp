@@ -141,19 +141,12 @@ void process_internal(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t
 
 double fp_quiet(double x)
 {
-    uint64_t b;
-    memcpy(&b, &x, 8);
-    b |= 0x0008000000000000ull;
-    memcpy(&x, &b, 8);
-    return x;
+    return from_bits64(to_bits64(x) | 0x0008000000000000ull);
 }
 
 double fp_result(double r)
 {
-    if (r == r) return r;
-    const uint64_t q = 0x7FF8000000000000ull;
-    memcpy(&r, &q, 8);
-    return r;
+    return r == r ? r : from_bits64(0x7FF8000000000000ull);
 }
 
 double fp_bin(double a, double b, double r)
@@ -211,6 +204,28 @@ uint32_t remote(Vm& v, uint32_t sp, uint64_t lr, uint32_t self, uint32_t functio
     return v.icall(sp, lr, code, self, function, a, b);
 }
 
+uint32_t find_probe(const Vm& v, uint32_t level, uint32_t index, uint64_t name)
+{
+    const uint32_t size = v.r32(level + 0xB8);
+    if (!size) return 0;
+    const uint32_t buckets = v.r32(level + 0xB4);
+    const uint32_t table = buckets ? buckets : level + 0xB0;
+    const uint32_t elements = v.r32(level + 0x80);
+    for (uint32_t i = v.r32(table + 4u * (index & (size - 1u))); (int32_t)i != -1;) {
+        const uint32_t element = elements + 20u * i;
+        if (v.r64(element) == name) return v.r32(element + 8);
+        i = v.r32(element + 0xC);
+    }
+    return 0;
+}
+
+uint32_t find_walk(const Vm& v, uint32_t level, uint32_t index, uint64_t name)
+{
+    for (; level; level = v.r32(level + 0x40))
+        if (const uint32_t found = find_probe(v, level, index, name)) return found;
+    return 0;
+}
+
 uint32_t find_checked(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint64_t name, uint64_t global)
 {
     const uint32_t f = sp0 - 0xB0;
@@ -218,8 +233,36 @@ uint32_t find_checked(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint64_t
     v.w32(f + 0x38, (uint32_t)(name >> 32));
     v.w32(f + 0x3C, (uint32_t)name);
     v.w64(sp0 + 0x38, name);
-    if (const uint32_t found = v.call(f, 0x000D78EC, func_000D7644, self, name, global)) return found;
+    const uint32_t index = (uint32_t)(name >> 32);
+    uint32_t found = 0;
+    const uint32_t frame = v.r32(self + 0x14);
+    const uint32_t state = frame ? v.r32(frame + 0x28) : 0;
+    if (state && (int32_t)global == 0) found = find_walk(v, state, index, name);
+    if (!found) found = find_walk(v, v.r32(self + 0x34), index, name);
+    if (found) return found;
     return v.call(sp0, lr0, func_000D78A0_lifted, self, name, global);
+}
+
+void copy_value_fast(Vm& v, uint32_t sp, uint64_t lr, uint32_t prop, uint32_t result, uint32_t addr)
+{
+    const uint32_t fn = v.r32(v.r32(v.r32(prop) + 0x15C));
+    if (fn == 0x000E5548u) {
+        const int32_t count = (int32_t)v.r32(prop + 0x40);
+        if (count == 1) {
+            v.w32(result, v.r32(addr));
+            return;
+        }
+        if (count > 1) {
+            const uint32_t stride = v.r32(prop + 0x44);
+            for (int32_t i = 0; i < count; ++i) {
+                const uint32_t off = stride * (uint32_t)i;
+                v.w32(result + off, v.r32(addr + off));
+            }
+            return;
+        }
+        return;
+    }
+    v.icall(sp, lr, fn, prop, result, addr, 0, 0, 0);
 }
 
 void call_native(Vm& v, uint32_t sp, uint64_t lr, uint32_t self, uint32_t function, uint32_t stack, uint32_t result)
@@ -452,7 +495,7 @@ void variable(Vm& v, uint32_t sp0, uint64_t lr, uint32_t stack, uint32_t result,
     v.w32(k_prop_object, object);
     const uint32_t addr = base + v.r32(prop + 0x54);
     v.w32(k_prop_addr, addr);
-    if (result) v.vcall(sp0 - 0x70, lr, prop, 0x15C, result, addr, 0, 0, 0);
+    if (result) copy_value_fast(v, sp0 - 0x70, lr, prop, result, addr);
 }
 
 void local_variable(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32_t result)
@@ -479,7 +522,7 @@ void local_out_variable(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t st
     while (v.r32(out) != prop) out = v.r32(out + 8);
     const uint32_t addr = v.r32(out + 4);
     v.w32(k_prop_addr, addr);
-    if (result) v.vcall(sp0 - 0x70, 0x00041AC8, prop, 0x15C, result, addr, 0, 0, 0);
+    if (result) copy_value_fast(v, sp0 - 0x70, 0x00041AC8, prop, result, addr);
 }
 
 void bool_variable(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, uint32_t result)
@@ -538,14 +581,14 @@ void struct_member(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t st
     if (!copy) {
         if (!result) return;
         if (addr) {
-            v.vcall(sp, 0x00048BDC, member, 0x15C, result, addr, 0, 0, 0);
+            copy_value_fast(v, sp, 0x00048BDC, member, result, addr);
             return;
         }
         if (v.r64(member + 0x48) & 0x400000) v.vcall(sp, 0x00048B90, member, 0x168, result);
         v.zero(sp, 0x00048BAC, result, v.r32(member + 0x40) * v.r32(member + 0x44));
         return;
     }
-    if (result) v.vcall(sp, 0x00048C48, member, 0x15C, result, copy + v.r32(member + 0x54), 0, 0, 0);
+    if (result) copy_value_fast(v, sp, 0x00048C48, member, result, copy + v.r32(member + 0x54));
     for (uint32_t p = v.r32(owner + 0x64); p; p = v.r32(p + 0x5C)) v.vcall(sp, 0x00048C04, p, 0x168, copy + v.r32(p + 0x54));
 }
 
@@ -608,20 +651,47 @@ void dyn_error(Vm& v, uint32_t f, uint32_t self, uint32_t stack, uint32_t result
     if (result) v.zero(f, 0x00042658, result, v.r32(v.r32(array + 0x64) + 0x44));
 }
 
+bool child_of(Vm& v, uint32_t c, uint32_t base)
+{
+    for (; c; c = v.r32(c + 0x40))
+        if (c == base) return true;
+    return false;
+}
+
+uint32_t dyn_reserve(Vm& v, uint32_t sp, uint32_t addr, uint32_t len, uint32_t elem, uint64_t lr_slack, uint64_t lr_alloc)
+{
+    const int32_t max = (int32_t)v.r32(addr + 8);
+    uint32_t data = v.r32(addr);
+    v.w32(addr + 4, len);
+    if ((int32_t)len > max) {
+        const uint32_t slack = v.call(sp, lr_slack, func_00010230, (int64_t)(int32_t)len, (int64_t)max, elem);
+        data = v.r32(addr);
+        v.w32(addr + 8, slack);
+        if (data | slack) {
+            data = v.call(sp, lr_alloc, func_0002AE4C, data, elem * slack, 8);
+            v.w32(addr, data);
+        }
+    }
+    return data;
+}
+
+void dyn_shrink(Vm& v, uint32_t sp, uint32_t addr, uint32_t len, uint32_t elem, uint64_t lr_slack, uint64_t lr_alloc)
+{
+    const int32_t max = (int32_t)v.r32(addr + 8);
+    v.w32(addr + 4, len);
+    const uint32_t slack = v.call(sp, lr_slack, func_00010230, (int64_t)(int32_t)len, (int64_t)max, elem);
+    if (slack == v.r32(addr + 8)) return;
+    const uint32_t data = v.r32(addr);
+    v.w32(addr + 8, slack);
+    if (data | slack) v.w32(addr, v.call(sp, lr_alloc, func_0002AE4C, data, elem * slack, 8));
+}
+
 void dyn_grow(Vm& v, uint32_t f, uint32_t array, uint32_t addr, uint32_t index, uint32_t num)
 {
     const uint32_t extra = index - num;
     const uint32_t elem = v.r32(v.r32(array + 0x64) + 0x44);
-    const int32_t max = (int32_t)v.r32(addr + 8);
-    const uint32_t len = num + (extra + 1);
-    v.w32(addr + 4, len);
-    if ((int32_t)len > max) {
-        const uint32_t slack = v.call(f, 0x0004249C, func_00010230, (int64_t)(int32_t)len, (int64_t)max, elem);
-        const uint32_t data = v.r32(addr);
-        v.w32(addr + 8, slack);
-        if (data | slack) v.w32(addr, v.call(f, 0x000424C4, func_0002AE4C, data, elem * slack, 8));
-    }
-    v.zero(f, 0x000424EC, v.r32(addr) + num * elem, extra * elem + elem);
+    const uint32_t data = dyn_reserve(v, f, addr, num + extra + 1, elem, 0x0004249C, 0x000424C4);
+    v.zero(f, 0x000424EC, data + num * elem, extra * elem + elem);
     const uint32_t inner = v.r32(array + 0x64);
     if (!inner || !(v.r32(v.r32(inner + 0x34) + 0xC0) & 0x100000) || !v.r32(v.r32(inner + 0x64) + 0x88)) return;
     if ((int32_t)v.r32(f + 0x90) <= (int32_t)num) return;
@@ -696,19 +766,8 @@ void let_array(Vm& v, uint32_t f, uint32_t stack, uint32_t addr, uint32_t flags)
     int32_t num = (int32_t)v.r32(addr + 4);
     if (len > num) {
         const uint32_t add = (uint32_t)(len - num);
-        const int32_t max = (int32_t)v.r32(addr + 8);
-        uint32_t data = v.r32(addr);
         const uint32_t elem = v.r32(v.r32(array + 0x64) + 0x44);
-        v.w32(addr + 4, (uint32_t)len);
-        if (len > max) {
-            const uint32_t slack = v.call(f, 0x00046DA0, func_00010230, (int64_t)len, (int64_t)max, elem);
-            data = v.r32(addr);
-            v.w32(addr + 8, slack);
-            if (data | slack) {
-                data = v.call(f, 0x00046DC8, func_0002AE4C, data, elem * slack, 8);
-                v.w32(addr, data);
-            }
-        }
+        const uint32_t data = dyn_reserve(v, f, addr, (uint32_t)len, elem, 0x00046DA0, 0x00046DC8);
         v.zero(f, 0x00046DE8, data + (uint32_t)num * elem, add * elem);
         const uint32_t inner = v.r32(array + 0x64);
         len = (int32_t)v.r32(f + 0x70);
@@ -727,13 +786,7 @@ void let_array(Vm& v, uint32_t f, uint32_t stack, uint32_t addr, uint32_t flags)
         len = (int32_t)v.r32(f + 0x70);
     }
     const uint32_t elem = v.r32(v.r32(array + 0x64) + 0x44);
-    const int32_t max = (int32_t)v.r32(addr + 8);
-    v.w32(addr + 4, (uint32_t)len);
-    const uint32_t slack = v.call(f, 0x00046F94, func_00010230, (int64_t)len, (int64_t)max, elem);
-    if (slack == v.r32(addr + 8)) return;
-    const uint32_t data = v.r32(addr);
-    v.w32(addr + 8, slack);
-    if (data | slack) v.w32(addr, v.call(f, 0x00046FC8, func_0002AE4C, data, elem * slack, 8));
+    dyn_shrink(v, f, addr, (uint32_t)len, elem, 0x00046F94, 0x00046FC8);
 }
 
 void let(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32_t)
@@ -881,13 +934,7 @@ void dynamic_cast_op(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t 
     step(v, f, 0x000495CC, object, stack, f + 0x90, v.r8(code + 8));
     v.w32(result, 0);
     const uint32_t obj = v.r32(f + 0x90);
-    if (!obj) {
-        v.w32(result, 0);
-        return;
-    }
-    if (cls)
-        for (uint32_t c = v.r32(obj + 0x34); c != cls; c = v.r32(c + 0x40))
-            if (!c) return;
+    if (!obj || (cls && !child_of(v, v.r32(obj + 0x34), cls))) return;
     v.w32(result, obj);
 }
 
@@ -1609,15 +1656,6 @@ constexpr uint32_t k_new_abstract = 0x0160B340;
 constexpr uint32_t k_new_masks = 0x000656B8;
 constexpr uint32_t k_delegate_none = 0x0160B130;
 
-
-
-bool child_of(Vm& v, uint32_t c, uint32_t base)
-{
-    for (; c; c = v.r32(c + 0x40))
-        if (c == base) return true;
-    return false;
-}
-
 uint32_t static_bounds(Vm& v, uint32_t f, uint32_t self, uint32_t stack)
 {
     if (!self) literal(v, f, f + 0x74, k_null_owner_text, 0x00041EFC, 0x00041F2C, 0x00041F50);
@@ -1927,34 +1965,6 @@ bool needs_init(Vm& v, uint32_t inner)
     return inner && (v.r32(v.r32(inner + 0x34) + 0xC0) & 0x100000) && v.r32(v.r32(inner + 0x64) + 0x88);
 }
 
-uint32_t dyn_reserve(Vm& v, uint32_t sp, uint32_t addr, uint32_t len, uint32_t elem, uint64_t lr_slack, uint64_t lr_alloc)
-{
-    const int32_t max = (int32_t)v.r32(addr + 8);
-    uint32_t data = v.r32(addr);
-    v.w32(addr + 4, len);
-    if ((int32_t)len > max) {
-        const uint32_t slack = v.call(sp, lr_slack, func_00010230, (int64_t)(int32_t)len, (int64_t)max, elem);
-        data = v.r32(addr);
-        v.w32(addr + 8, slack);
-        if (data | slack) {
-            data = v.call(sp, lr_alloc, func_0002AE4C, data, elem * slack, 8);
-            v.w32(addr, data);
-        }
-    }
-    return data;
-}
-
-void dyn_shrink(Vm& v, uint32_t sp, uint32_t addr, uint32_t len, uint32_t elem, uint64_t lr_slack, uint64_t lr_alloc)
-{
-    const int32_t max = (int32_t)v.r32(addr + 8);
-    v.w32(addr + 4, len);
-    const uint32_t slack = v.call(sp, lr_slack, func_00010230, (int64_t)(int32_t)len, (int64_t)max, elem);
-    if (slack == v.r32(addr + 8)) return;
-    const uint32_t data = v.r32(addr);
-    v.w32(addr + 8, slack);
-    if (data | slack) v.w32(addr, v.call(sp, lr_alloc, func_0002AE4C, data, elem * slack, 8));
-}
-
 template <typename... A>
 void dyn_log(Vm& v, uint32_t f, uint32_t stack, uint32_t array, uint32_t at, const uint64_t (&lr)[8], uint32_t message, A... a)
 {
@@ -2260,12 +2270,7 @@ void dyn_iterator(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t sta
         v.call(f, 0x0004525C, func_000E35C8, made);
         cls = v.r32(k_object_class);
     }
-    bool objects = !cls;
-    for (uint32_t c = cls ? v.r32(inner + 0x34) : 0; c; c = v.r32(c + 0x40))
-        if (c == cls) {
-            objects = true;
-            break;
-        }
+    const bool objects = !cls || child_of(v, v.r32(inner + 0x34), cls);
     v.w32(f + 0x70, 0);
     const uint32_t code = v.r32(stack + 0x18);
     const uint32_t loop = code + 2;
@@ -3112,37 +3117,67 @@ constexpr uint32_t k_bool_words[8] = {0x016080C0, 0x019B1CE0, 0x016080D0, 0x019B
 
 double frsp(double b)
 {
-    if (b != b) {
-        double q = fp_quiet(b);
-        uint64_t u;
-        memcpy(&u, &q, 8);
-        u &= ~((1ull << 29) - 1);
-        memcpy(&q, &u, 8);
-        return q;
-    }
-    return (double)(float)b;
+    return b != b ? from_bits64(to_bits64(fp_quiet(b)) & ~((1ull << 29) - 1)) : (double)(float)b;
 }
 
-uint64_t dbits(double d)
+bool vnan(uint32_t u) { return (u & 0x7FFFFFFFu) > 0x7F800000u; }
+uint32_t vfix(uint32_t u) { return vnan(u) ? 0x7FC00000u : u; }
+
+uint32_t vflush(Vm& v, uint32_t u)
 {
-    uint64_t b;
-    memcpy(&b, &d, 8);
-    return b;
+    return (v.ctx->vscr & 0x10000u) && !(u & 0x7F800000u) ? u & 0x80000000u : u;
 }
 
-uint32_t vctsxs(Vm& v, uint32_t bits)
+uint32_t vbin(Vm& v, uint32_t a, uint32_t b, bool sub)
 {
-    const double x = lfs(bits);
-    if (x >= 2147483648.0) {
+    a = vflush(v, a);
+    b = vflush(v, b);
+    uint32_t r = vfix(to_bits(sub ? from_bits(a) - from_bits(b) : from_bits(a) + from_bits(b)));
+    if (vnan(b)) r = b | 0x7FC00000u;
+    if (vnan(a)) r = a | 0x7FC00000u;
+    return vflush(v, r);
+}
+
+uint32_t vmadd(Vm& v, uint32_t a, uint32_t c, uint32_t b)
+{
+    return vflush(v, vfix(to_bits(std::fma(from_bits(vflush(v, a)), from_bits(vflush(v, c)), from_bits(vflush(v, b))))));
+}
+
+uint32_t vnmsub(Vm& v, uint32_t a, uint32_t c, uint32_t b)
+{
+    return vflush(v, vfix(to_bits(-std::fma(from_bits(vflush(v, a)), from_bits(vflush(v, c)), -from_bits(vflush(v, b))))));
+}
+
+uint32_t vrefp(Vm& v, uint32_t b)
+{
+    b = vflush(v, b);
+    const uint32_t r = vfix(to_bits(1.0f / from_bits(b)));
+    return vflush(v, vnan(b) ? b | 0x7FC00000u : r);
+}
+
+uint32_t vrsqrte(Vm& v, uint32_t b)
+{
+    b = vflush(v, b);
+    if (vnan(b)) return b | 0x7FC00000u;
+    return vflush(v, vfix(to_bits(1.0f / std::sqrt(from_bits(b)))));
+}
+
+uint32_t vcts(Vm& v, uint32_t a)
+{
+    const float x = from_bits(a);
+    if (x != x) return 0;
+    if (x >= 2147483648.0f) {
         v.ctx->vscr |= 1;
-        return 0x7FFFFFFF;
+        return 0x7FFFFFFFu;
     }
-    if (x < -2147483648.0) {
+    if (x < -2147483648.0f) {
         v.ctx->vscr |= 1;
         return 0x80000000u;
     }
-    return x != x ? 0 : (uint32_t)(int32_t)x;
+    return (uint32_t)(int32_t)x;
 }
+
+uint32_t vcfsx(uint32_t i) { return to_bits((float)(int32_t)i); }
 
 
 void store_string(Vm& v, uint32_t f, uint32_t tmp, uint32_t result, uint64_t lr_alloc, uint64_t lr_copy, uint64_t lr_free)
@@ -3183,8 +3218,8 @@ void int_to_byte(Vm& v, uint32_t f, uint32_t result) { v.w8(result, (uint8_t)v.r
 void int_to_bool(Vm& v, uint32_t f, uint32_t result) { v.w32(result, v.r32(f + 0x70) != 0); }
 void int_to_float(Vm& v, uint32_t f, uint32_t result) { v.w32(result & ~3u, stfs((float)(int32_t)v.r32(f + 0x70))); }
 void bool_to_float(Vm& v, uint32_t f, uint32_t result) { v.w32(result & ~3u, stfs((float)(v.r32(f + 0x70) & 1))); }
-void float_to_byte(Vm& v, uint32_t f, uint32_t result) { v.w8(result, (uint8_t)vctsxs(v, v.r32(f + 0x70))); }
-void float_to_int(Vm& v, uint32_t f, uint32_t result) { v.w32(result & ~3u, vctsxs(v, v.r32(f + 0x70))); }
+void float_to_byte(Vm& v, uint32_t f, uint32_t result) { v.w8(result, (uint8_t)vcts(v, v.r32(f + 0x70))); }
+void float_to_int(Vm& v, uint32_t f, uint32_t result) { v.w32(result & ~3u, vcts(v, v.r32(f + 0x70))); }
 void float_to_bool(Vm& v, uint32_t f, uint32_t result) { v.w32(result, !(lfs(v.r32(f + 0x70)) == lfs(v.r32(k_float_zero)))); }
 
 void vector_to_bool(Vm& v, uint32_t f, uint32_t result)
@@ -3309,7 +3344,7 @@ void int_to_string(Vm& v, uint32_t f, uint32_t result)
 void float_to_string(Vm& v, uint32_t f, uint32_t result)
 {
     const double x = lfs(v.r32(f + 0x70));
-    v.w64(f + 0x40, dbits(x));
+    v.w64(f + 0x40, to_bits64(x));
     v.ctx->fpr[1] = x;
     v.call(f, 0x0004AC3C, func_0009E0B4, f + 0x74, 0x0160B19C, v.r64(f + 0x40));
     store_string(v, f, f + 0x74, result, 0x0004ACA8, 0x0004ACEC, 0x0004AC60);
@@ -3320,7 +3355,7 @@ void vector_to_string(Vm& v, uint32_t f, uint32_t result)
     for (uint32_t i = 0; i < 3; i++) {
         const double x = lfs(v.r32(f + 0x7C + 4 * i));
         v.ctx->fpr[1 + i] = x;
-        v.w64(f + 0x40 + 8 * i, dbits(x));
+        v.w64(f + 0x40 + 8 * i, to_bits64(x));
     }
     v.call(f, 0x0004C460, func_0009E0B4, f + 0x70, 0x0160B1A8, v.r64(f + 0x40), v.r64(f + 0x48), v.r64(f + 0x50));
     store_string(v, f, f + 0x70, result, 0x0004C4CC, 0x0004C510, 0x0004C484);
@@ -3619,63 +3654,6 @@ uint32_t fctiwz(double x)
     return (uint32_t)(int32_t)r;
 }
 
-float vx_float(uint32_t bits)
-{
-    float f;
-    memcpy(&f, &bits, 4);
-    return f;
-}
-
-uint32_t vx_bits(float f)
-{
-    uint32_t bits;
-    memcpy(&bits, &f, 4);
-    return bits;
-}
-
-uint32_t vx_flush(uint32_t x, uint32_t vscr) { return (vscr & 0x10000) && !(x & 0x7F800000) ? x & 0x80000000u : x; }
-bool vx_nan(uint32_t r) { return (r & 0x7FFFFFFF) > 0x7F800000; }
-uint32_t vx_fix(uint32_t r) { return vx_nan(r) ? 0x7FC00000u : r; }
-
-uint32_t vx_madd(uint32_t vscr, uint32_t a, uint32_t b, uint32_t c)
-{
-    const float x = vx_float(vx_flush(a, vscr)), y = vx_float(vx_flush(b, vscr)), z = vx_float(vx_flush(c, vscr));
-    return vx_flush(vx_fix(vx_bits(std::fma(x, z, y))), vscr);
-}
-
-uint32_t vx_nmsub(uint32_t vscr, uint32_t a, uint32_t b, uint32_t c)
-{
-    const float x = vx_float(vx_flush(a, vscr)), y = vx_float(vx_flush(b, vscr)), z = vx_float(vx_flush(c, vscr));
-    return vx_flush(vx_fix(vx_bits(-std::fma(x, z, -y))), vscr);
-}
-
-uint32_t vx_sub(uint32_t vscr, uint32_t a, uint32_t b)
-{
-    const uint32_t x = vx_flush(a, vscr), y = vx_flush(b, vscr);
-    if (vx_nan(x)) return x | 0x7FC00000u;
-    if (vx_nan(y)) return y | 0x7FC00000u;
-    return vx_flush(vx_fix(vx_bits(vx_float(x) - vx_float(y))), vscr);
-}
-
-uint32_t vx_rsqrte(uint32_t vscr, uint32_t b)
-{
-    const uint32_t x = vx_flush(b, vscr);
-    if (vx_nan(x)) return x | 0x7FC00000u;
-    return vx_flush(vx_fix(vx_bits(1.0f / std::sqrt(vx_float(x)))), vscr);
-}
-
-uint32_t vx_cts(ppu_context* ctx, uint32_t b)
-{
-    const float f = vx_float(b);
-    if (f != f) return 0;
-    if (f >= 2147483648.0f || f < -2147483648.0f) ctx->vscr |= 1;
-    if (f >= 2147483648.0f) return 0x7FFFFFFFu;
-    if (f < -2147483648.0f) return 0x80000000u;
-    return (uint32_t)(int32_t)f;
-}
-
-uint32_t vx_cfsx(uint32_t i) { return vx_bits((float)(int32_t)i); }
-
 uint32_t flerp(uint32_t a, uint32_t b, uint32_t t) { return stfs(fmadds(lfs(t), fsubs(lfs(b), lfs(a)), lfs(a))); }
 
 uint32_t lane(Vm& v, uint32_t ea, uint32_t i) { return (ea & 15) + i * 4 < 16 ? v.r32(ea + i * 4) : 0; }
@@ -3802,11 +3780,11 @@ void runequal(Vm& v, uint32_t a, uint32_t b, uint32_t result) { v.w32(result, !s
 
 void rscale(Vm& v, uint32_t a, uint32_t, uint32_t result)
 {
-    const uint32_t vscr = v.ctx->vscr, out = result & ~3u;
+    const uint32_t out = result & ~3u;
     uint32_t r[3];
     for (uint32_t k = 0; k < 3; k++)
         for (uint32_t i = 0; i < 4; i++) {
-            const uint32_t c = vx_cts(v.ctx, vx_madd(vscr, vx_cfsx(lane(v, a + 4 + k * 4, i)), k_neg_zero, lane(v, a, i)));
+            const uint32_t c = vcts(v, vmadd(v, vcfsx(lane(v, a + 4 + k * 4, i)), lane(v, a, i), k_neg_zero));
             if (!i) r[k] = c;
         }
     for (uint32_t k = 0; k < 3; k++) v.w32(out + k * 4, r[k]);
@@ -3814,22 +3792,22 @@ void rscale(Vm& v, uint32_t a, uint32_t, uint32_t result)
 
 void vrotate(Vm& v, uint32_t a, uint32_t b, uint32_t result)
 {
-    const uint32_t vscr = v.ctx->vscr, n = k_neg_zero;
+    const uint32_t n = k_neg_zero;
     const uint32_t pitch = v.r32(b), yaw = v.r32(b + 4), roll = v.r32(b + 8);
     const uint32_t sp = sine(v, pitch), cr = sine(v, roll + 0x4000), sr = sine(v, roll), sy = sine(v, yaw), cy = sine(v, yaw + 0x4000),
                    cp = sine(v, pitch + 0x4000), sign = v.r32(k_rotate_sign);
-    const uint32_t crsp = vx_madd(vscr, cr, n, sp), spsr = vx_madd(vscr, sp, n, sr), crcy = vx_madd(vscr, cr, n, cy);
-    const uint32_t crsy = vx_madd(vscr, cr, n, sy), srsy = vx_madd(vscr, sr, n, sy), crspsy = vx_madd(vscr, crsp, n, sy);
-    const uint32_t m1 = vx_madd(vscr, spsr, crcy, sy), cpsy = vx_madd(vscr, cp, n, sy);
-    const uint32_t m2 = vx_nmsub(vscr, spsr, crsy, cy) ^ sign, m3 = vx_madd(vscr, crsp, srsy, cy) ^ sign;
-    const uint32_t m4 = vx_nmsub(vscr, cy, crspsy, sr) ^ sign, cpsr = vx_madd(vscr, cp, n, sr) ^ sign;
-    const uint32_t cpcy = vx_madd(vscr, cp, n, cy), cpcr = vx_madd(vscr, cp, n, cr);
+    const uint32_t crsp = vmadd(v, cr, sp, n), spsr = vmadd(v, sp, sr, n), crcy = vmadd(v, cr, cy, n);
+    const uint32_t crsy = vmadd(v, cr, sy, n), srsy = vmadd(v, sr, sy, n), crspsy = vmadd(v, crsp, sy, n);
+    const uint32_t m1 = vmadd(v, spsr, sy, crcy), cpsy = vmadd(v, cp, sy, n);
+    const uint32_t m2 = vnmsub(v, spsr, cy, crsy) ^ sign, m3 = vmadd(v, crsp, cy, srsy) ^ sign;
+    const uint32_t m4 = vnmsub(v, cy, sr, crspsy) ^ sign, cpsr = vmadd(v, cp, sr, n) ^ sign;
+    const uint32_t cpcy = vmadd(v, cp, cy, n), cpcr = vmadd(v, cp, cr, n);
     const uint32_t x = v.r32(a), y = v.r32(a + 4), z = v.r32(a + 8), out = result & ~3u;
-    const uint32_t ycpsy = vx_madd(vscr, y, n, cpsy), ym1 = vx_madd(vscr, y, n, m1), ym4 = vx_madd(vscr, y, n, m4);
-    const uint32_t rx = vx_madd(vscr, x, ycpsy, cpcy), ry = vx_madd(vscr, x, ym1, m2), rz = vx_madd(vscr, x, ym4, m3);
-    v.w32(out, vx_madd(vscr, z, rx, sp));
-    v.w32(out + 4, vx_madd(vscr, z, ry, cpsr));
-    v.w32(out + 8, vx_madd(vscr, z, rz, cpcr));
+    const uint32_t ycpsy = vmadd(v, y, cpsy, n), ym1 = vmadd(v, y, m1, n), ym4 = vmadd(v, y, m4, n);
+    const uint32_t rx = vmadd(v, x, cpcy, ycpsy), ry = vmadd(v, x, m2, ym1), rz = vmadd(v, x, m3, ym4);
+    v.w32(out, vmadd(v, z, sp, rx));
+    v.w32(out + 4, vmadd(v, z, cpsr, ry));
+    v.w32(out + 8, vmadd(v, z, cpcr, rz));
 }
 
 void unrotate(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32_t result)
@@ -3933,19 +3911,19 @@ void vrand(Vm& v, uint32_t sp0, uint64_t, uint32_t, uint32_t stack, uint32_t res
         len = fmadds(z, z, fmadds(x, x, fmuls(y, y)));
     } while (len > lo);
     v.w32(k_rand_seed, s);
-    const uint32_t vscr = v.ctx->vscr, keep = v.r32(k_vrand + 0x18), half = v.r32(k_vrand + 0x1C), n = k_neg_zero;
+    const uint32_t keep = v.r32(k_vrand + 0x18), half = v.r32(k_vrand + 0x1C), n = k_neg_zero;
     const auto unit = [&](uint32_t r) {
         const uint32_t u = (r & keep) | one;
-        return vx_sub(vscr, vx_madd(vscr, vx_sub(vscr, u, vx_cfsx(vx_cts(v.ctx, u))), n, two), one);
+        return vbin(v, vmadd(v, vbin(v, u, vcfsx(vcts(v, u)), true), two, n), one, true);
     };
     const uint32_t x = unit(a), y = unit(b), z = unit(s);
-    const uint32_t q = vx_madd(vscr, z, vx_madd(vscr, x, vx_madd(vscr, y, n, y), x), z);
-    uint32_t r = vx_rsqrte(vscr, q);
-    for (int i = 0; i < 3; i++) r = vx_madd(vscr, vx_nmsub(vscr, vx_madd(vscr, q, n, r), one, r), r, vx_madd(vscr, half, n, r));
+    const uint32_t q = vmadd(v, z, z, vmadd(v, x, x, vmadd(v, y, y, n)));
+    uint32_t r = vrsqrte(v, q);
+    for (int i = 0; i < 3; i++) r = vmadd(v, vnmsub(v, vmadd(v, q, r, n), r, one), vmadd(v, half, r, n), r);
     const uint32_t out = result & ~3u;
-    v.w32(out, vx_madd(vscr, x, n, r));
-    v.w32(out + 4, vx_madd(vscr, y, n, r));
-    v.w32(out + 8, vx_madd(vscr, z, n, r));
+    v.w32(out, vmadd(v, x, r, n));
+    v.w32(out + 4, vmadd(v, y, r, n));
+    v.w32(out + 8, vmadd(v, z, r, n));
 }
 
 constexpr Exec VectorDivideBy = vector_scale_by<0xB0, 0x0005023C, 0x0005026C, 0x000502E0, 0x0005030C>;
@@ -3954,85 +3932,10 @@ constexpr Exec RotatorAddTo = vector_assign<0x0004D74C, 0x0004D77C, 0x0004D7DC, 
 constexpr Exec RotatorScale = vector_op<0x0004E430, 0x0004E48C, 0x74, 0x70, rscale>;
 constexpr Exec FloatLerp = ternary<0x0005B7B0, 0x0005B80C, 0x0005B868, flerp>;
 
-float as_float(uint32_t u)
-{
-    float f;
-    memcpy(&f, &u, 4);
-    return f;
-}
-
-uint32_t as_bits(float f)
-{
-    uint32_t u;
-    memcpy(&u, &f, 4);
-    return u;
-}
-
-uint32_t f2i32(double d)
-{
-    if (d != d) return 0x80000000u;
-    const double r = std::trunc(d);
-    if (r >= 2147483647.0) return 0x7FFFFFFFu;
-    if (r <= -2147483648.0) return 0x80000000u;
-    return (uint32_t)(int32_t)r;
-}
-
 uint32_t sraw(uint32_t x, uint32_t n)
 {
     return (uint32_t)((int32_t)x >> ((n & 0x20) ? 31 : (n & 0x1F)));
 }
-
-bool vnan(uint32_t u) { return (u & 0x7FFFFFFFu) > 0x7F800000u; }
-uint32_t vfix(uint32_t u) { return vnan(u) ? 0x7FC00000u : u; }
-
-uint32_t vflush(Vm& v, uint32_t u)
-{
-    return (v.ctx->vscr & 0x10000u) && !(u & 0x7F800000u) ? u & 0x80000000u : u;
-}
-
-uint32_t vbin(Vm& v, uint32_t a, uint32_t b, bool sub)
-{
-    a = vflush(v, a);
-    b = vflush(v, b);
-    uint32_t r = vfix(as_bits(sub ? as_float(a) - as_float(b) : as_float(a) + as_float(b)));
-    if (vnan(b)) r = b | 0x7FC00000u;
-    if (vnan(a)) r = a | 0x7FC00000u;
-    return vflush(v, r);
-}
-
-uint32_t vmadd(Vm& v, uint32_t a, uint32_t c, uint32_t b)
-{
-    return vflush(v, vfix(as_bits(std::fma(as_float(vflush(v, a)), as_float(vflush(v, c)), as_float(vflush(v, b))))));
-}
-
-uint32_t vnmsub(Vm& v, uint32_t a, uint32_t c, uint32_t b)
-{
-    return vflush(v, vfix(as_bits(-std::fma(as_float(vflush(v, a)), as_float(vflush(v, c)), -as_float(vflush(v, b))))));
-}
-
-uint32_t vrefp(Vm& v, uint32_t b)
-{
-    b = vflush(v, b);
-    const uint32_t r = vfix(as_bits(1.0f / as_float(b)));
-    return vflush(v, vnan(b) ? b | 0x7FC00000u : r);
-}
-
-uint32_t vcts(Vm& v, uint32_t a)
-{
-    const float x = as_float(a);
-    if (x != x) return 0;
-    if (x >= 2147483648.0f) {
-        v.ctx->vscr |= 1;
-        return 0x7FFFFFFFu;
-    }
-    if (x < -2147483648.0f) {
-        v.ctx->vscr |= 1;
-        return 0x80000000u;
-    }
-    return (uint32_t)(int32_t)x;
-}
-
-uint32_t vcfsx(uint32_t i) { return as_bits((float)(int32_t)i); }
 
 uint32_t lvlx(Vm& v, uint32_t ea, uint32_t i)
 {
@@ -4041,15 +3944,6 @@ uint32_t lvlx(Vm& v, uint32_t ea, uint32_t i)
     uint32_t w = 0;
     for (uint32_t k = 0; k < 4; k++) w = w << 8 | (off + k < 16 ? v.r8(at + k) : 0);
     return w;
-}
-
-void discard(Vm& v, uint32_t sp, uint32_t at, uint64_t lr)
-{
-    const uint32_t data = v.r32(at);
-    if (!data) return;
-    v.w32(at + 4, 0);
-    v.w32(at + 8, 0);
-    v.call(sp, lr, func_0002ADF0, data);
 }
 
 void rand_op(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32_t result)
@@ -4066,7 +3960,7 @@ void rand_op(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32
         const double scale = lfs(v.r32(0x00058080));
         v.w64(f + 0x78, (uint64_t)(int64_t)(int32_t)max);
         const double x = fmuls(fmuls(single((double)(int32_t)rnd), scale), single((double)(int32_t)max));
-        r = f2i32(x);
+        r = fctiwz(x);
         v.w64(f + 0x78, (uint64_t)(int64_t)(int32_t)r);
     }
     v.w32(result, r);
@@ -4103,7 +3997,7 @@ void round_op(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint3
     finish(v, stack);
     v.ctx->fpr[1] = lfs(v.r32(f + 0x70));
     v.call(f, 0x0005AF8C, func_00F3E528);
-    v.w32(result, f2i32(v.ctx->fpr[1]));
+    v.w32(result, fctiwz(v.ctx->fpr[1]));
 }
 
 void pow_op(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32_t result)
@@ -4134,7 +4028,7 @@ void exp_op(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32_
     const uint32_t m = ~sraw(t, v.r32(k + 4) & 31) & v.r32(k + 8);
     for (uint32_t i = 0; i < 4; i++) lane[i] = vbin(v, lane[i], m, false);
     v.w32(f + 0x74, m);
-    const uint32_t n = f2i32(fmadds(lfs(x), lfs(c0), lfs(m)));
+    const uint32_t n = fctiwz(fmadds(lfs(x), lfs(c0), lfs(m)));
     const uint32_t i0 = vcts(v, lane[0]);
     for (uint32_t i = 1; i < 4; i++) vcts(v, lane[i]);
     v.w64(f + 0x80, (uint64_t)(int64_t)(int32_t)n);
@@ -4234,9 +4128,7 @@ void float_near(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uin
     arg0(v, f, 0x000599B8, stack, f + 0x74);
     const double d = std::fabs(fsubs(lfs(v.r32(f + 0x70)), lfs(v.r32(f + 0x74))));
     finish(v, stack);
-    const uint64_t bits = v.r64(0x000598D0);
-    double eps;
-    memcpy(&eps, &bits, 8);
+    const double eps = from_bits64(v.r64(0x000598D0));
     v.w32(result, !(d > eps || d == eps));
 }
 
@@ -4319,7 +4211,7 @@ void int_div_float(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, 
     const uint32_t at = int_float_lvalue(v, f, stack, 0x00057714, 0x00057744, 0x000577AC);
     const uint32_t b = lvlx(v, f + 0x74, 0);
     uint32_t r = 0;
-    if (!(as_float(b) == 0.0f)) {
+    if (!(from_bits(b) == 0.0f)) {
         const uint32_t two = v.r32(0x0004DB24);
         uint32_t y = vrefp(v, b);
         const uint32_t a = vcfsx(v.r32(at));
@@ -4392,7 +4284,7 @@ void byte_mul_float(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack,
     uint32_t a[4], r = 0;
     for (uint32_t i = 0; i < 4; i++) a[i] = lvlx(v, at, i) >> 24;
     for (uint32_t i = 0; i < 4; i++) {
-        const uint32_t x = vcts(v, vmadd(v, as_bits((float)a[i]), lvlx(v, f + 0x70, i), 0x80000000u));
+        const uint32_t x = vcts(v, vmadd(v, to_bits((float)a[i]), lvlx(v, f + 0x70, i), 0x80000000u));
         if (!i) r = x;
     }
     v.w8(at, (uint8_t)r);
@@ -4413,7 +4305,7 @@ void log_internal(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, u
     v.w32(k_runtime_flags, flags & ~2u);
     arg(v, f, 0x000653D8, stack, f + 0x70);
     finish(v, stack);
-    discard(v, f, f + 0x78, 0x00065404);
+    drop(v, f, f + 0x78, 0x00065404);
 }
 
 void warn_internal(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32_t)
@@ -4426,7 +4318,7 @@ void warn_internal(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, 
     arg(v, f, 0x000654CC, stack, f + 0x70);
     finish(v, stack);
     v.call(f, 0x0006550C, func_0009DB34, stack, 0x0160B020, text(v, f + 0x70));
-    discard(v, f, f + 0x70, 0x0006552C);
+    drop(v, f, f + 0x70, 0x0006552C);
 }
 
 void state_warn(Vm& v, uint32_t f, uint32_t stack, uint32_t format, uint32_t a, uint32_t b, uint64_t lr_a, uint64_t lr_b, uint64_t lr_log,
@@ -4437,7 +4329,7 @@ void state_warn(Vm& v, uint32_t f, uint32_t stack, uint32_t format, uint32_t a, 
     v.call(f, lr_b, func_000AEB38, b, f + 0x78);
     v.call(f, lr_log, func_0009DB34, stack, format, state, text(v, b));
     release(v, f, b, lr_release);
-    discard(v, f, a, lr_discard);
+    drop(v, f, a, lr_discard);
 }
 
 void goto_state(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, uint32_t)
@@ -4576,10 +4468,8 @@ void class_is_child_of(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t sta
     arg0(v, f, 0x00065DE4, stack, f + 0x70);
     arg0(v, f, 0x00065E38, stack, f + 0x74);
     finish(v, stack);
-    uint32_t r = 0;
-    if (const uint32_t parent = v.r32(f + 0x74))
-        for (uint32_t c = v.r32(f + 0x70); c && !r; c = v.r32(c + 0x40)) r = c == parent;
-    v.w32(result, r);
+    const uint32_t parent = v.r32(f + 0x74);
+    v.w32(result, parent && child_of(v, v.r32(f + 0x70), parent));
 }
 
 uint32_t probe_state(Vm& v, uint32_t self, uint32_t f)
@@ -4597,7 +4487,7 @@ void probe_warn(Vm& v, uint32_t f, uint32_t stack, uint32_t format, uint64_t lr_
 {
     v.call(f, lr_name, func_000AEB38, f + 0x78, f + 0x70);
     v.call(f, lr_log, func_0009DB34, stack, format, text(v, f + 0x78));
-    discard(v, f, f + 0x78, lr_free);
+    drop(v, f, f + 0x78, lr_free);
 }
 
 void enable_probe(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, uint32_t)

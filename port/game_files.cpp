@@ -324,21 +324,21 @@ game_check check_game_paths(const std::filesystem::path& exe, const game_paths& 
 bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out)
 {
     game_paths paths = read_paths(exe);
-    const game_check first = check_game_paths(exe, paths);
-    if (!first.ready()) {
-        if (!run_setup(exe, icon, paths, first)) return false;
-        write_paths(exe, paths);
-    }
     std::error_code ec;
-    std::filesystem::remove_all(exe / "user" / "check", ec);
-
     out.user = exe / "user";
     out.hdd0 = out.user / "dev_hdd0";
     out.hdd1 = out.user / "dev_hdd1";
-    out.flash = firmware_dir(exe, paths);
     std::filesystem::create_directories(out.hdd1, ec);
+
     mounted m = mount(exe, paths, out.user);
-    if (!m.check.ready()) return false;
+    if (!m.check.ready()) {
+        if (!run_setup(exe, icon, paths, m.check)) return false;
+        write_paths(exe, paths);
+        std::filesystem::remove_all(exe / "user" / "check", ec);
+        m = mount(exe, paths, out.user);
+        if (!m.check.ready()) return false;
+    }
+    out.flash = firmware_dir(exe, paths);
     out.bdvd = m.bdvd;
     out.elf = std::move(m.elf);
     return true;

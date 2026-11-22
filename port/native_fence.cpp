@@ -45,12 +45,6 @@ void func_00874EF0(ppu_context* ctx)
 {
     const uint64_t sp = ctx->gpr[1], lr = ctx->lr, frame = sp - 0xC0, target = ctx->gpr[4];
     const uint32_t rhi = (uint32_t)ctx->gpr[3];
-    vm_write64(frame, sp);
-    vm_write64(sp + 0x10, lr);
-    for (int r = 24; r < 32; r++) vm_write64(frame + 0x78 + 8 * (r - 24), ctx->gpr[r]);
-    uint64_t f31;
-    std::memcpy(&f31, &ctx->fpr[31], 8);
-    vm_write64(frame + 0xB8, f31);
     uint32_t seen = 0;
     const auto done = [&] {
         if (!pending(target, vm_read64(k_completed))) return true;
@@ -59,6 +53,10 @@ void func_00874EF0(ppu_context* ctx)
         return !pending(target, seen);
     };
     if (done()) return;
+    vm_write64(frame, sp);
+    vm_write64(sp + 0x10, lr);
+    for (int r = 24; r < 32; r++) vm_write64(frame + 0x78 + 8 * (r - 24), ctx->gpr[r]);
+    vm_write64(frame + 0xB8, to_bits64(ctx->fpr[31]));
     const uint64_t start = timebase();
     const uint32_t label = vm_read32(rhi + 0x54), owner = vm_read32(k_rhi);
     ctx->gpr[3] = vm_read32(label);

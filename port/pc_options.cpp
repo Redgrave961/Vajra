@@ -83,14 +83,20 @@ const Choices k_switch = {
 
 constexpr uint32_t k_max_scale = 8;
 
-std::vector<rsx_vk_mode> display_modes()
+std::vector<rsx_vk_mode> g_modes;
+bool g_modes_valid = false;
+
+const std::vector<rsx_vk_mode>& display_modes()
 {
-    std::vector<rsx_vk_mode> modes;
-    for (;;) {
-        const uint32_t n = rsx_vk_display_modes(nullptr, 0);
-        modes.resize(n);
-        if (rsx_vk_display_modes(modes.data(), n) == n) return modes;
+    if (!g_modes_valid) {
+        for (;;) {
+            const uint32_t n = rsx_vk_display_modes(nullptr, 0);
+            g_modes.resize(n);
+            if (rsx_vk_display_modes(g_modes.data(), n) == n) break;
+        }
+        g_modes_valid = !g_modes.empty();
     }
+    return g_modes;
 }
 
 constexpr uint32_t k_resolution_heights[] = { 720, 900, 1080, 1440, 1800, 2160, 2880, 4320 };
@@ -123,7 +129,7 @@ Choices sensitivity_choices()
 
 Choices resolution_choices()
 {
-    const std::vector<rsx_vk_mode> modes = display_modes();
+    const std::vector<rsx_vk_mode>& modes = display_modes();
     if (modes.empty()) return {};
     const rsx_vk_mode native = *std::max_element(modes.begin(), modes.end(), [](const rsx_vk_mode& a, const rsx_vk_mode& b) {
         return (uint64_t)a.width * a.height < (uint64_t)b.width * b.height;
@@ -144,7 +150,7 @@ Choices resolution_choices()
 
 Choices frame_rate_choices()
 {
-    const std::vector<rsx_vk_mode> modes = display_modes();
+    const std::vector<rsx_vk_mode>& modes = display_modes();
     if (modes.empty()) return {};
     std::vector<uint32_t> rates;
     for (const rsx_vk_mode& m : modes)
@@ -270,6 +276,9 @@ std::atomic<int> g_capture{ -1 };
 uint32_t g_slot[std::size(k_bindings)];
 int g_swap_row = -1;
 std::string g_swap_text;
+constexpr uint64_t hook_bit(uint32_t fn) { return 1ull << ((fn * 0x9E3779B1u) >> 26); }
+
+std::atomic<uint64_t> g_hook_mask{ 0 };
 std::atomic<uint64_t> g_hooks[std::size(k_hooks)];
 std::atomic<uint64_t> g_save_param{ 0 };
 std::atomic<uint32_t> g_stick_lit{ 0 };
@@ -337,9 +346,11 @@ void save()
     FILE* f = std::fopen(g_settings_path.string().c_str(), "w");
     if (!f) return;
     for (uint32_t r = 0; r < k_rows; r++) {
-        const Choices list = k_options[r].choices();
-        const auto c = selected(r, list);
-        const std::string token = !g_saved[r].empty() ? g_saved[r] : c ? list[*c].token : std::string();
+        std::string token = g_saved[r];
+        if (token.empty()) {
+            const Choices list = k_options[r].choices();
+            if (const auto c = selected(r, list)) token = list[*c].token;
+        }
         if (!token.empty()) std::fprintf(f, "%s=%s\n", k_options[r].key, token.c_str());
     }
     for (int a = 0; a < PAD_ACTION_COUNT; a++) {
@@ -455,6 +466,7 @@ void display_toggled(rsx_vk_display display)
 void display_modes_changed()
 {
     std::lock_guard<std::mutex> hold(g_settings_lock);
+    g_modes_valid = false;
     for (uint32_t r = 0; r < k_rows; r++) sync(r);
 }
 
@@ -487,10 +499,7 @@ double argument(const ppu_context* ctx, uint32_t i)
     if (i >= (uint32_t)ctx->gpr[7]) return 0;
     const uint32_t at = (uint32_t)ctx->gpr[6] + i * k_value_size;
     if ((vm_read32(at + 4) & 0xF) != k_value_number) return 0;
-    const uint64_t bits = vm_read64(at + 8);
-    double v;
-    std::memcpy(&v, &bits, sizeof v);
-    return v;
+    return from_bits64(vm_read64(at + 8));
 }
 
 void reply(ppu_context* ctx, uint64_t number, const char* text)
@@ -510,49 +519,76 @@ void reply(ppu_context* ctx, uint64_t number, const char* text)
 
 void reply_number(ppu_context* ctx, double v)
 {
-    uint64_t bits;
-    std::memcpy(&bits, &v, sizeof bits);
-    reply(ctx, bits, nullptr);
+    reply(ctx, to_bits64(v), nullptr);
 }
 
-std::string object_name(uint32_t object)
+bool object_name_eq(uint32_t object, const char* want)
 {
+    if (vm_read32(object + k_object_name + 4)) return false;
     const uint32_t entry = vm_read32(vm_read32(k_gnames) + vm_read32(object + k_object_name) * 4);
-    std::string name;
-    if (vm_read32(object + k_object_name + 4) || (vm_read32(entry) & 1)) return name;
-    for (uint32_t at = entry + 8; const char c = (char)vm_read8(at); ++at) name += c;
-    return name;
+    if (vm_read32(entry) & 1) return false;
+    for (uint32_t at = entry + 8;; ++at, ++want) {
+        const char c = (char)vm_read8(at);
+        if (c != *want) return false;
+        if (!c) return true;
+    }
 }
 
 struct Member {
-    const char* name;
-    std::atomic<uint32_t> owner{ 0 };
-    std::atomic<uint32_t> offset{ 0 };
-    std::atomic<uint32_t> detail{ 0 };
-    std::atomic<bool> found{ false };
+    struct Entry {
+        std::atomic<uint32_t> owner{ 0 };
+        uint32_t offset = 0;
+        uint32_t detail = 0;
+        bool found = false;
+    };
+    static constexpr uint32_t k_cap = 8;
 
-    void bind(uint32_t cls)
+    const char* name;
+    std::atomic<uint32_t> detail{ 0 };
+    std::atomic<uint32_t> count{ 0 };
+    Entry cache[k_cap]{};
+    std::mutex lock{};
+
+    const Entry* bind(uint32_t cls)
     {
-        if (owner.load(std::memory_order_acquire) == cls) return;
+        const uint32_t n = count.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < n; ++i)
+            if (cache[i].owner.load(std::memory_order_relaxed) == cls) return &cache[i];
+
+        std::lock_guard<std::mutex> guard(lock);
+        const uint32_t n2 = count.load(std::memory_order_relaxed);
+        for (uint32_t i = 0; i < n2; ++i)
+            if (cache[i].owner.load(std::memory_order_relaxed) == cls) return &cache[i];
+
         uint32_t field = 0;
         for (uint32_t c = cls; c && !field; c = vm_read32(c + k_struct_super))
             for (uint32_t f = vm_read32(c + k_struct_children); f && !field; f = vm_read32(f + k_field_next))
-                if (object_name(f) == name) field = f;
-        found.store(field != 0, std::memory_order_relaxed);
-        offset.store(field ? vm_read32(field + k_property_offset) : 0, std::memory_order_relaxed);
-        detail.store(field ? vm_read32(field + k_property_detail) : 0, std::memory_order_relaxed);
-        owner.store(cls, std::memory_order_release);
+                if (object_name_eq(f, name)) field = f;
+
+        const uint32_t slot = n2 < k_cap ? n2 : (k_cap - 1);
+        Entry& e = cache[slot];
+        e.found = field != 0;
+        e.offset = field ? vm_read32(field + k_property_offset) : 0;
+        e.detail = field ? vm_read32(field + k_property_detail) : 0;
+        e.owner.store(cls, std::memory_order_relaxed);
+        if (n2 < k_cap) count.store(n2 + 1, std::memory_order_release);
+        return &e;
     }
 
     uint32_t at(uint32_t base, uint32_t cls)
     {
-        bind(cls);
-        return found.load(std::memory_order_relaxed) ? base + offset.load(std::memory_order_relaxed) : 0;
+        const Entry* e = bind(cls);
+        detail.store(e->detail, std::memory_order_relaxed);
+        return e->found ? base + e->offset : 0;
     }
 
     uint32_t object(uint32_t object) { const uint32_t a = at(object, vm_read32(object + k_object_class)); return a ? vm_read32(a) : 0; }
     uint8_t byte(uint32_t object) { const uint32_t a = at(object, vm_read32(object + k_object_class)); return a ? vm_read8(a) : 0; }
-    bool flag(uint32_t object) { const uint32_t a = at(object, vm_read32(object + k_object_class)); return a && (vm_read32(a) & detail.load(std::memory_order_relaxed)); }
+    bool flag(uint32_t object)
+    {
+        const Entry* e = bind(vm_read32(object + k_object_class));
+        return e->found && (vm_read32(object + e->offset) & e->detail);
+    }
 };
 
 Member m_current_scene{ "CurrentScene" }, m_pause_menu{ "PauseMenu" }, m_common{ "Common" }, m_movie_open{ "bMovieIsOpen" },
@@ -568,7 +604,7 @@ bool push_button_event(uint32_t event)
 {
     const uint32_t cls = vm_read32(event + k_object_class);
     if (cls == g_push_button_class.load(std::memory_order_relaxed)) return true;
-    if (object_name(cls) != k_push_button_event) return false;
+    if (!object_name_eq(cls, k_push_button_event)) return false;
     g_push_button_class.store(cls, std::memory_order_relaxed);
     return true;
 }
@@ -805,14 +841,18 @@ void pc_options_boot(const std::filesystem::path& dir)
 void pc_options_link(uint32_t function, const std::string& path)
 {
     for (size_t i = 0; i < std::size(k_hooks); i++)
-        if (path == k_hooks[i].first) g_hooks[i].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_relaxed);
+        if (path == k_hooks[i].first) {
+            g_hooks[i].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_relaxed);
+            g_hook_mask.fetch_or(hook_bit(function), std::memory_order_relaxed);
+        }
 }
 
 uint32_t pc_options_call(uint32_t self, uint32_t function)
 {
+    if (!function || !(g_hook_mask.load(std::memory_order_relaxed) & hook_bit(function))) return 0;
     for (const std::atomic<uint64_t>& slot : g_hooks) {
         const uint64_t hook = slot.load(std::memory_order_relaxed);
-        if ((uint32_t)(hook >> 32) != function || !function) continue;
+        if ((uint32_t)(hook >> 32) != function) continue;
         if ((uint32_t)hook == hook_judge_update || (uint32_t)hook == hook_judge_destroyed) {
             g_stick_lit.store((uint32_t)hook == hook_judge_update ? stick_lit(self) : 0, std::memory_order_relaxed);
             return 0;
@@ -869,12 +909,15 @@ void func_01472450(ppu_context* ctx)
     const uint8_t* swf = vm_base + vm_read32(file + 8);
     for (Menu& menu : g_menus) {
         if (size < menu.size || le32(swf + 4) != menu.size || fnv1a(swf, menu.size) != menu.hash) continue;
+        uint32_t patched = 0, patched_size = 0;
         {
             const std::lock_guard<std::mutex> hold(g_menu_lock);
             if (!menu.patched) build_menu(ctx, swf, menu);
+            patched = menu.patched;
+            patched_size = menu.patched_size;
         }
-        vm_write32(file + 8, menu.patched);
-        vm_write32(file + 0xC, menu.patched_size);
+        vm_write32(file + 8, patched);
+        vm_write32(file + 0xC, patched_size);
         ctx->gpr[3] = file;
         return;
     }

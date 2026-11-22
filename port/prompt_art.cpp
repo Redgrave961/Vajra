@@ -326,20 +326,17 @@ void decode_colors(const uint8_t* b, bool dxt1, float (*out)[3])
     const uint32_t bits = b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24;
     for (int i = 0; i < 16; i++) std::memcpy(out[i], pal[bits >> (2 * i) & 3], sizeof out[i]);
 }
-void encode_block(const uint8_t* src, uint8_t* out)
+void encode_color_block(const uint8_t* src, uint8_t* out)
 {
-    uint8_t a[16];
     float px[16][3], w[16], wsum = 0, mean[3] = {};
     for (int i = 0; i < 16; i++) {
-        a[i] = src[i * 4 + 3];
-        w[i] = a[i] / 255.f + 0.02f;
+        w[i] = src[i * 4 + 3] / 255.f + 0.02f;
         for (int ch = 0; ch < 3; ch++) {
             px[i][ch] = src[i * 4 + ch];
             mean[ch] += w[i] * px[i][ch];
         }
         wsum += w[i];
     }
-    encode_alpha(a, out);
     for (float& m : mean) m /= wsum;
     float cov[6] = {};
     for (int i = 0; i < 16; i++) {
@@ -396,11 +393,19 @@ void encode_block(const uint8_t* src, uint8_t* out)
         if (next.err >= best.err) break;
         best = next;
     }
-    out[8] = (uint8_t)best.c0;
-    out[9] = (uint8_t)(best.c0 >> 8);
-    out[10] = (uint8_t)best.c1;
-    out[11] = (uint8_t)(best.c1 >> 8);
-    std::memcpy(out + 12, &best.bits, 4);
+    out[0] = (uint8_t)best.c0;
+    out[1] = (uint8_t)(best.c0 >> 8);
+    out[2] = (uint8_t)best.c1;
+    out[3] = (uint8_t)(best.c1 >> 8);
+    std::memcpy(out + 4, &best.bits, 4);
+}
+
+void encode_block(const uint8_t* src, uint8_t* out)
+{
+    uint8_t a[16];
+    for (int i = 0; i < 16; i++) a[i] = src[i * 4 + 3];
+    encode_alpha(a, out);
+    encode_color_block(src, out + 8);
 }
 
 }
@@ -455,15 +460,16 @@ bool prompt_render(prompt_skin skin, const prompt_frame& fr, const prompt_glyph&
     const float depth = s.depth, face_y = fr.cy;
     auto body_sd = [&](float x, float y) { return painter::merged(p.body, x, y); };
     auto all_sd = [&](float x, float y) { return body_sd(x, y - std::clamp(y - face_y, 0.f, depth)); };
-    const grid body = mask(size, size, [&](float x, float y) { return area(body_sd, x, y, n); });
-    const grid all = depth > 0 ? mask(size, size, [&](float x, float y) { return area(all_sd, x, y, n); }) : body;
-    grid rim = mask(size, size, [&](float x, float y) {
+    const grid body = p.body.empty() ? grid(size, size, 0) : mask(size, size, [&](float x, float y) { return area(body_sd, x, y, n); });
+    const grid all = depth > 0 && !p.body.empty() ? mask(size, size, [&](float x, float y) { return area(all_sd, x, y, n); }) : body;
+    const grid rim = s.rim_a > 0 && !p.body.empty() ? mask(size, size, [&](float x, float y) {
         return std::max(0.f, area([&](float u, float v) { return all_sd(u, v) - s.rim_hi; }, x, y, n) -
                                  area([&](float u, float v) { return all_sd(u, v) - s.rim_lo; }, x, y, n));
-    });
-    const grid seam = mask(size, size, [&](float x, float y) { return area([&](float u, float v) { return painter::merged(p.seam, u, v); }, x, y, n); });
-    grid ink = mask(size, size, [&](float x, float y) { return area([&](float u, float v) { return painter::merged(p.ink, u, v); }, x, y, n); });
-    for (size_t i = 0; i < ink.v.size(); i++) ink.v[i] = std::max(ink.v[i], p.text_ink.v[i]);
+    }) : grid();
+    const grid seam = p.seam.empty() ? grid() : mask(size, size, [&](float x, float y) { return area([&](float u, float v) { return painter::merged(p.seam, u, v); }, x, y, n); });
+    grid ink = p.ink.empty() ? std::move(p.text_ink) : mask(size, size, [&](float x, float y) { return area([&](float u, float v) { return painter::merged(p.ink, u, v); }, x, y, n); });
+    if (!p.ink.empty())
+        for (size_t i = 0; i < ink.v.size(); i++) ink.v[i] = std::max(ink.v[i], p.text_ink.v[i]);
 
     int top = size, bottom = 0;
     for (int y = 0; y < size; y++)
@@ -489,15 +495,15 @@ bool prompt_render(prompt_skin skin, const prompt_frame& fr, const prompt_glyph&
             for (int x = 0; x < size; x++) shifted.at(x, y) = all.at(x, y - drop);
         out.paint(blur(shifted, s.glow_sigma), [&](int x, int y) { return std::pair{ s.glow, s.glow_a * (1 + 0.5f * grain(x, y, 11)) }; });
     }
-    if (!hud) out.paint(rim, [&](int, int) { return std::pair{ s.rim, s.rim_a }; });
+    if (!hud && rim.w) out.paint(rim, [&](int, int) { return std::pair{ s.rim, s.rim_a }; });
     if (depth > 0)
         out.paint(all, [&](int x, int y) {
             return std::pair{ grained(mix(s.side_top, s.side_bottom, std::clamp((y - top) / (span + depth), 0.f, 1.f)), x, y), 1.f };
         });
     if (s.top.r + s.top.g + s.top.b > 0)
         out.paint(body, [&](int x, int y) { return std::pair{ grained(mix(s.top, s.bottom, std::pow(std::clamp((y - top) / span, 0.f, 1.f), s.curve)), x, y), 1.f }; });
-    if (hud) out.paint(rim, [&](int, int) { return std::pair{ s.rim, s.rim_a }; });
-    out.paint(seam, [&](int, int) { return std::pair{ s.rim, 1.f }; });
+    if (hud && rim.w) out.paint(rim, [&](int, int) { return std::pair{ s.rim, s.rim_a }; });
+    if (seam.w) out.paint(seam, [&](int, int) { return std::pair{ s.rim, 1.f }; });
     if (s.ink_glow_a > 0) out.paint(blur(ink, s.ink_sigma), [&](int, int) { return std::pair{ ink_glow, s.ink_glow_a }; });
     out.paint(ink, [&](int, int) { return std::pair{ ink_core, 1.f }; });
     if (!p.faint.empty()) {
@@ -591,12 +597,11 @@ void prompt_mark_dxt1(uint8_t* dxt1, int width, int height, const prompt_mark& m
         }
         out[(size_t)i * 4 + 3] = 255;
     }
-    uint8_t bc3[16], tile[64];
+    uint8_t tile[64];
     for (int by = 0; by < size / 4; by++)
         for (int bx = 0; bx < size / 4; bx++) {
             for (int y = 0; y < 4; y++) std::memcpy(tile + y * 16, &out[(((size_t)by * 4 + y) * size + bx * 4) * 4], 16);
-            encode_block(tile, bc3);
-            std::memcpy(block(bx, by), bc3 + 8, 8);
+            encode_color_block(tile, block(bx, by));
         }
 }
 void prompt_bc3(const uint8_t* rgba, int w, int h, uint8_t* out, size_t row_pitch)

@@ -1,24 +1,55 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "font.h"
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <fontconfig/fontconfig.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <initializer_list>
-#include <iterator>
 
 namespace {
 
 bool read_font(font& f, const std::filesystem::path& file, int index)
 {
-    std::ifstream in(file, std::ios::binary);
-    if (!in) return false;
-    f.ttf.assign(std::istreambuf_iterator<char>(in), {});
+#ifdef _WIN32
+    HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz{};
+    const bool ok_sz = GetFileSizeEx(h, &sz) && sz.QuadPart > 0 && sz.QuadPart <= (64ll << 20);
+    bool ok = false;
+    if (ok_sz) {
+        f.ttf.resize((size_t)sz.QuadPart);
+        DWORD got = 0;
+        ok = ReadFile(h, f.ttf.data(), (DWORD)f.ttf.size(), &got, nullptr) && got == f.ttf.size();
+    }
+    CloseHandle(h);
+    if (!ok) return false;
+#else
+    const int fd = open(file.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    struct stat st{};
+    bool ok = false;
+    if (!fstat(fd, &st) && st.st_size > 0 && st.st_size <= (64ll << 20)) {
+        f.ttf.resize((size_t)st.st_size);
+        size_t off = 0;
+        while (off < f.ttf.size()) {
+            const ssize_t n = read(fd, f.ttf.data() + off, f.ttf.size() - off);
+            if (n <= 0) break;
+            off += (size_t)n;
+        }
+        ok = off == f.ttf.size();
+    }
+    close(fd);
+    if (!ok) return false;
+#endif
     const int offset = stbtt_GetFontOffsetForIndex(f.ttf.data(), index);
     return offset >= 0 && stbtt_InitFont(&f.info, f.ttf.data(), offset);
 }

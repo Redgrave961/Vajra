@@ -357,11 +357,13 @@ int apply(uint32_t v, uint32_t gcm_format, uint32_t width, uint32_t height, cons
             patch_page(i, v, guest, bytes, staging);
             return 1;
         }
-    for (size_t i = 0; i < std::size(k_rings); i++)
-        if (k_rings[i].bytes == bytes && (k_rings[i].op == ring::blank || (dxt5 && width == height)) && hashed() == k_rings[i].hash) {
-            patch_ring(i, v, width, gcm_format, guest, staging);
-            return 1;
-        }
+    if (bytes == 128 || bytes == 512 || bytes == 4096 || bytes == 16384 || bytes == 65536) {
+        for (size_t i = 0; i < std::size(k_rings); i++)
+            if (k_rings[i].bytes == bytes && (k_rings[i].op == ring::blank || (dxt5 && width == height)) && hashed() == k_rings[i].hash) {
+                patch_ring(i, v, width, gcm_format, guest, staging);
+                return 1;
+            }
+    }
     return 0;
 }
 

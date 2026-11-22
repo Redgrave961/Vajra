@@ -15,8 +15,10 @@ $root = Split-Path $PSScriptRoot -Parent
 $port = $PSScriptRoot
 $linux = $Target -eq "linux"
 $build = if ($BuildDir) { $BuildDir } else { Join-Path $port ("build" + $(if ($linux) { "-linux" } else { "" }) + $(if ($Pgo -eq "gen") { "-pgo" } else { "" })) }
-$env:TEMP = "E:\temp"
-$env:TMP = "E:\temp"
+if (Test-Path "E:\temp") {
+    $env:TEMP = "E:\temp"
+    $env:TMP = "E:\temp"
+}
 
 $mingw = Join-Path $Tools "llvm-mingw"
 $bin = (Join-Path $mingw "bin") -replace '\\', '/'

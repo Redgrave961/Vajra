@@ -25,7 +25,7 @@ constexpr rgba c_bg{ 13, 10, 9 }, c_card{ 26, 21, 19 }, c_card_line{ 44, 34, 30 
     c_warn{ 226, 166, 60 }, c_bad{ 226, 88, 74 }, c_missing{ 112, 99, 92 }, c_button{ 44, 36, 33 }, c_button_hot{ 62, 50, 46 },
     c_disabled{ 38, 33, 31 }, c_focus{ 214, 168, 82 };
 
-enum action { a_add, a_files, a_folder, a_drop, a_dlc_clear, a_download, a_play };
+enum action { a_add, a_files, a_folder, a_dlc_clear, a_download, a_play };
 
 struct face {
     SDL_Texture* tex = nullptr;
@@ -56,11 +56,6 @@ struct firmware_job {
     std::atomic<float> progress{ 0 };
     std::mutex lock;
     std::string error;
-};
-
-struct picked {
-    action id;
-    std::vector<std::filesystem::path> files;
 };
 
 class setup_ui {
@@ -204,22 +199,30 @@ private:
         r = { r.x * s, r.y * s, r.w * s, r.h * s };
         radius = std::min(radius * s, std::min(r.w, r.h) / 2);
         const SDL_FColor col{ c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f };
-        std::vector<SDL_Vertex> v{ { { r.x + r.w / 2, r.y + r.h / 2 }, col, {} } };
+        std::array<SDL_Vertex, 37> v;
+        v[0] = { { r.x + r.w / 2, r.y + r.h / 2 }, col, {} };
         const float cx[4] = { r.x + r.w - radius, r.x + radius, r.x + radius, r.x + r.w - radius };
         const float cy[4] = { r.y + radius, r.y + radius, r.y + r.h - radius, r.y + r.h - radius };
+        size_t nv = 1;
         for (int k = 0; k < 4; k++)
             for (int j = 0; j <= 8; j++) {
                 const float a = (float)(k * 90 + j * 90 / 8) * 3.14159265f / 180;
-                v.push_back({ { cx[k] + std::cos(a) * radius, cy[k] - std::sin(a) * radius }, col, {} });
+                v[nv++] = { { cx[k] + std::cos(a) * radius, cy[k] - std::sin(a) * radius }, col, {} };
             }
-        std::vector<int> idx;
-        for (int i = 1; i < (int)v.size(); i++) idx.insert(idx.end(), { 0, i, i + 1 < (int)v.size() ? i + 1 : 1 });
+        std::array<int, 36 * 3> idx;
+        for (int i = 1; i < 37; i++) {
+            idx[(size_t)(i - 1) * 3] = 0;
+            idx[(size_t)(i - 1) * 3 + 1] = i;
+            idx[(size_t)(i - 1) * 3 + 2] = i + 1 < 37 ? i + 1 : 1;
+        }
         SDL_RenderGeometry(renderer, nullptr, v.data(), (int)v.size(), idx.data(), (int)idx.size());
     }
 
     void line(float x0, float y0, float x1, float y1, float w, rgba c)
     {
-        const float dx = x1 - x0, dy = y1 - y0, len = std::sqrt(dx * dx + dy * dy), nx = -dy / len * w / 2 * s, ny = dx / len * w / 2 * s;
+        const float dx = x1 - x0, dy = y1 - y0, len = std::sqrt(dx * dx + dy * dy);
+        if (len <= 0) return;
+        const float nx = -dy / len * w / 2 * s, ny = dx / len * w / 2 * s;
         const SDL_FColor col{ c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f };
         const SDL_Vertex v[4] = { { { x0 * s + nx, y0 * s + ny }, col, {} }, { { x1 * s + nx, y1 * s + ny }, col, {} },
                                   { { x1 * s - nx, y1 * s - ny }, col, {} }, { { x0 * s - nx, y0 * s - ny }, col, {} } };
@@ -337,12 +340,13 @@ private:
                 if (buttons[i].enabled && hit(buttons[i].r, e.button.x / s, e.button.y / s)) {
                     focus = (int)i;
                     if (buttons[i].id != a_add || !was_open) activate(buttons[i].id);
+                    break;
                 }
             break;
         }
         case SDL_EVENT_DROP_FILE: {
             std::lock_guard<std::mutex> hold(picks_lock);
-            picks.push_back({ a_drop, { std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(e.drop.data))) } });
+            picks.push_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(e.drop.data))));
             break;
         }
         case SDL_EVENT_KEY_DOWN:
@@ -387,23 +391,19 @@ private:
 
     static void on_pick(void* user, const char* const* list, int)
     {
-        auto* slot = static_cast<std::pair<setup_ui*, action>*>(user);
+        auto* self = static_cast<setup_ui*>(user);
         if (!list || !*list) return;
-        picked p{ slot->second, {} };
-        for (; *list; list++) p.files.push_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(*list))));
-        std::lock_guard<std::mutex> hold(slot->first->picks_lock);
-        slot->first->picks.push_back(std::move(p));
+        std::lock_guard<std::mutex> hold(self->picks_lock);
+        for (; *list; list++) self->picks.push_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(*list))));
     }
 
     void activate(action id)
     {
         static const SDL_DialogFileFilter files{ "PS3 files", "iso;pkg;rap;PUP;pup" };
-        slots[id] = { this, id };
         switch (id) {
         case a_add: menu = !menu; break;
-        case a_files: menu = false; SDL_ShowOpenFileDialog(on_pick, &slots[id], window, &files, 1, nullptr, true); break;
-        case a_folder: menu = false; SDL_ShowOpenFolderDialog(on_pick, &slots[id], window, nullptr, true); break;
-        case a_drop: break;
+        case a_files: menu = false; SDL_ShowOpenFileDialog(on_pick, this, window, &files, 1, nullptr, true); break;
+        case a_folder: menu = false; SDL_ShowOpenFolderDialog(on_pick, this, window, nullptr, true); break;
         case a_dlc_clear:
             paths.dlcs.clear();
             recheck();
@@ -415,14 +415,12 @@ private:
 
     void apply_picks()
     {
-        std::vector<picked> list;
+        std::vector<std::filesystem::path> items;
         {
             std::lock_guard<std::mutex> hold(picks_lock);
-            list.swap(picks);
+            items.swap(picks);
         }
-        if (list.empty()) return;
-        std::vector<std::filesystem::path> items;
-        for (picked& p : list) items.insert(items.end(), p.files.begin(), p.files.end());
+        if (items.empty()) return;
         draw();
         const std::filesystem::path pup = add_game_items(exe, paths, items);
         if (!pup.empty() && job.phase != 1 && job.phase != 2) start_job(pup);
@@ -439,17 +437,18 @@ private:
     {
         if (job.worker.joinable()) job.worker.join();
         paths.firmware.clear();
+        const std::filesystem::path flash = firmware_dir(exe, paths);
         const bool download = pup.empty();
         if (download) pup = exe / "user" / "PS3UPDAT.PUP";
         job.progress = 0;
         job.phase = download ? 1 : 2;
-        job.worker = std::thread([this, pup, download] {
+        job.worker = std::thread([this, pup, flash, download] {
             std::string error;
             bool ok = !download || firmware_download(pup, job.progress, error);
             if (ok) {
                 job.progress = 0;
                 job.phase = 2;
-                ok = firmware_extract(pup, firmware_dir(exe, paths), job.progress, error);
+                ok = firmware_extract(pup, flash, job.progress, error);
             }
             if (download) {
                 std::error_code ec;
@@ -485,8 +484,7 @@ private:
     std::vector<button> buttons;
     std::string job_error;
     std::mutex picks_lock;
-    std::vector<picked> picks;
-    std::array<std::pair<setup_ui*, action>, a_play + 1> slots{};
+    std::vector<std::filesystem::path> picks;
 };
 
 }

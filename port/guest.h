@@ -16,6 +16,8 @@ int mouse_route();
 
 inline float from_bits(uint32_t bits) { return std::bit_cast<float>(bits); }
 inline uint32_t to_bits(float v) { return std::bit_cast<uint32_t>(v); }
+inline double from_bits64(uint64_t bits) { return std::bit_cast<double>(bits); }
+inline uint64_t to_bits64(double v) { return std::bit_cast<uint64_t>(v); }
 inline double single(double d) { return (double)(float)d; }
 inline uint32_t stfs(double d) { return to_bits((float)d); }
 

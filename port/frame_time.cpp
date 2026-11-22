@@ -25,7 +25,7 @@ constexpr uint32_t k_runtime_flags = 0x019EEC88;
 constexpr uint32_t k_skipped_optional = 2;
 constexpr uint8_t k_empty_parm = 0x4A;
 constexpr uint32_t k_frame = 0x100;
-constexpr uint32_t k_slot_bits = 10;
+constexpr uint32_t k_slot_bits = 11;
 constexpr uint32_t k_slot_mask = (1u << k_slot_bits) - 1;
 constexpr uint32_t k_timers = 0xA0;
 constexpr uint32_t k_timer_size = 0x1C;
@@ -74,10 +74,7 @@ thread_local std::unordered_map<uint32_t, std::deque<float>> t_frame_times;
 
 double read_f64(uint32_t ea)
 {
-    const uint64_t bits = vm_read64(ea);
-    double v;
-    std::memcpy(&v, &bits, sizeof v);
-    return v;
+    return from_bits64(vm_read64(ea));
 }
 
 }
@@ -249,6 +246,8 @@ double whole_delta(const Site* site, int32_t delta, double k, double press)
 uint32_t whole_step(uint64_t key, uint32_t before, double delta)
 {
     static thread_local std::unordered_map<uint64_t, double> carry;
+    if (carry.size() >= 8192)
+        carry.clear();
     double& acc = carry[key];
     acc += delta;
     const double whole = std::floor(acc);
@@ -267,9 +266,7 @@ uint64_t tick_now()
 bool ran_recently(const std::atomic<uint64_t>& tick)
 {
     const uint64_t bits = tick.load(std::memory_order_relaxed);
-    double at;
-    std::memcpy(&at, &bits, sizeof at);
-    return bits && read_f64(k_current_time) <= at + read_f64(k_delta_seconds);
+    return bits && read_f64(k_current_time) <= from_bits64(bits) + read_f64(k_delta_seconds);
 }
 
 void take_mouse(float* dx, float* dy)
@@ -528,6 +525,8 @@ struct Timer {
 double timer_rate(uint32_t actor, uint64_t name, uint32_t object, double rate)
 {
     static thread_local std::unordered_map<uint64_t, Timer> timers;
+    if (timers.size() >= 8192)
+        timers.clear();
     float armed_rate = 0, count = 0;
     for (uint32_t at = vm_read32(actor + k_timers), end = at + vm_read32(actor + k_timers + 4) * k_timer_size; at != end; at += k_timer_size)
         if (vm_read64(at + 4) == name && vm_read32(at + 0x18) == object) {

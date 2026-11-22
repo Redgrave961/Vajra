@@ -6,6 +6,7 @@
 #include "vk/rsx_vk.h"
 #include "vm_track.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -91,8 +92,8 @@ void set_vfs_root(const char* eboot)
 
 #ifdef _WIN32
 struct env_slot {
-    const char* volatile key;
-    const char* value;
+    std::atomic<const char*> key{ nullptr };
+    std::atomic<const char*> value{ nullptr };
 };
 env_slot g_env[1024];
 SRWLOCK g_env_lock = SRWLOCK_INIT;
@@ -116,25 +117,42 @@ const char* env_os(const char* name)
     return v;
 }
 
+void env_cache_update(const char* name)
+{
+    if (!name || !*name) return;
+    constexpr unsigned mask = 1023;
+    const unsigned h = env_hash(name);
+    AcquireSRWLockExclusive(&g_env_lock);
+    for (unsigned i = h & mask, n = 0; n <= mask; n++, i = (i + 1) & mask) {
+        const char* k = g_env[i].key.load(std::memory_order_relaxed);
+        if (!k) break;
+        if (!_stricmp(k, name)) {
+            g_env[i].value.store(env_os(name), std::memory_order_release);
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_env_lock);
+}
+
 char* __cdecl cached_getenv(const char* name)
 {
     if (!name || !*name) return nullptr;
     constexpr unsigned mask = 1023;
     const unsigned h = env_hash(name);
     for (unsigned i = h & mask, n = 0; n <= mask; n++, i = (i + 1) & mask) {
-        const char* k = g_env[i].key;
-        MemoryBarrier();
+        const char* k = g_env[i].key.load(std::memory_order_acquire);
         if (!k) break;
-        if (!_stricmp(k, name)) return const_cast<char*>(g_env[i].value);
+        if (!_stricmp(k, name)) return const_cast<char*>(g_env[i].value.load(std::memory_order_acquire));
     }
     AcquireSRWLockExclusive(&g_env_lock);
     const char* value = nullptr;
     unsigned i = h & mask, n = 0;
     bool found = false;
     for (; n <= mask; n++, i = (i + 1) & mask) {
-        if (!g_env[i].key) break;
-        if (!_stricmp(g_env[i].key, name)) {
-            value = g_env[i].value;
+        const char* k = g_env[i].key.load(std::memory_order_relaxed);
+        if (!k) break;
+        if (!_stricmp(k, name)) {
+            value = g_env[i].value.load(std::memory_order_relaxed);
             found = true;
             break;
         }
@@ -142,9 +160,8 @@ char* __cdecl cached_getenv(const char* name)
     if (!found) {
         value = env_os(name);
         if (n <= mask) {
-            g_env[i].value = value;
-            MemoryBarrier();
-            g_env[i].key = _strdup(name);
+            g_env[i].value.store(value, std::memory_order_relaxed);
+            g_env[i].key.store(_strdup(name), std::memory_order_release);
         }
     }
     ReleaseSRWLockExclusive(&g_env_lock);
@@ -390,6 +407,7 @@ void default_env(const char* name, const std::filesystem::path& value)
 {
     if (GetEnvironmentVariableA(name, nullptr, 0)) return;
     _wputenv_s(std::filesystem::path(name).c_str(), value.c_str());
+    env_cache_update(name);
 }
 
 void attach_log(const std::filesystem::path& exe)
@@ -397,7 +415,8 @@ void attach_log(const std::filesystem::path& exe)
     const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
     if (err && err != INVALID_HANDLE_VALUE) return;
     const std::string log = (exe / "asura.log").string();
-    std::freopen(log.c_str(), "w", stderr);
+    if (FILE* f = std::fopen(log.c_str(), "wb")) std::fclose(f);
+    std::freopen(log.c_str(), "a", stderr);
     std::freopen(log.c_str(), "a", stdout);
 }
 
@@ -420,7 +439,8 @@ void attach_log(const std::filesystem::path& exe)
     struct stat st;
     if (isatty(STDERR_FILENO) || (!fstat(STDERR_FILENO, &st) && (S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode)))) return;
     const std::string log = (exe / "asura.log").string();
-    std::freopen(log.c_str(), "w", stderr);
+    if (FILE* f = std::fopen(log.c_str(), "wb")) std::fclose(f);
+    std::freopen(log.c_str(), "a", stderr);
     std::freopen(log.c_str(), "a", stdout);
 }
 
@@ -429,7 +449,11 @@ void precise_timers() { prctl(PR_SET_TIMERSLACK, 1ul); }
 uint8_t* reserve_guest_memory()
 {
     void* p = mmap(nullptr, k_vm_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    return p == MAP_FAILED ? nullptr : static_cast<uint8_t*>(p);
+    if (p == MAP_FAILED) return nullptr;
+#ifdef MADV_HUGEPAGE
+    madvise(p, k_vm_size, MADV_HUGEPAGE);
+#endif
+    return static_cast<uint8_t*>(p);
 }
 
 std::filesystem::path desktop_identity()
