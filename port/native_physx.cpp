@@ -14,6 +14,8 @@
 #include <math.h>
 #include <stdint.h>
 
+extern "C" uint64_t ppu_timebase_now(void);
+
 namespace {
 
 static inline float rd_f32(uint32_t ea) {
@@ -802,4 +804,266 @@ void func_005CCB00(ppu_context* ctx) {
     wr_f32(out_box + 0x10, bmax_y);
     wr_f32(out_box + 0x14, bmax_z);
     vm_write32(out_box + 0x18, (uint32_t)bvalid << 24);
+}
+
+/* ============================================================================
+ * func_00AD0C68 (ppu_recomp_103.cpp:722)
+ * P1 main: NxScene::fetchResults (replaces 26-op per-body pose/vel float
+ * copies with 2 contiguous memcpys and eliminates 14 GPR stack spills).
+ * ============================================================================ */
+static inline void copy_body_state(const ppu_mm& m, uint32_t body) {
+    // +0x124..0x13F (28B: pos + quat) -> +0x1B8..0x1D3
+    // +0xCC..0xE3  (24B: linVel + angVel) -> +0x19C..0x1B3
+    if (__builtin_expect(plain_store(m, body + 0x19C, 0x38), 1)) {
+        std::memcpy(m.vb + body + 0x1B8, m.vb + body + 0x124, 28);
+        std::memcpy(m.vb + body + 0x19C, m.vb + body + 0xCC, 24);
+    } else {
+        ppu_store_block(body + 0x1B8, m.vb + body + 0x124, 28);
+        ppu_store_block(body + 0x19C, m.vb + body + 0xCC, 24);
+    }
+    vm_write32_mm(&m, body + 0x140, vm_read32_mm(&m, body + 0x140) + 1u);
+    vm_write8_mm(&m, body + 0x1B4, vm_read8_mm(&m, body + 0x54) ^ 1u);
+}
+
+void func_00AD0C68(ppu_context* ctx) {
+    const uint32_t scene  = (uint32_t)ctx->gpr[3];
+    const uint32_t err_ea = (uint32_t)ctx->gpr[4];
+
+    GuestFrame frame(ctx, 0x100);
+    const uint32_t sp = frame.base;
+
+    const uint32_t lock_ea = scene + 0x180u;
+    ctx->gpr[3] = lock_ea;
+    ctx->lr = 0x00AD0CD4;
+    run(func_00A670C0, ctx);
+
+    const uint32_t prof_mgr = vm_read32(scene + 0x340);
+    ctx->gpr[3] = vm_read32(prof_mgr + 0x34);
+    ctx->lr = 0x00AD0CE4;
+    run(func_00A669A0, ctx);
+    uint32_t prof = (uint32_t)ctx->gpr[3];
+    if (prof == 0) {
+        ctx->gpr[3] = prof_mgr;
+        ctx->lr = 0x00AD1470;
+        run(func_00A73EC4, ctx);
+        prof = (uint32_t)ctx->gpr[3];
+    }
+
+    // Start profiler zone 0x15 if enabled
+    {
+        const int32_t diff = (int32_t)(vm_read32(prof + 0x8) - vm_read32(prof + 0x4)) >> 3;
+        const uint32_t cnt = (uint32_t)(diff * (int32_t)0xB6DB6DB7u) - 1u;
+        if (cnt > 0x15u) {
+            const uint32_t z = vm_read32(prof + 0x30) + 0x498u;
+            if (vm_read32(z) != 0) {
+                uint32_t stk = vm_read32(prof + 0x34);
+                if (vm_read32(z + 0x8) != 0) {
+                    if (vm_read32(z + 0x4) != vm_read32(stk))
+                        vm_write32(z + 0x4, 0xFFFFFFFFu);
+                } else {
+                    const uint32_t id = vm_read32(prof + 0x3C);
+                    vm_write32(z + 0x30, id);
+                    vm_write32(prof + 0x3C, id + 1u);
+                    vm_write32(z + 0x20, vm_read32(prof + 0x38));
+                    vm_write32(z + 0x4, vm_read32(stk));
+                }
+                stk += 4u;
+                vm_write32(prof + 0x34, stk);
+                vm_write32(prof + 0x38, vm_read32(prof + 0x38) + 1u);
+                vm_write32(stk, 0x15u);
+                uint64_t tb;
+                do { tb = ppu_timebase_now(); } while ((int32_t)tb == 0);
+                vm_write64(z + 0x28, tb);
+            }
+        }
+    }
+
+    if (err_ea != 0)
+        vm_write32(err_ea, vm_read32(scene + 0x418));
+
+    // Loop 1: copy active rigid body state
+    const ppu_mm m = ppu_mm_take();
+    {
+        const uint32_t list = vm_read32_mm(&m, scene + 0x3B8);
+        const uint32_t cnt  = vm_read32_mm(&m, list + 0x10);
+        const uint32_t arr  = vm_read32_mm(&m, list + 0x4);
+        for (uint32_t i = 0; i < cnt; ++i) {
+            const uint32_t item = vm_read32_mm(&m, arr + i * 4u);
+            if (vm_read32_mm(&m, item + 0x8) == 0) {
+                const uint32_t body = (item != 0) ? (item - 4u) : 0u;
+                copy_body_state(m, body);
+            }
+        }
+    }
+
+    // Loop 2: sleeping/deactivated bodies at scene + 0x2E4
+    {
+        const uint32_t beg = vm_read32(scene + 0x2E4);
+        const uint32_t end = vm_read32(scene + 0x2E8);
+        if ((uint32_t)((end - beg) + 3u) > 6u) {
+            uint32_t idx = 0;
+            for (;;) {
+                const uint32_t cur_beg = vm_read32(scene + 0x2E4);
+                const uint32_t cur_end = vm_read32(scene + 0x2E8);
+                const uint32_t n = (uint32_t)((int32_t)(cur_end - cur_beg) >> 2);
+                if (idx >= n) break;
+                const uint32_t node = vm_read32(cur_beg + idx * 4u);
+                const uint32_t body = vm_read32(node + 0x20);
+                idx++;
+                if (vm_read8(body + 0x54) != 0) continue;
+
+                std::memset(vm_base + sp + 0x74, 0, 0x18);
+                ctx->gpr[3] = vm_read32(body + 0xE8);
+                ctx->gpr[4] = 2;
+                ctx->gpr[5] = sp + 0x74;
+                ctx->gpr[6] = 0x18;
+                ctx->lr = 0x00AD0F8C;
+                run(func_00B8CC88, ctx);
+                copy_body_state(m, body);
+            }
+        }
+    }
+
+    // Optional subsystem at scene + 0x150
+    const uint32_t sub150 = vm_read32(scene + 0x150);
+    if (sub150 != 0) {
+        ctx->gpr[3] = sub150;
+        ctx->lr = 0x00AD107C;
+        run(func_00BB4B50, ctx);
+    }
+
+    // Loop 3: sub-scenes / compartments at scene + 0xFC
+    {
+        const uint32_t beg = vm_read32(scene + 0xFC);
+        const uint32_t end = vm_read32(scene + 0x100);
+        if ((uint32_t)((end - beg) + 3u) > 6u) {
+            uint32_t idx = 0;
+            for (;;) {
+                const uint32_t cur_beg = vm_read32(scene + 0xFC);
+                const uint32_t cur_end = vm_read32(scene + 0x100);
+                const uint32_t n = (uint32_t)((int32_t)(cur_end - cur_beg) >> 2);
+                if (idx >= n) break;
+                vm_write32(sp + 0x70, 0);
+                ctx->gpr[3] = vm_read32(cur_beg + idx * 4u);
+                ctx->gpr[4] = sp + 0x70;
+                ctx->lr = (err_ea == 0) ? 0x00AD10D4 : 0x00AD14A8;
+                run(func_00AA6870, ctx);
+                if (err_ea != 0 && vm_read32(err_ea) == 0) {
+                    const uint32_t e = vm_read32(sp + 0x70);
+                    if (e != 0) vm_write32(err_ea, e);
+                }
+                idx++;
+            }
+        }
+    }
+
+    // Loop 4: active transforms / dirty bodies at scene + 0x14
+    {
+        uint32_t count = vm_read32(scene + 0x18);
+        const uint32_t arr = vm_read32(scene + 0x1C);
+        uint32_t i = 0;
+        while (i < count) {
+            const uint32_t body = vm_read32(arr + i * 4u);
+            const uint32_t b104 = body + 0x104u;
+            const uint16_t slot = vm_read16(b104 + 0x20);
+            if (slot != 0xFFFFu) {
+                const uint32_t f8 = vm_read32(b104 + 0x8) & ~0x2u;
+                vm_write32(b104 + 0x8, f8);
+                const uint32_t idx8 = vm_read8(b104 + 0x23);
+                const uint32_t mgr = vm_read32(scene + 0x160u + idx8 * 4u + 4u);
+                ctx->gpr[3] = mgr;
+                ctx->gpr[4] = b104;
+                call_vfn_toc(ctx, mgr, 0x14, 0x00AD1208);
+
+                const uint16_t slot2 = vm_read16(b104 + 0x20);
+                if (slot2 != 0xFFFFu) {
+                    const uint32_t f8b = vm_read32(b104 + 0x8);
+                    if ((f8b & 0x2u) == 0) {
+                        vm_write32(b104 + 0x8, f8b | 0x2u);
+                        const uint32_t cb_ptr = vm_read32((uint32_t)(0x019AF8F8u - 0x5194u));
+                        const uint32_t cb_opd = vm_read32(cb_ptr);
+                        if (cb_opd != 0) {
+                            const uint32_t b18 = vm_read32(b104 + 0x18);
+                            const uint32_t base10 = vm_read32(b18 + 0x10);
+                            ctx->gpr[3] = vm_read32(b104 + 0x4);
+                            ctx->gpr[4] = base10 + (uint32_t)slot2 * 24u;
+                            ctx->ctr    = vm_read32(cb_opd);
+                            ctx->gpr[2] = vm_read32(cb_opd + 4);
+                            ctx->lr     = 0x00AD127C;
+                            ps3_indirect_call(ctx);
+                            drain(ctx);
+                            ctx->gpr[2] = 0x019AF8F8ULL;
+                        }
+                    }
+                }
+            }
+
+            const uint32_t f14c = vm_read32(body + 0x14C);
+            const bool keep = (f14c & 0x4u) != 0;
+            vm_write32(body + 0x14C, f14c & ~0x8u);
+            if (!keep) {
+                count--;
+                const uint32_t new_n = vm_read32(scene + 0x18) - 1u;
+                const uint32_t cur_arr = vm_read32(scene + 0x1C);
+                vm_write32(scene + 0x18, new_n);
+                vm_write32(cur_arr + i * 4u, vm_read32(cur_arr + new_n * 4u));
+                vm_write32(body + 0x14C, vm_read32(body + 0x14C) & ~0x2u);
+            } else {
+                i++;
+            }
+        }
+    }
+
+    ctx->gpr[3] = scene + 0x160u;
+    ctx->lr = 0x00AD12C0;
+    run(func_00BA2CB8, ctx);
+
+    // Loop 5: scene + 0xB0 callbacks
+    {
+        uint32_t p = vm_read32(scene + 0xB0);
+        while (p != vm_read32(scene + 0xB4)) {
+            ctx->gpr[3] = vm_read32(p);
+            p += 4u;
+            ctx->lr = 0x00AD12E8;
+            run(func_00BE77F4, ctx);
+        }
+    }
+
+    // End profiler zone 0x15
+    ctx->gpr[3] = vm_read32(prof_mgr + 0x34);
+    ctx->lr = 0x00AD1300;
+    run(func_00A669A0, ctx);
+    prof = (uint32_t)ctx->gpr[3];
+    if (prof == 0) {
+        ctx->gpr[3] = prof_mgr;
+        ctx->lr = 0x00AD1460;
+        run(func_00A73EC4, ctx);
+        prof = (uint32_t)ctx->gpr[3];
+    }
+    {
+        const int32_t diff = (int32_t)(vm_read32(prof + 0x8) - vm_read32(prof + 0x4)) >> 3;
+        const uint32_t cnt = (uint32_t)(diff * (int32_t)0xB6DB6DB7u) - 1u;
+        if (cnt > 0x15u) {
+            const uint32_t base30 = vm_read32(prof + 0x30);
+            const uint32_t z = base30 + 0x498u;
+            if (vm_read32(z) != 0) {
+                uint64_t tb;
+                do { tb = ppu_timebase_now(); } while ((int32_t)tb == 0);
+                const uint64_t dt = tb - vm_read64(base30 + 0x4C0u);
+                vm_write64(base30 + 0x4C0u, dt);
+                vm_write32(prof + 0x38, vm_read32(prof + 0x38) - 1u);
+                vm_write32(z + 0x8, vm_read32(z + 0x8) + 1u);
+                vm_write64(z + 0x10, vm_read64(z + 0x10) + vm_read64(z + 0x28));
+                const uint32_t stk = vm_read32(prof + 0x34) - 4u;
+                vm_write32(prof + 0x34, stk);
+                const uint32_t parent_id = vm_read32(stk);
+                const uint32_t pz = base30 + parent_id * 56u;
+                vm_write64(pz + 0x18, vm_read64(pz + 0x18) + vm_read64(z + 0x28));
+            }
+        }
+    }
+
+    ctx->gpr[3] = lock_ea;
+    ctx->lr = 0x00AD13DC;
+    run(func_00A67040, ctx);
 }
