@@ -7,12 +7,33 @@ namespace {
 
 inline float r_f32(const ppu_mm& m, uint32_t ea)
 {
+    if (__builtin_expect(vm_mm_ok(&m, ea, 4), 1)) {
+        uint32_t x;
+        std::memcpy(&x, m.vb + ea, 4);
+        return from_bits(__builtin_bswap32(x));
+    }
     return from_bits(vm_read32_mm(&m, ea));
+}
+
+inline uint32_t r_u32(const ppu_mm& m, uint32_t ea)
+{
+    if (__builtin_expect(vm_mm_ok(&m, ea, 4), 1)) {
+        uint32_t x;
+        std::memcpy(&x, m.vb + ea, 4);
+        return __builtin_bswap32(x);
+    }
+    return vm_read32_mm(&m, ea);
 }
 
 inline double r_f64(const ppu_mm& m, uint32_t ea)
 {
-    const uint64_t u = vm_read64_mm(&m, ea);
+    uint64_t u;
+    if (__builtin_expect(vm_mm_ok(&m, ea, 8), 1)) {
+        std::memcpy(&u, m.vb + ea, 8);
+        u = __builtin_bswap64(u);
+    } else {
+        u = vm_read64_mm(&m, ea);
+    }
     double d;
     std::memcpy(&d, &u, 8);
     return d;
@@ -173,12 +194,12 @@ void func_01272748(ppu_context* ctx)
     const uint32_t end = (uint32_t)ctx->gpr[8];
     const uint32_t box_ax = (uint32_t)ctx->gpr[9];
     const uint32_t box_ay = (uint32_t)ctx->gpr[10];
-    const uint32_t box_az = vm_read32_mm(&m, sp + 0x74u);
-    const uint32_t box_ext = vm_read32_mm(&m, sp + 0x7Cu);
-    const uint32_t p_t0 = vm_read32_mm(&m, sp + 0x84u);
-    const uint32_t p_t1 = vm_read32_mm(&m, sp + 0x8Cu);
-    const uint32_t out_n0 = vm_read32_mm(&m, sp + 0x94u);
-    const uint32_t out_n1 = vm_read32_mm(&m, sp + 0x9Cu);
+    const uint32_t box_az = r_u32(m, sp + 0x74u);
+    const uint32_t box_ext = r_u32(m, sp + 0x7Cu);
+    const uint32_t p_t0 = r_u32(m, sp + 0x84u);
+    const uint32_t p_t1 = r_u32(m, sp + 0x8Cu);
+    const uint32_t out_n0 = r_u32(m, sp + 0x94u);
+    const uint32_t out_n1 = r_u32(m, sp + 0x9Cu);
 
     const float ax = r_f32(m, axis);
     const float ay = r_f32(m, axis + 4u);
@@ -200,12 +221,28 @@ void func_01272748(ppu_context* ctx)
 
     float min_v = r_f32(m, 0x01272728u);
     float max_v = r_f32(m, 0x0127272Cu);
-    const int32_t count = (int32_t)vm_read32_mm(&m, verts_arr + 4u);
-    uint32_t vp = vm_read32_mm(&m, verts_arr);
-    for (int32_t i = 0; i < count; ++i, vp += 12u) {
-        const float d = dot3(ax, ay, az, m, vp);
-        min_v = (d - min_v >= 0.0f) ? min_v : d;
-        max_v = (d - max_v >= 0.0f) ? d : max_v;
+    const int32_t count = (int32_t)r_u32(m, verts_arr + 4u);
+    uint32_t vp = r_u32(m, verts_arr);
+    if (__builtin_expect(count > 0 && vm_mm_ok(&m, vp, (uint32_t)count * 12u), 1)) {
+        const uint8_t* ptr = m.vb + vp;
+        for (int32_t i = 0; i < count; ++i, ptr += 12) {
+            uint32_t ux, uy, uz;
+            std::memcpy(&ux, ptr, 4);
+            std::memcpy(&uy, ptr + 4, 4);
+            std::memcpy(&uz, ptr + 8, 4);
+            const float x = from_bits(__builtin_bswap32(ux));
+            const float y = from_bits(__builtin_bswap32(uy));
+            const float z = from_bits(__builtin_bswap32(uz));
+            const float d = std::fmaf(az, z, std::fmaf(ax, x, ay * y));
+            min_v = (d < min_v) ? d : min_v;
+            max_v = (d > max_v) ? d : max_v;
+        }
+    } else {
+        for (int32_t i = 0; i < count; ++i, vp += 12u) {
+            const float d = dot3(ax, ay, az, m, vp);
+            min_v = (d - min_v >= 0.0f) ? min_v : d;
+            max_v = (d - max_v >= 0.0f) ? d : max_v;
+        }
     }
 
     min_v -= rad;

@@ -278,7 +278,6 @@ int g_swap_row = -1;
 std::string g_swap_text;
 constexpr uint64_t hook_bit(uint32_t fn) { return 1ull << ((fn * 0x9E3779B1u) >> 26); }
 
-std::atomic<uint64_t> g_hook_mask{ 0 };
 std::atomic<uint64_t> g_hooks[std::size(k_hooks)];
 std::atomic<uint64_t> g_save_param{ 0 };
 std::atomic<uint32_t> g_stick_lit{ 0 };
@@ -825,6 +824,8 @@ void build_menu(ppu_context* ctx, const uint8_t* swf, Menu& menu)
 
 }
 
+std::atomic<uint64_t> g_pc_options_hook_mask{ 0 };
+
 void pc_options_boot(const std::filesystem::path& dir)
 {
     std::lock_guard<std::mutex> hold(g_settings_lock);
@@ -843,13 +844,13 @@ void pc_options_link(uint32_t function, const std::string& path)
     for (size_t i = 0; i < std::size(k_hooks); i++)
         if (path == k_hooks[i].first) {
             g_hooks[i].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_relaxed);
-            g_hook_mask.fetch_or(hook_bit(function), std::memory_order_relaxed);
+            g_pc_options_hook_mask.fetch_or(hook_bit(function), std::memory_order_relaxed);
         }
 }
 
-uint32_t pc_options_call(uint32_t self, uint32_t function)
+uint32_t pc_options_call_slow(uint32_t self, uint32_t function)
 {
-    if (!function || !(g_hook_mask.load(std::memory_order_relaxed) & hook_bit(function))) return 0;
+    if (!function || !(g_pc_options_hook_mask.load(std::memory_order_relaxed) & hook_bit(function))) return 0;
     for (const std::atomic<uint64_t>& slot : g_hooks) {
         const uint64_t hook = slot.load(std::memory_order_relaxed);
         if ((uint32_t)(hook >> 32) != function) continue;

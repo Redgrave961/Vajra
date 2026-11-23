@@ -36,10 +36,20 @@ void func_00027BC8(ppu_context* ctx)
 {
     const uint32_t ring = (uint32_t)ctx->gpr[3];
     volatile uint32_t* write = host_word(ring + k_write);
-    const uint32_t seen = *write, read = vm_read32(ring + k_read), written = __builtin_bswap32(seen);
+    const uint32_t read = vm_read32(ring + k_read);
+    uint32_t seen = *write, written = __builtin_bswap32(seen);
     ctx->gpr[4] = read;
     ctx->gpr[3] = written;
     if (read != written) return;
+    for (unsigned spin = 0; spin < 512u; spin++) {
+        ps3_pause();
+        seen = *write;
+        written = __builtin_bswap32(seen);
+        if (read != written) {
+            ctx->gpr[3] = written;
+            return;
+        }
+    }
     ppu_thread_note_block(ctx->thread_id);
     ps3_brief_wait(write, seen, k_idle_sleep_us);
     ctx->gpr[3] = 0;

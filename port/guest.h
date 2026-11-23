@@ -7,6 +7,8 @@
 
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" void ps3_indirect_call(ppu_context* ctx);
+extern "C" const int32_t* ppu_exec_tab;
+extern "C" uint32_t ppu_exec_lo, ppu_exec_n;
 
 double tick_scale();
 bool frame_site(uint32_t stack);
@@ -45,11 +47,24 @@ inline void run(void (*body)(ppu_context*), ppu_context* ctx)
     drain(ctx);
 }
 
+inline void guest_icall(ppu_context* ctx)
+{
+    const uint32_t d = (uint32_t)ctx->ctr - ppu_exec_lo;
+    const uint32_t i = (d >> 2) | (d << 30);
+    if (__builtin_expect(i < ppu_exec_n && ppu_exec_tab[i], 1)) {
+        const auto fn = (void (*)(ppu_context*))((const char*)ps3_indirect_call + ppu_exec_tab[i]);
+        fn(ctx);
+        drain(ctx);
+        return;
+    }
+    ps3_indirect_call(ctx);
+    drain(ctx);
+}
+
 inline void guest_call(ppu_context* ctx, uint32_t opd)
 {
     ctx->ctr = vm_read32(opd);
-    ps3_indirect_call(ctx);
-    drain(ctx);
+    guest_icall(ctx);
 }
 
 struct GuestFrame {
