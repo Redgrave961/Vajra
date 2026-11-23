@@ -465,7 +465,7 @@ private:
         aa_rect(pr, 14.f, c_panel);
         aa_border(pr, 14.f, c_panel_border);
 
-        const char* names[] = { "Game", "Update 1.02", "DLC", "Licences", "Firmware" };
+        const char* names[] = { "Game", "Update 1.02", "DLC", "Licenses", "Firmware" };
         const char* hints[] = {
             "BLES01227 disc folder or decrypted ISO",
             "Official 1.02 update .pkg",
@@ -880,8 +880,8 @@ private:
     {
         static const SDL_DialogFileFilter f_iso{ "PS3 ISO Image", "iso" };
         static const SDL_DialogFileFilter f_pkg{ "PS3 Update Package", "pkg" };
-        static const SDL_DialogFileFilter f_dlc{ "PS3 DLC / Licence", "pkg;rap" };
-        static const SDL_DialogFileFilter f_rap{ "PS3 Licence (.rap)", "rap" };
+        static const SDL_DialogFileFilter f_dlc{ "PS3 DLC / License", "pkg;rap" };
+        static const SDL_DialogFileFilter f_rap{ "PS3 License (.rap)", "rap" };
         switch (id) {
         case a_game_folder: SDL_ShowOpenFolderDialog(on_pick, this, window, nullptr, false); break;
         case a_game_iso: SDL_ShowOpenFileDialog(on_pick, this, window, &f_iso, 1, nullptr, false); break;
