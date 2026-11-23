@@ -18,8 +18,8 @@
 
 ## Features
 
-- **Native PC Performance — Up to 180+ FPS & Uncapped**
-  - Runs natively on x86-64 PCs with smooth, rock-solid frame pacing and selectable in-game frame rate caps (**30 / 60 / 120 / 180 / Uncapped**).
+- **Native PC Performance — High FPS & Uncapped**
+  - Runs natively on x86-64 PCs with smooth, rock-solid frame pacing and selectable in-game frame rate caps matched to your display's refresh rate (plus **Uncapped**).
 - **True High-Resolution Rendering (1080p, 1440p, 4K & Beyond)**
   - Crisp, full-resolution 3D rendering, shadows, particles, and UI with properly scaled bloom and depth-of-field effects.
   - Windowed, Borderless Fullscreen, and Exclusive Fullscreen modes configurable right from the in-game PC Options menu.
