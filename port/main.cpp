@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #ifdef _WIN32
@@ -458,9 +459,9 @@ uint8_t* reserve_guest_memory()
 
 std::filesystem::path desktop_identity()
 {
-    SDL_SetAppMetadata("Asura's Wrath", "1.0.0.0", "AsurasWrath");
+    SDL_SetAppMetadata("Vajra", "1.0.0.0", "Vajra");
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
-    return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "AsurasWrath.png";
+    return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "Vajra.png";
 }
 #endif
 
@@ -507,13 +508,54 @@ void func_0013A02C(ppu_context* ctx)
 int main(int argc, char** argv)
 {
     const std::filesystem::path exe = executable_dir();
-    attach_log(exe);
+    std::filesystem::path data_dir;
+    launch_options opts;
+    const char* elf = nullptr;
+
+    auto path_arg = [](const char* s) {
+        return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(s)));
+    };
+    for (int i = 1; i < argc; i++) {
+        const std::string_view a = argv[i];
+        auto take = [&](std::string_view flag, std::filesystem::path& out) -> bool {
+            if (a == flag && i + 1 < argc) { out = path_arg(argv[++i]); return true; }
+            if (a.size() > flag.size() + 1 && a.starts_with(flag) && a[flag.size()] == '=') {
+                out = path_arg(argv[i] + flag.size() + 1);
+                return true;
+            }
+            return false;
+        };
+        std::filesystem::path dlc_item;
+        if (a == "--prepare") opts.prepare = true;
+        else if (take("--data", data_dir)) {}
+        else if (take("--game", opts.game)) {}
+        else if (take("--update", opts.update)) {}
+        else if (take("--dlc", dlc_item)) { opts.dlcs.push_back(std::move(dlc_item)); }
+        else if (!a.starts_with("-") && !elf) elf = argv[i];
+    }
+
+    if (data_dir.empty()) {
+        if (const char* env_data = std::getenv("RECOMPLAUNCHER_DATA"); env_data && *env_data)
+            data_dir = path_arg(env_data);
+        else
+            data_dir = exe;
+    }
+    {
+        std::error_code data_ec;
+        std::filesystem::create_directories(data_dir, data_ec);
+    }
+
+    if (opts.prepare) {
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        return prepare_game_files(data_dir, opts);
+    }
+
+    attach_log(data_dir);
     const std::filesystem::path icon = desktop_identity();
     game_files files;
-    if (!load_game_files(exe, icon, files)) return 2;
+    if (!load_game_files(data_dir, icon, files, opts)) return 2;
     use_game_files(files);
-    pc_options_boot(exe);
-    const char* elf = argc > 1 ? argv[1] : nullptr;
+    pc_options_boot(data_dir);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     precise_timers();
@@ -534,7 +576,7 @@ int main(int argc, char** argv)
     set_vfs_root(elf ? elf : "");
     cellGame_init_boot(ppu_vfs_root);
     std::error_code cache_ec;
-    const std::filesystem::path cache_dir = exe / "cache";
+    const std::filesystem::path cache_dir = data_dir / "cache";
     std::filesystem::create_directories(cache_dir, cache_ec);
     rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title(), (cache_dir / "vk_pipelines.bin").string().c_str(), icon.string().c_str()));
     use_button_prompts();

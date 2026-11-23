@@ -27,7 +27,15 @@ struct game_check {
     bool ready() const;
 };
 
+struct launch_options {
+    std::filesystem::path game;
+    std::filesystem::path update;
+    std::vector<std::filesystem::path> dlcs;
+    bool prepare = false;
+};
+
 std::filesystem::path add_game_items(const std::filesystem::path& exe, game_paths& paths, const std::vector<std::filesystem::path>& items);
 game_check check_game_paths(const std::filesystem::path& exe, const game_paths& paths);
 std::filesystem::path firmware_dir(const std::filesystem::path& exe, const game_paths& paths);
-bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out);
+int prepare_game_files(const std::filesystem::path& exe, const launch_options& opts);
+bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out, const launch_options& opts = {});

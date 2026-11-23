@@ -7,10 +7,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <thread>
 
 namespace {
 
@@ -321,9 +326,120 @@ game_check check_game_paths(const std::filesystem::path& exe, const game_paths& 
     return mount(exe, paths, exe / "user" / "check" / std::to_string(++n)).check;
 }
 
-bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out)
+namespace {
+
+void apply_launch_options(const std::filesystem::path& exe, game_paths& paths, const launch_options& opts)
+{
+    if (!opts.game.empty())
+        paths.game = opts.game.filename() == "PS3_GAME" ? opts.game.parent_path() : opts.game;
+    if (!opts.update.empty())
+        paths.update = opts.update;
+    if (!opts.dlcs.empty())
+        add_game_items(exe, paths, opts.dlcs);
+}
+
+bool run_with_progress(float start_p, float end_p, const char* label, const std::function<bool(std::atomic<float>&, std::string&)>& fn, std::string& error)
+{
+    std::atomic<float> p{ 0.f };
+    std::atomic<bool> done{ false };
+    bool ok = false;
+    std::thread worker([&] {
+        ok = fn(p, error);
+        done.store(true, std::memory_order_release);
+    });
+    int last_pct = -1;
+    while (!done.load(std::memory_order_acquire)) {
+        const float cur = std::clamp(p.load(std::memory_order_relaxed), 0.f, 1.f);
+        const float mapped = start_p + (end_p - start_p) * cur;
+        const int pct = (int)(mapped * 100.f);
+        if (pct != last_pct) {
+            std::printf("progress %.2f %s\n", mapped, label);
+            std::fflush(stdout);
+            last_pct = pct;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    worker.join();
+    if (ok) {
+        std::printf("progress %.2f %s\n", end_p, label);
+        std::fflush(stdout);
+    }
+    return ok;
+}
+
+}
+
+int prepare_game_files(const std::filesystem::path& exe, const launch_options& opts)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(exe / "user", ec);
+    game_paths paths = read_paths(exe);
+    apply_launch_options(exe, paths, opts);
+
+    std::printf("progress 0.05 Checking game files\n");
+    std::fflush(stdout);
+
+    if (paths.game.empty()) {
+        std::fprintf(stderr, "No game path provided. Pass --game=<path> to a BLES01227 folder or decrypted ISO.\n");
+        return 3;
+    }
+
+    const std::filesystem::path default_pkg = exe / "user" / "EP0102-BLES01227_00-PATCH02000000000-A0102-V0100-PE.pkg";
+    if (paths.update.empty() || !std::filesystem::is_regular_file(paths.update, ec)) {
+        if (std::filesystem::is_regular_file(default_pkg, ec)) {
+            paths.update = default_pkg;
+        } else {
+            std::string error;
+            const bool ok = run_with_progress(0.10f, 0.45f, "Downloading official 1.02 update from Sony",
+                [&](std::atomic<float>& p, std::string& err) { return update_download(default_pkg, p, err); }, error);
+            if (!ok) {
+                std::fprintf(stderr, "Failed to download 1.02 update: %s\n", error.c_str());
+                return 4;
+            }
+            paths.update = default_pkg;
+        }
+    }
+
+    const std::filesystem::path flash = firmware_dir(exe, paths);
+    if (!firmware_installed(flash)) {
+        const std::filesystem::path pup = exe / "user" / "PS3UPDAT.PUP";
+        std::string error;
+        bool ok = run_with_progress(0.45f, 0.80f, "Downloading PS3 firmware from Sony",
+            [&](std::atomic<float>& p, std::string& err) { return firmware_download(pup, p, err); }, error);
+        if (ok) {
+            ok = run_with_progress(0.80f, 0.94f, "Extracting PS3 audio codecs",
+                [&](std::atomic<float>& p, std::string& err) { return firmware_extract(pup, flash, p, err); }, error);
+        }
+        std::filesystem::remove(pup, ec);
+        if (!ok) {
+            std::fprintf(stderr, "Failed to install PS3 firmware: %s\n", error.c_str());
+            return 5;
+        }
+    }
+
+    std::printf("progress 0.95 Verifying game and update\n");
+    std::fflush(stdout);
+    mounted m = mount(exe, paths, exe / "user");
+    if (!m.check.ready()) {
+        if (m.check.game.state != item_state::ok) std::fprintf(stderr, "Game check failed: %s\n", m.check.game.text.c_str());
+        if (m.check.update.state != item_state::ok) std::fprintf(stderr, "Update 1.02 check failed: %s\n", m.check.update.text.c_str());
+        if (m.check.dlc.state != item_state::ok) std::fprintf(stderr, "DLC check failed: %s\n", m.check.dlc.text.c_str());
+        if (m.check.firmware.state != item_state::ok) std::fprintf(stderr, "Firmware check failed: %s\n", m.check.firmware.text.c_str());
+        return 6;
+    }
+
+    write_paths(exe, paths);
+    std::filesystem::remove_all(exe / "user" / "check", ec);
+    std::printf("progress 1.00 Ready\n");
+    std::fflush(stdout);
+    return 0;
+}
+
+bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out, const launch_options& opts)
 {
     game_paths paths = read_paths(exe);
+    const bool cli_override = !opts.game.empty() || !opts.update.empty() || !opts.dlcs.empty();
+    apply_launch_options(exe, paths, opts);
     std::error_code ec;
     out.user = exe / "user";
     out.hdd0 = out.user / "dev_hdd0";
@@ -337,6 +453,8 @@ bool load_game_files(const std::filesystem::path& exe, const std::filesystem::pa
         std::filesystem::remove_all(exe / "user" / "check", ec);
         m = mount(exe, paths, out.user);
         if (!m.check.ready()) return false;
+    } else if (cli_override) {
+        write_paths(exe, paths);
     }
     out.flash = firmware_dir(exe, paths);
     out.bdvd = m.bdvd;
