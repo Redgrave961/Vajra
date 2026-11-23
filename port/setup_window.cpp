@@ -230,32 +230,44 @@ private:
             return tex;
         };
 
-        // 1. 9-slice anti-aliased rounded pill fill & 1px border (64x64 physical texels, corner = 20)
+        // 1. 9-slice anti-aliased rounded pill fill & border baked 1:1 at exact physical DPI (zero minification aliasing!)
         {
-            constexpr int sz = 64;
-            const float c = sz * 0.5f, r = 20.f, half = sz * 0.5f - 1.f;
-            std::vector<uint8_t> fill_px((size_t)sz * sz * 4, 255);
-            std::vector<uint8_t> border_px((size_t)sz * sz * 4, 255);
-            for (int y = 0; y < sz; y++) {
-                for (int x = 0; x < sz; x++) {
+            pill_r_px = std::max(8, (int)std::lround(10.f * s));
+            pill_corner = (float)pill_r_px + 2.f;
+            pill_sz = pill_r_px * 2 + 12;
+            const float c = pill_sz * 0.5f, half = pill_sz * 0.5f - 1.f, r = (float)pill_r_px;
+            const float stroke = std::max(1.0f, 1.15f * s);
+            std::vector<uint8_t> fill_px((size_t)pill_sz * pill_sz * 4, 255);
+            std::vector<uint8_t> border_px((size_t)pill_sz * pill_sz * 4, 255);
+            for (int y = 0; y < pill_sz; y++) {
+                for (int x = 0; x < pill_sz; x++) {
                     const float a_in = area([&](float u, float v) { return sd_round_rect(u, v, c, c, half, half, r); }, x + 0.5f, y + 0.5f, 4);
-                    const float a_inner = area([&](float u, float v) { return sd_round_rect(u, v, c, c, half - 1.4f, half - 1.4f, r - 1.4f); },
-                                               x + 0.5f, y + 0.5f, 4);
-                    fill_px[((size_t)y * sz + x) * 4 + 3] = (uint8_t)std::lround(a_in * 255.f);
-                    border_px[((size_t)y * sz + x) * 4 + 3] = (uint8_t)std::lround(std::max(0.f, a_in - a_inner) * 255.f);
+                    const float a_inner = area([&](float u, float v) {
+                        return sd_round_rect(u, v, c, c, half - stroke, half - stroke, std::max(1.f, r - stroke));
+                    }, x + 0.5f, y + 0.5f, 4);
+                    fill_px[((size_t)y * pill_sz + x) * 4 + 3] = (uint8_t)std::lround(a_in * 255.f);
+                    border_px[((size_t)y * pill_sz + x) * 4 + 3] = (uint8_t)std::lround(std::max(0.f, a_in - a_inner) * 255.f);
                 }
             }
-            pill_fill = make_tex(sz, sz, fill_px);
-            pill_border = make_tex(sz, sz, border_px);
+            pill_fill = make_tex(pill_sz, pill_sz, fill_px);
+            pill_border = make_tex(pill_sz, pill_sz, border_px);
 
-            // Soft Gaussian shadow / glow 9-slice (80x80 with sigma=6 blur)
-            constexpr int ssz = 80;
-            const float sc = ssz * 0.5f;
-            grid m = mask(ssz, ssz, [&](float u, float v) { return area([&](float x, float y) { return sd_round_rect(x, y, sc, sc, 24.f, 24.f, 14.f); }, u, v, 2); });
-            grid soft = blur(m, 6.0f);
-            std::vector<uint8_t> sh_px((size_t)ssz * ssz * 4, 255);
-            for (int i = 0; i < ssz * ssz; i++) sh_px[(size_t)i * 4 + 3] = (uint8_t)std::lround(std::clamp(soft.v[i], 0.f, 1.f) * 255.f);
-            pill_shadow = make_tex(ssz, ssz, sh_px);
+            // Soft Gaussian shadow / glow 9-slice with generous 4*sigma margin so alpha reaches 0.0 well inside texture edges (no square cutoff!)
+            const float sigma = std::max(4.f, 5.5f * s);
+            const int pad = (int)std::ceil(sigma * 3.8f);
+            shadow_pad = (float)pad / s;
+            shadow_sz = pad * 2 + pill_r_px * 2 + 12;
+            shadow_corner = (float)(pad + pill_r_px + 2);
+            const float sc = shadow_sz * 0.5f;
+            const float shalf = sc - (float)pad;
+            grid m = mask(shadow_sz, shadow_sz, [&](float u, float v) {
+                return area([&](float x, float y) { return sd_round_rect(x, y, sc, sc, shalf, shalf, r); }, u, v, 2);
+            });
+            grid soft = blur(m, sigma);
+            std::vector<uint8_t> sh_px((size_t)shadow_sz * shadow_sz * 4, 255);
+            for (int i = 0; i < shadow_sz * shadow_sz; i++)
+                sh_px[(size_t)i * 4 + 3] = (uint8_t)std::lround(std::clamp(soft.v[i], 0.f, 1.f) * 255.f);
+            pill_shadow = make_tex(shadow_sz, shadow_sz, sh_px);
         }
 
         // 2. Smooth radial glow sprite (for embers & mouse-tracking button spotlight)
@@ -360,11 +372,12 @@ private:
         }
     }
 
-    void aa_rect(SDL_FRect r, float radius, rgba c) { draw_9slice(pill_fill, 64, 22.f, r, radius, c); }
-    void aa_border(SDL_FRect r, float radius, rgba c) { draw_9slice(pill_border, 64, 22.f, r, radius, c); }
+    void aa_rect(SDL_FRect r, float radius, rgba c) { draw_9slice(pill_fill, pill_sz, pill_corner, r, radius, c); }
+    void aa_border(SDL_FRect r, float radius, rgba c) { draw_9slice(pill_border, pill_sz, pill_corner, r, radius, c); }
     void aa_shadow(SDL_FRect r, float expand, float radius, rgba c)
     {
-        draw_9slice(pill_shadow, 80, 32.f, { r.x - expand, r.y - expand, r.w + expand * 2.f, r.h + expand * 2.f }, radius + expand, c);
+        const float p = std::max(expand, shadow_pad);
+        draw_9slice(pill_shadow, shadow_sz, shadow_corner, { r.x - p, r.y - p, r.w + p * 2.f, r.h + p * 2.f }, radius + p, c);
     }
 
     void draw()
@@ -540,7 +553,7 @@ private:
         for (size_t i = 0; i < str.size();) {
             stbtt_GetPackedQuad(f.chars.data(), f.aw, f.ah, glyph_index(next_cp(str, i)), &px, &py, &q, 1);
             const SDL_FRect src{ q.s0 * f.aw, q.t0 * f.ah, (q.s1 - q.s0) * f.aw, (q.t1 - q.t0) * f.ah };
-            const SDL_FRect dst{ std::round(q.x0), std::round(q.y0), q.x1 - q.x0, q.y1 - q.y0 };
+            const SDL_FRect dst{ q.x0, q.y0, q.x1 - q.x0, q.y1 - q.y0 };
             SDL_RenderTexture(renderer, f.tex, &src, &dst);
             px += track * s;
         }
@@ -725,32 +738,33 @@ private:
         }
         aa_rect(r, rad, fill);
 
-        // Mouse-tracking radial spotlight + specular shimmer sweep clipped cleanly inside button!
-        if (b.enabled && (anim.hover > 0.01f || anim.sweep >= 0.f || is_play)) {
-            const SDL_Rect clip{ (int)std::floor(r.x * s), (int)std::floor(r.y * s), (int)std::ceil(r.w * s), (int)std::ceil(r.h * s) };
-            SDL_SetRenderClipRect(renderer, &clip);
-            if (glow_dot && anim.hover > 0.01f) {
-                const float gw = std::max(r.w * 0.75f, 120.f) * s, gh = r.h * 2.4f * s;
+        // Soft rounded inner sheen & mouse spotlight (no rectangular clip leaking past rounded corners!)
+        if (b.enabled && glow_dot) {
+            if (anim.hover > 0.01f) {
+                const float mx = std::clamp(mouse_x, r.x + rad, r.x + r.w - rad);
+                const float gw = std::min(r.w * 0.85f, 160.f) * s;
+                const float gh = (r.h - 4.f) * s;
                 SDL_SetTextureColorMod(glow_dot, 255, is_play ? 210 : 216, is_play ? 150 : 140);
-                SDL_SetTextureAlphaMod(glow_dot, (uint8_t)(anim.hover * (is_play ? 62.f : 44.f)));
-                const SDL_FRect gd{ mouse_x * s - gw * 0.5f, mouse_y * s - gh * 0.5f, gw, gh };
+                SDL_SetTextureAlphaMod(glow_dot, (uint8_t)(anim.hover * (is_play ? 55.f : 38.f)));
+                const SDL_FRect gd{ mx * s - gw * 0.5f, (r.y + r.h * 0.5f) * s - gh * 0.5f, gw, gh };
                 SDL_RenderTexture(renderer, glow_dot, nullptr, &gd);
             }
-            // Periodic gentle shimmer on Play button, or hover-enter sweep on any button
+            // Periodic gentle shimmer on Play button, or hover-enter sweep strictly inside rounded bounds
             float sp = anim.sweep;
             if (is_play && sp < 0.f) {
                 const float cycle = std::fmod(t, 4.2f);
-                if (cycle < 0.75f) sp = cycle / 0.75f * 1.3f;
+                if (cycle < 0.75f) sp = cycle / 0.75f;
             }
-            if (sp >= 0.f && glow_dot) {
-                const float sx = r.x - 40.f + sp * (r.w + 80.f);
-                const float sw = 96.f * s, sh = r.h * 2.4f * s;
+            if (sp >= 0.f && sp <= 1.f) {
+                const float edge_fade = std::sin(sp * k_pi);
+                const float sx = r.x + rad + sp * (r.w - rad * 2.f);
+                const float sw = std::min(r.w * 0.55f, 120.f) * s;
+                const float sh = (r.h - 4.f) * s;
                 SDL_SetTextureColorMod(glow_dot, 255, 238, 198);
-                SDL_SetTextureAlphaMod(glow_dot, (uint8_t)(is_play ? 54 : 42));
+                SDL_SetTextureAlphaMod(glow_dot, (uint8_t)((is_play ? 52.f : 40.f) * edge_fade));
                 const SDL_FRect sd{ sx * s - sw * 0.5f, (r.y + r.h * 0.5f) * s - sh * 0.5f, sw, sh };
                 SDL_RenderTexture(renderer, glow_dot, nullptr, &sd);
             }
-            SDL_SetRenderClipRect(renderer, nullptr);
         }
 
         // Crisp 4x4 AA border
@@ -952,6 +966,8 @@ private:
     SDL_Texture* pill_shadow = nullptr;
     SDL_Texture* glow_dot = nullptr;
     SDL_Texture* status_tex[4]{};
+    int pill_r_px = 10, pill_sz = 32, shadow_sz = 96;
+    float pill_corner = 12.f, shadow_corner = 32.f, shadow_pad = 18.f;
     int art_w = 0, art_h = 0;
     firmware_job job;
     font regular, semibold, black;
