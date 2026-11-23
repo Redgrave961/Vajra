@@ -169,6 +169,14 @@ END
     set(PORT_PLATFORM_SOURCES "${PORT_RC}")
 endif()
 
+set(PORT_LAUNCHER_ART "${CMAKE_CURRENT_BINARY_DIR}/launcher_art.h")
+add_custom_command(
+    OUTPUT "${PORT_LAUNCHER_ART}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.py" "${CMAKE_CURRENT_SOURCE_DIR}/../assets/launcher_art.jpg" "${PORT_LAUNCHER_ART}" k_launcher_art
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_file.py" "${CMAKE_CURRENT_SOURCE_DIR}/../assets/launcher_art.jpg"
+    COMMENT "Embedding launcher artwork")
+set_source_files_properties(setup_window.cpp PROPERTIES OBJECT_DEPENDS "${PORT_LAUNCHER_ART}")
+
 add_executable(${PROJECT_NAME}
     ${PORT_PLATFORM_SOURCES}
     main.cpp
@@ -201,6 +209,7 @@ add_executable(${PROJECT_NAME}
     ${SPU_SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}"
     "${RECOMP_DIR}"
     "${PS3RECOMP_DIR}/include"
     "${PS3RECOMP_DIR}/runtime/ppu"

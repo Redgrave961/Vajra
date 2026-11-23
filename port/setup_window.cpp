@@ -2,6 +2,8 @@
 
 #include "firmware.h"
 #include "font.h"
+#include "launcher_art.h"
+#include "../ps3recomp/libs/codec/stb_image.h"
 
 #include <SDL3/SDL.h>
 
@@ -15,34 +17,35 @@
 
 namespace {
 
-constexpr float k_w = 860, k_h = 668, k_pad = 32;
-constexpr float k_drop_y = 114, k_drop_h = 52;
-constexpr float k_cards_y = 180, k_card_h = 68, k_card_gap = 9;
+constexpr float k_w = 900, k_h = 640, k_pad = 36;
+constexpr float k_hero_h = 186;
+constexpr float k_panel_y = 200, k_row_h = 62;
 constexpr float k_pi = 3.14159265359f;
 
 struct rgba {
     uint8_t r, g, b, a = 255;
 };
 
-// Asura's Wrath / Vajra Mantra palette: volcanic obsidian, burnished gold, molten crimson
-constexpr rgba c_bg_top{ 11, 8, 9 }, c_bg_bot{ 24, 11, 10 };
-constexpr rgba c_card_top{ 30, 22, 21 }, c_card_bot{ 21, 16, 16 };
-constexpr rgba c_card_border{ 64, 46, 38 }, c_card_border_ok{ 70, 96, 68 };
-constexpr rgba c_drop_bg{ 25, 18, 17 }, c_drop_border{ 112, 82, 46 }, c_drop_hot{ 226, 174, 78 };
+// Volcanic obsidian -> molten crimson + burnished Vajra gold
+constexpr rgba c_bg_top{ 10, 7, 8 }, c_bg_bot{ 25, 10, 10 };
+constexpr rgba c_panel_top{ 20, 15, 16, 232 }, c_panel_bot{ 15, 11, 12, 242 };
+constexpr rgba c_panel_border{ 96, 68, 44, 150 };
+constexpr rgba c_row_hover{ 42, 28, 26, 130 };
+constexpr rgba c_divider{ 214, 168, 82, 32 };
 
-constexpr rgba c_text{ 244, 236, 226 }, c_muted{ 168, 152, 140 }, c_dim{ 116, 102, 94 };
-constexpr rgba c_gold{ 236, 188, 96 }, c_gold_dim{ 168, 126, 58 }, c_gold_bright{ 255, 222, 146 };
+constexpr rgba c_text{ 246, 239, 230 }, c_sub{ 176, 160, 148 }, c_dim{ 122, 108, 100 };
+constexpr rgba c_gold{ 240, 194, 102 }, c_gold_dim{ 168, 126, 58 }, c_gold_bright{ 255, 228, 158 };
 
-constexpr rgba c_crimson_top{ 204, 44, 30 }, c_crimson_bot{ 146, 22, 18 };
-constexpr rgba c_crimson_hot_top{ 232, 66, 36 }, c_crimson_hot_bot{ 176, 32, 22 };
-constexpr rgba c_crimson_down{ 126, 20, 16 };
+constexpr rgba c_crimson_top{ 208, 44, 28 }, c_crimson_bot{ 142, 20, 18 };
+constexpr rgba c_crimson_hot_top{ 236, 68, 36 }, c_crimson_hot_bot{ 172, 30, 22 };
+constexpr rgba c_crimson_down{ 120, 18, 16 };
 
-constexpr rgba c_btn_top{ 52, 39, 35 }, c_btn_bot{ 38, 29, 26 };
-constexpr rgba c_btn_hot_top{ 74, 54, 46 }, c_btn_hot_bot{ 54, 40, 34 };
-constexpr rgba c_btn_down{ 30, 23, 21 };
-constexpr rgba c_disabled{ 34, 28, 27 };
+constexpr rgba c_btn_top{ 48, 35, 32, 235 }, c_btn_bot{ 34, 25, 23, 245 };
+constexpr rgba c_btn_hot_top{ 72, 50, 42, 245 }, c_btn_hot_bot{ 52, 36, 31, 250 };
+constexpr rgba c_btn_down{ 28, 20, 19, 250 };
+constexpr rgba c_disabled{ 32, 25, 25, 220 };
 
-constexpr rgba c_ok{ 98, 196, 112 }, c_warn{ 238, 178, 66 }, c_bad{ 232, 86, 72 }, c_missing{ 122, 104, 94 };
+constexpr rgba c_ok{ 96, 204, 118 }, c_warn{ 242, 182, 68 }, c_bad{ 236, 88, 74 }, c_missing{ 124, 106, 96 };
 
 enum action { a_files, a_folder, a_dlc_clear, a_download, a_play };
 
@@ -96,38 +99,55 @@ public:
         for (ember& em : embers) {
             em.x = rng() * k_w;
             em.y = rng() * k_h;
-            em.vy = 14.f + rng() * 28.f;
-            em.size = 1.6f + rng() * 2.8f;
+            em.vy = 14.f + rng() * 26.f;
+            em.size = 1.5f + rng() * 2.5f;
             em.phase = rng() * k_pi * 2.f;
-            em.speed = 0.8f + rng() * 1.4f;
-            em.alpha = 0.25f + rng() * 0.55f;
+            em.speed = 0.7f + rng() * 1.3f;
+            em.alpha = 0.22f + rng() * 0.52f;
         }
     }
 
     bool open(const std::filesystem::path& icon)
     {
         if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) return false;
-        if (!load_font(regular, font_weight::regular) || !load_font(bold, font_weight::bold)) return false;
+        if (!load_font(regular, font_weight::regular) || !load_font(semibold, font_weight::semibold) || !load_font(black, font_weight::black))
+            return false;
         const float ds = std::max(1.f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
         window = SDL_CreateWindow("Vajra \xE2\x80\x93 Asura's Wrath", (int)(k_w * ds), (int)(k_h * ds), SDL_WINDOW_HIGH_PIXEL_DENSITY);
         renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
         if (!renderer) return false;
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+        // Window icon
         if (SDL_Surface* image = icon.empty() ? nullptr : SDL_LoadPNG(icon.string().c_str())) {
             SDL_SetWindowIcon(window, image);
-            icon_tex = SDL_CreateTextureFromSurface(renderer, image);
-            if (icon_tex) SDL_SetTextureScaleMode(icon_tex, SDL_SCALEMODE_LINEAR);
             SDL_DestroySurface(image);
         }
+
+        // Decode embedded Vajra Asura key art
+        int aw = 0, ah = 0, comp = 0;
+        if (uint8_t* px = stbi_load_from_memory(k_launcher_art, (int)sizeof(k_launcher_art), &aw, &ah, &comp, 4)) {
+            art_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, aw, ah);
+            if (art_tex) {
+                SDL_UpdateTexture(art_tex, nullptr, px, aw * 4);
+                SDL_SetTextureBlendMode(art_tex, SDL_BLENDMODE_BLEND);
+                SDL_SetTextureScaleMode(art_tex, SDL_SCALEMODE_LINEAR);
+                art_w = aw;
+                art_h = ah;
+            }
+            stbi_image_free(px);
+        }
+
         SDL_SetRenderVSync(renderer, 1);
         int pw = 0, ph = 0;
         SDL_GetCurrentRenderOutputSize(renderer, &pw, &ph);
         s = (float)pw / k_w;
-        bake(title, bold, 32);
-        bake(play_font, bold, 20);
-        bake(heading, bold, 15.5f);
-        bake(body, regular, 14.5f);
-        bake(small, regular, 12.5f);
+        bake(hero_title, black, 40);
+        bake(play_font, black, 18);
+        bake(heading, semibold, 15.5f);
+        bake(body, regular, 14.f);
+        bake(small, semibold, 12.f);
+        bake(micro, regular, 12.f);
         t0 = std::chrono::steady_clock::now();
         last_t = t0;
         return true;
@@ -136,8 +156,8 @@ public:
     ~setup_ui()
     {
         if (job.worker.joinable()) job.worker.join();
-        if (icon_tex) SDL_DestroyTexture(icon_tex);
-        for (face* f : { &title, &play_font, &heading, &body, &small })
+        if (art_tex) SDL_DestroyTexture(art_tex);
+        for (face* f : { &hero_title, &play_font, &heading, &body, &small, &micro })
             if (f->tex) SDL_DestroyTexture(f->tex);
         if (renderer) SDL_DestroyRenderer(renderer);
         if (window) SDL_DestroyWindow(window);
@@ -168,15 +188,38 @@ private:
         const float t = std::chrono::duration<float>(now - t0).count();
         last_t = now;
 
-        // 1. Atmospheric volcanic background + bottom Mantra furnace glow
+        // 1. Volcanic obsidian -> crimson base canvas
         grad_rect({ 0, 0, k_w, k_h }, c_bg_top, c_bg_bot);
-        radial_glow(k_w * 0.5f, k_h * 1.08f, k_w * 0.72f, k_h * 0.55f, { 168, 42, 18, 62 });
-        radial_glow(k_w * 0.14f, 54.f, 260.f, 160.f, { 214, 152, 54, 28 });
 
-        // 2. Slowly rotating sacred Mantra mandala halo behind header
-        draw_mandala(k_w - 110.f, 54.f, 118.f, t * 0.08f);
+        // 2. Full-bleed Vajra Asura artwork in upper half, smoothly fading into obsidian-crimson
+        if (art_tex && art_w > 0 && art_h > 0) {
+            const float target_h = 330.f;
+            const float src_aspect = (float)art_w / (float)art_h;
+            const float dst_aspect = k_w / target_h;
+            SDL_FRect src{ 0, 0, (float)art_w, (float)art_h };
+            if (src_aspect < dst_aspect) {
+                src.h = (float)art_w / dst_aspect;
+                src.y = ((float)art_h - src.h) * 0.22f; // frame Asura's six arms & fiery sky
+            } else {
+                src.w = (float)art_h * dst_aspect;
+                src.x = ((float)art_w - src.w) * 0.5f;
+            }
+            const SDL_FRect dst{ 0, 0, k_w * s, target_h * s };
+            SDL_SetTextureAlphaMod(art_tex, 205);
+            SDL_RenderTexture(renderer, art_tex, &src, &dst);
 
-        // 3. Drifting golden-crimson Mantra embers
+            // Cinematic dark vignette + smooth vertical melt into obsidian-crimson
+            grad_rect({ 0, 0, k_w, 95 }, { 10, 7, 8, 155 }, { 10, 7, 8, 15 });
+            grad_rect({ 0, 120, k_w, 212 }, { 13, 8, 9, 20 }, { 16, 8, 9, 255 });
+            // Left readability scrim behind VAJRA title
+            horiz_grad({ 0, 0, 440, k_hero_h + 40 }, { 10, 7, 8, 185 }, { 10, 7, 8, 0 });
+        }
+
+        // 3. Bottom molten Mantra furnace glow & subtle rotating mandala accent
+        radial_glow(k_w * 0.5f, k_h * 1.06f, k_w * 0.70f, k_h * 0.50f, { 172, 42, 18, 68 });
+        draw_mandala(k_w - 86.f, 76.f, 72.f, t * 0.09f);
+
+        // 4. Drifting golden-crimson Mantra embers
         for (ember& em : embers) {
             em.y -= em.vy * dt;
             if (em.y < -10.f) {
@@ -184,69 +227,61 @@ private:
                 em.x = std::fmod(em.x + 173.f, k_w);
             }
             const float ex = em.x + std::sin(t * em.speed + em.phase) * 14.f;
-            const float fade = std::clamp(std::min(em.y / 140.f, (k_h - em.y) / 90.f), 0.f, 1.f);
+            const float fade = std::clamp(std::min(em.y / 130.f, (k_h - em.y) / 80.f), 0.f, 1.f);
             const uint8_t a = (uint8_t)(em.alpha * fade * 255.f);
             if (a > 3) {
-                round_rect({ ex - em.size * 1.6f, em.y - em.size * 1.6f, em.size * 3.2f, em.size * 3.2f }, em.size * 1.6f, { 235, 110, 32, (uint8_t)(a / 3) });
-                round_rect({ ex - em.size * 0.5f, em.y - em.size * 0.5f, em.size, em.size }, em.size * 0.5f, { 255, 206, 110, a });
+                round_rect({ ex - em.size * 1.6f, em.y - em.size * 1.6f, em.size * 3.2f, em.size * 3.2f }, em.size * 1.6f,
+                           { 235, 110, 32, (uint8_t)(a / 3) });
+                round_rect({ ex - em.size * 0.5f, em.y - em.size * 0.5f, em.size, em.size }, em.size * 0.5f, { 255, 212, 122, a });
             }
         }
 
         layout();
 
-        // 4. Header: Icon + VAJRA + Subtitle + Readiness Badge + Ornate Gold Divider
-        float hx = k_pad;
-        if (icon_tex) {
-            const SDL_FRect ir{ hx, 24, 58, 58 };
-            round_rect({ ir.x - 2, ir.y - 2, ir.w + 4, ir.h + 4 }, 12, { 214, 168, 82, 160 });
-            round_rect(ir, 10, c_bg_top);
-            const SDL_FRect dst{ ir.x * s, ir.y * s, ir.w * s, ir.h * s };
-            SDL_RenderTexture(renderer, icon_tex, nullptr, &dst);
-            hx += 74.f;
-        }
-        text(title, "VAJRA", hx, 23, c_gold);
-        text(small, "ASURA'S WRATH  \xC2\xB7  PC RECOMPILATION", hx + 1.f, 61, c_muted);
+        // 5. Clean Hero Title & Status Pill
+        text_shadow(hero_title, "VAJRA", k_pad, 44.f, c_gold_bright);
+        text_shadow(small, "ASURA'S WRATH  \xC2\xB7  PC PORT", k_pad + 2.f, 92.f, c_text);
 
-        // Readiness pill badge on top-right
         int done_n = 0;
         for (const item_status* st : { &check.game, &check.update, &check.dlc, &check.firmware })
             if (st->state == item_state::ok) done_n++;
         const bool all_ok = check.ready();
-        const std::string badge_txt = all_ok ? "READY TO LAUNCH" : (std::to_string(done_n) + " / 4 READY");
+        const std::string badge_txt = all_ok ? "READY" : (std::to_string(done_n) + " / 4 READY");
         const float bw = measure(small, badge_txt) + 28.f;
-        const SDL_FRect br{ k_w - k_pad - bw, 39, bw, 28 };
-        round_rect(br, 14, all_ok ? rgba{ 42, 84, 48, 220 } : rgba{ 68, 44, 24, 210 });
-        round_rect({ br.x + 1, br.y + 1, br.w - 2, br.h - 2 }, 13, all_ok ? rgba{ 22, 46, 26, 230 } : rgba{ 36, 24, 18, 230 });
+        const SDL_FRect br{ k_w - k_pad - bw, 52.f, bw, 28.f };
+        round_rect(br, 14, all_ok ? rgba{ 56, 120, 68, 220 } : rgba{ 112, 78, 38, 210 });
+        round_rect({ br.x + 1, br.y + 1, br.w - 2, br.h - 2 }, 13, all_ok ? rgba{ 18, 40, 22, 230 } : rgba{ 28, 18, 14, 230 });
         text(small, badge_txt, br.x + 14.f, br.y + 7.f, all_ok ? c_ok : c_gold);
 
-        // Ornate engraved gold divider
-        draw_gold_divider(k_pad, 96.f, k_w - 2 * k_pad);
+        // Quick-add row cleanly anchored at bottom of hero band
+        text_shadow(body, "Drop your ISO, game folder, update .pkg, or DLC files anywhere", k_pad, k_hero_h - 32.f, c_sub);
 
-        // 5. Drag-and-drop quick-add bar
-        const SDL_FRect dr{ k_pad, k_drop_y, k_w - 2 * k_pad, k_drop_h };
-        const bool drop_hot = hit(dr, mouse_x, mouse_y);
-        round_rect(dr, 10, drop_hot ? c_drop_hot : c_drop_border);
-        round_rect({ dr.x + 1, dr.y + 1, dr.w - 2, dr.h - 2 }, 9, c_drop_bg);
-        text(body, "Drop ISO, game folder, 1.02 .pkg, or DLC .pkg / .rap anywhere", dr.x + 18.f, dr.y + 17.f, c_muted);
+        // Engraved gold accent line separating hero art from setup panel
+        draw_gold_divider(k_pad, k_hero_h + 2.f, k_w - 2 * k_pad);
 
-        // 6. Status cards
-        const char* names[] = { "Game (BLES01227)", "Update 1.02", "DLC Packages", "DLC Licences", "PS3 Firmware" };
+        // 6. Unified frosted volcanic-obsidian checklist panel
+        const float panel_h = 5.f * k_row_h + 12.f;
+        const SDL_FRect pr{ k_pad, k_panel_y, k_w - 2 * k_pad, panel_h };
+        round_rect(pr, 12, c_panel_border);
+        round_rect_grad({ pr.x + 1, pr.y + 1, pr.w - 2, pr.h - 2 }, 11, c_panel_top, c_panel_bot);
+
+        const char* names[] = { "Game", "Update 1.02", "DLC", "Licences", "Firmware" };
         const char* hints[] = {
-            "Drop your PS3_GAME folder or decrypted ISO",
-            "Drop the official 1.02 update .pkg",
-            "Optional \xE2\x80\x93 drop DLC .pkg files",
+            "Drop BLES01227 disc folder or decrypted ISO",
+            "Drop official 1.02 update .pkg",
+            "Optional \xE2\x80\x93 drop DLC .pkg packages",
             "Optional \xE2\x80\x93 drop matching .rap files for DLC",
-            "Click Download to install audio codecs from Sony",
+            "Click Download to install Sony audio codecs automatically",
         };
         const item_status* items[] = { &check.game, &check.update, &check.dlc, &check.licences, &check.firmware };
-        for (int i = 0; i < 5; i++) card(i, names[i], hints[i], *items[i], t);
+        for (int i = 0; i < 5; i++) draw_row(i, names[i], hints[i], *items[i]);
 
-        // 7. Buttons (including pulsing Play button)
+        // 7. Action buttons + Hero PLAY bar
         for (size_t i = 0; i < buttons.size(); i++) draw_button(buttons[i], (int)i == focus, t);
 
-        // 8. Subtle footer controls hint
-        const std::string foot = "Drag & drop files  \xC2\xB7  Arrow keys / Gamepad to navigate  \xC2\xB7  Enter / A to select  \xC2\xB7  Esc to quit";
-        text(small, foot, (k_w - measure(small, foot)) * 0.5f, k_h - 22.f, c_dim);
+        // 8. Minimal footer
+        const std::string foot = "Drag & drop files  \xC2\xB7  Keyboard / Gamepad supported  \xC2\xB7  Esc to quit";
+        text(micro, foot, (k_w - measure(micro, foot)) * 0.5f, k_h - 21.f, c_dim);
 
         SDL_RenderPresent(renderer);
     }
@@ -259,7 +294,7 @@ private:
         std::vector<uint8_t> alpha((size_t)f.aw * f.ah);
         stbtt_pack_context pc;
         stbtt_PackBegin(&pc, alpha.data(), f.aw, f.ah, 0, 1, nullptr);
-        stbtt_PackSetOversampling(&pc, 2, 1);
+        stbtt_PackSetOversampling(&pc, 2, 2);
         stbtt_pack_range ranges[3] = {};
         ranges[0] = { f.size, 32, nullptr, 96, f.chars.data(), 0, 0 };
         ranges[1] = { f.size, 160, nullptr, 96, f.chars.data() + 96, 0, 0 };
@@ -312,6 +347,12 @@ private:
         }
     }
 
+    void text_shadow(const face& f, const std::string& str, float x, float y, rgba c)
+    {
+        text(f, str, x + 1.f, y + 1.5f, { 0, 0, 0, (uint8_t)(c.a * 0.75f) });
+        text(f, str, x, y, c);
+    }
+
     static SDL_FColor fcol(rgba c) { return { c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f }; }
 
     void grad_rect(SDL_FRect r, rgba top, rgba bot)
@@ -323,6 +364,20 @@ private:
             { { r.x + r.w, r.y }, ct, {} },
             { { r.x + r.w, r.y + r.h }, cb, {} },
             { { r.x, r.y + r.h }, cb, {} },
+        };
+        const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+        SDL_RenderGeometry(renderer, nullptr, v, 4, idx, 6);
+    }
+
+    void horiz_grad(SDL_FRect r, rgba left, rgba right)
+    {
+        r = { r.x * s, r.y * s, r.w * s, r.h * s };
+        const SDL_FColor cl = fcol(left), cr = fcol(right);
+        const SDL_Vertex v[4] = {
+            { { r.x, r.y }, cl, {} },
+            { { r.x + r.w, r.y }, cr, {} },
+            { { r.x + r.w, r.y + r.h }, cr, {} },
+            { { r.x, r.y + r.h }, cl, {} },
         };
         const int idx[6] = { 0, 1, 2, 0, 2, 3 };
         SDL_RenderGeometry(renderer, nullptr, v, 4, idx, 6);
@@ -350,21 +405,21 @@ private:
     void draw_mandala(float cx, float cy, float radius, float angle)
     {
         constexpr int spokes = 12;
-        const rgba ring_col{ 226, 174, 78, 18 };
-        const rgba spoke_col{ 226, 174, 78, 14 };
+        const rgba ring_col{ 240, 194, 102, 26 };
+        const rgba spoke_col{ 240, 194, 102, 18 };
         for (int r_idx = 0; r_idx < 2; r_idx++) {
             const float rad = r_idx == 0 ? radius : radius * 0.62f;
             constexpr int n = 36;
             for (int i = 0; i < n; i++) {
                 const float a0 = angle + (float)i / n * 2.f * k_pi;
                 const float a1 = angle + (float)(i + 1) / n * 2.f * k_pi;
-                line(cx + std::cos(a0) * rad, cy + std::sin(a0) * rad, cx + std::cos(a1) * rad, cy + std::sin(a1) * rad, 1.3f, ring_col);
+                line(cx + std::cos(a0) * rad, cy + std::sin(a0) * rad, cx + std::cos(a1) * rad, cy + std::sin(a1) * rad, 1.2f, ring_col);
             }
         }
         for (int i = 0; i < spokes; i++) {
             const float a = angle + (float)i / spokes * 2.f * k_pi;
             line(cx + std::cos(a) * (radius * 0.24f), cy + std::sin(a) * (radius * 0.24f),
-                 cx + std::cos(a) * radius, cy + std::sin(a) * radius, 1.1f, spoke_col);
+                 cx + std::cos(a) * radius, cy + std::sin(a) * radius, 1.0f, spoke_col);
         }
     }
 
@@ -372,7 +427,7 @@ private:
     {
         const float mid = x + w * 0.5f;
         const SDL_FColor dim{ 214 / 255.f, 168 / 255.f, 82 / 255.f, 0.f };
-        const SDL_FColor hi{ 236 / 255.f, 188 / 255.f, 96 / 255.f, 0.65f };
+        const SDL_FColor hi{ 240 / 255.f, 194 / 255.f, 102 / 255.f, 0.75f };
         const float y0 = y * s, y1 = (y + 1.5f) * s;
         const SDL_Vertex vl[4] = { { { x * s, y0 }, dim, {} }, { { mid * s, y0 }, hi, {} },
                                    { { mid * s, y1 }, hi, {} }, { { x * s, y1 }, dim, {} } };
@@ -381,8 +436,7 @@ private:
         const int idx[6] = { 0, 1, 2, 0, 2, 3 };
         SDL_RenderGeometry(renderer, nullptr, vl, 4, idx, 6);
         SDL_RenderGeometry(renderer, nullptr, vr, 4, idx, 6);
-        // Central Mantra diamond accent
-        const float d = 4.5f * s, ym = (y + 0.75f) * s;
+        const float d = 4.2f * s, ym = (y + 0.75f) * s;
         const SDL_FColor jewel = fcol(c_gold_bright);
         const SDL_Vertex dm[4] = { { { mid * s, ym - d }, jewel, {} }, { { mid * s + d, ym }, jewel, {} },
                                    { { mid * s, ym + d }, jewel, {} }, { { mid * s - d, ym }, jewel, {} } };
@@ -440,85 +494,84 @@ private:
     void status_icon(float cx, float cy, item_state st)
     {
         const rgba c = st == item_state::ok ? c_ok : st == item_state::warn ? c_warn : st == item_state::bad ? c_bad : c_missing;
-        round_rect({ cx - 15, cy - 15, 30, 30 }, 15, { c.r, c.g, c.b, 38 });
-        round_rect({ cx - 11, cy - 11, 22, 22 }, 11, c);
+        round_rect({ cx - 14, cy - 14, 28, 28 }, 14, { c.r, c.g, c.b, 34 });
+        round_rect({ cx - 10, cy - 10, 20, 20 }, 10, c);
         if (st == item_state::ok) {
-            line(cx - 5.f, cy + 0.5f, cx - 1.2f, cy + 4.2f, 2.4f, c_bg_top);
-            line(cx - 1.2f, cy + 4.2f, cx + 5.6f, cy - 3.6f, 2.4f, c_bg_top);
+            line(cx - 4.6f, cy + 0.4f, cx - 1.0f, cy + 3.8f, 2.3f, c_bg_top);
+            line(cx - 1.0f, cy + 3.8f, cx + 5.0f, cy - 3.2f, 2.3f, c_bg_top);
         } else if (st == item_state::bad) {
-            line(cx - 4.2f, cy - 4.2f, cx + 4.2f, cy + 4.2f, 2.4f, c_bg_top);
-            line(cx + 4.2f, cy - 4.2f, cx - 4.2f, cy + 4.2f, 2.4f, c_bg_top);
+            line(cx - 3.8f, cy - 3.8f, cx + 3.8f, cy + 3.8f, 2.3f, c_bg_top);
+            line(cx + 3.8f, cy - 3.8f, cx - 3.8f, cy + 3.8f, 2.3f, c_bg_top);
         } else if (st == item_state::warn) {
-            line(cx, cy - 5.2f, cx, cy + 1.2f, 2.4f, c_bg_top);
-            round_rect({ cx - 1.5f, cy + 3.4f, 3.f, 3.f }, 1.5f, c_bg_top);
+            line(cx, cy - 4.8f, cx, cy + 1.0f, 2.3f, c_bg_top);
+            round_rect({ cx - 1.4f, cy + 3.0f, 2.8f, 2.8f }, 1.4f, c_bg_top);
         } else {
-            line(cx - 4.5f, cy, cx + 4.5f, cy, 2.4f, c_bg_top);
+            line(cx - 4.0f, cy, cx + 4.0f, cy, 2.3f, c_bg_top);
         }
     }
 
-    SDL_FRect card_rect(int i) const { return { k_pad, k_cards_y + i * (k_card_h + k_card_gap), k_w - 2 * k_pad, k_card_h }; }
+    SDL_FRect row_rect(int i) const { return { k_pad + 6.f, k_panel_y + 6.f + i * k_row_h, k_w - 2 * k_pad - 12.f, k_row_h }; }
 
     void layout()
     {
         buttons.clear();
         const bool busy = job.phase == 1 || job.phase == 2;
-        // Direct Add Files / Add Folder buttons inside drop bar
-        const float bw_folder = 116.f, bw_files = 108.f;
-        const float by = k_drop_y + (k_drop_h - 34.f) * 0.5f;
-        buttons.push_back({ { k_w - k_pad - 10.f - bw_folder - 8.f - bw_files, by, bw_files, 34.f }, "+ Add Files", a_files, !busy, false, true });
-        buttons.push_back({ { k_w - k_pad - 10.f - bw_folder, by, bw_folder, 34.f }, "+ Add Folder", a_folder, !busy, false, true });
 
-        auto add_card_btn = [&](int row, const char* label, action act, bool gold) {
-            const SDL_FRect r = card_rect(row);
-            const float w = std::max(96.f, measure(body, label) + 28.f);
-            buttons.push_back({ { r.x + r.w - 16.f - w, r.y + (r.h - 34.f) * 0.5f, w, 34.f }, label, act, !busy, false, gold });
+        // Clean Add Files / Add Folder buttons right-aligned on the hero bottom bar
+        const float bw_folder = 112.f, bw_files = 104.f;
+        const float by = k_hero_h - 42.f;
+        buttons.push_back({ { k_w - k_pad - bw_folder - 8.f - bw_files, by, bw_files, 32.f }, "Add Files", a_files, !busy, false, true });
+        buttons.push_back({ { k_w - k_pad - bw_folder, by, bw_folder, 32.f }, "Add Folder", a_folder, !busy, false, true });
+
+        auto add_row_btn = [&](int row, const char* label, action act, bool gold) {
+            const SDL_FRect r = row_rect(row);
+            const float w = std::max(90.f, measure(small, label) + 28.f);
+            buttons.push_back({ { r.x + r.w - 14.f - w, r.y + (r.h - 30.f) * 0.5f, w, 30.f }, label, act, !busy, false, gold });
         };
 
-        if (check.game.state != item_state::ok) add_card_btn(0, "Browse", a_folder, false);
-        if (check.update.state != item_state::ok) add_card_btn(1, "Browse", a_files, false);
-        if (!paths.dlcs.empty()) add_card_btn(2, "Clear", a_dlc_clear, false);
-        add_card_btn(4, check.firmware.state == item_state::ok ? "Reinstall" : "Download", a_download, check.firmware.state != item_state::ok);
+        if (check.game.state != item_state::ok) add_row_btn(0, "Browse", a_folder, false);
+        if (check.update.state != item_state::ok) add_row_btn(1, "Browse", a_files, false);
+        if (!paths.dlcs.empty()) add_row_btn(2, "Clear", a_dlc_clear, false);
+        add_row_btn(4, check.firmware.state == item_state::ok ? "Reinstall" : "Download", a_download, check.firmware.state != item_state::ok);
 
         const bool ready = check.ready() && !busy;
-        buttons.push_back({ { k_pad, k_h - 88.f, k_w - 2 * k_pad, 52.f },
-                            ready ? "PLAY  ASURA'S WRATH" : "COMPLETE SETUP ABOVE TO PLAY",
+        buttons.push_back({ { k_pad, k_h - 86.f, k_w - 2 * k_pad, 50.f },
+                            ready ? "PLAY" : "COMPLETE SETUP TO PLAY",
                             a_play, ready, true, false });
         focus = std::clamp(focus, 0, (int)buttons.size() - 1);
     }
 
-    void card(int i, const char* name, const char* hint, const item_status& st, float t)
+    void draw_row(int i, const char* name, const char* hint, const item_status& st)
     {
-        const SDL_FRect r = card_rect(i);
-        const rgba accent = st.state == item_state::ok ? c_ok : st.state == item_state::warn ? c_warn : st.state == item_state::bad ? c_bad : c_missing;
-        round_rect(r, 10, st.state == item_state::ok ? c_card_border_ok : c_card_border);
-        round_rect_grad({ r.x + 1, r.y + 1, r.w - 2, r.h - 2 }, 9, c_card_top, c_card_bot);
-        // Left vertical Mantra status bar
-        round_rect({ r.x + 1, r.y + 10, 3.5f, r.h - 20 }, 2, { accent.r, accent.g, accent.b, 210 });
+        const SDL_FRect r = row_rect(i);
+        if (hit(r, mouse_x, mouse_y))
+            round_rect({ r.x + 2, r.y + 3, r.w - 4, r.h - 6 }, 8, c_row_hover);
 
-        status_icon(r.x + 32, r.y + r.h * 0.5f, st.state);
-        text(heading, name, r.x + 60, r.y + 13, c_text);
+        // Hairline gold divider between rows
+        if (i > 0)
+            round_rect({ r.x + 14.f, r.y, r.w - 28.f, 1.f }, 0, c_divider);
 
-        float right = r.x + r.w - 18.f;
+        status_icon(r.x + 28.f, r.y + r.h * 0.5f, st.state);
+        text(heading, name, r.x + 56.f, r.y + 12.f, c_text);
+
+        float right = r.x + r.w - 16.f;
         for (const button& b : buttons)
             if (b.r.y >= r.y && b.r.y + b.r.h <= r.y + r.h) right = std::min(right, b.r.x - 16.f);
-        const float width = std::max(80.f, right - (r.x + 60.f));
+        const float width = std::max(80.f, right - (r.x + 56.f));
 
         if (i == 4 && (job.phase == 1 || job.phase == 2)) {
             const float p = std::clamp(job.progress.load(), 0.f, 1.f);
-            round_rect({ r.x + 60, r.y + 44, width, 9 }, 4.5f, { 44, 32, 28, 255 });
-            if (p > 0.f) {
-                const float fw = std::max(10.f, width * p);
-                round_rect_grad({ r.x + 60, r.y + 44, fw, 9 }, 4.5f, c_gold, c_crimson_hot_top);
-            }
-            const std::string label = std::string(job.phase == 1 ? "Downloading PS3 Firmware " : "Extracting Codecs ") + std::to_string((int)(p * 100)) + "%";
-            text(small, label, r.x + 60 + width - measure(small, label), r.y + 15, c_gold);
-            (void)t;
+            round_rect({ r.x + 56.f, r.y + 40.f, width, 7.f }, 3.5f, { 42, 30, 28, 255 });
+            if (p > 0.f)
+                round_rect_grad({ r.x + 56.f, r.y + 40.f, std::max(8.f, width * p), 7.f }, 3.5f, c_gold, c_crimson_hot_top);
+            const std::string label = std::string(job.phase == 1 ? "Downloading " : "Installing ") + std::to_string((int)(p * 100)) + "%";
+            text(small, label, r.x + 56.f + width - measure(small, label), r.y + 14.f, c_gold);
             return;
         }
         const bool failed = i == 4 && job.phase == 3;
         const std::string detail = failed ? job_error : (st.state == item_state::missing ? std::string(hint) : st.text);
-        const rgba c = failed || st.state == item_state::bad ? c_bad : st.state == item_state::warn ? c_warn : st.state == item_state::ok ? c_text : c_muted;
-        text(body, fit(body, detail, width), r.x + 60, r.y + 39, c);
+        const rgba c = failed || st.state == item_state::bad ? c_bad : st.state == item_state::warn ? c_warn : st.state == item_state::ok ? c_sub : c_dim;
+        text(body, fit(body, detail, width), r.x + 56.f, r.y + 35.f, c);
     }
 
     void draw_button(const button& b, bool focused, float t)
@@ -527,15 +580,15 @@ private:
         const bool down = hot && pressed;
 
         if (b.accent && b.enabled) {
-            const float pulse = 0.5f + 0.5f * std::sin(t * 2.8f);
-            round_rect({ b.r.x - 4, b.r.y - 4, b.r.w + 8, b.r.h + 8 }, 13, { 226, 72, 28, (uint8_t)(42 + pulse * 48) });
+            const float pulse = 0.5f + 0.5f * std::sin(t * 2.6f);
+            round_rect({ b.r.x - 4, b.r.y - 4, b.r.w + 8, b.r.h + 8 }, 13, { 226, 68, 28, (uint8_t)(38 + pulse * 46) });
         }
         if (focused && b.enabled) {
             round_rect({ b.r.x - 2.5f, b.r.y - 2.5f, b.r.w + 5, b.r.h + 5 }, 11, c_gold);
         } else if (b.gold_outline && b.enabled) {
             round_rect({ b.r.x - 1, b.r.y - 1, b.r.w + 2, b.r.h + 2 }, 9, hot ? c_gold : c_gold_dim);
         } else if (b.accent && b.enabled) {
-            round_rect({ b.r.x - 1, b.r.y - 1, b.r.w + 2, b.r.h + 2 }, 10, { 246, 178, 86, 190 });
+            round_rect({ b.r.x - 1, b.r.y - 1, b.r.w + 2, b.r.h + 2 }, 10, { 246, 184, 92, 190 });
         }
 
         if (!b.enabled) {
@@ -548,10 +601,13 @@ private:
             else round_rect_grad(b.r, 8, hot ? c_btn_hot_top : c_btn_top, hot ? c_btn_hot_bot : c_btn_bot);
         }
 
-        const face& f = b.accent ? (b.enabled ? play_font : body) : body;
+        const face& f = b.accent ? (b.enabled ? play_font : small) : small;
         const float tw = measure(f, b.label);
         const rgba tc = b.enabled ? (b.accent ? c_gold_bright : c_text) : c_dim;
-        text(f, b.label, b.r.x + (b.r.w - tw) * 0.5f, b.r.y + (b.r.h - f.size / s) * 0.5f - 1.f, tc);
+        const float tx = b.r.x + (b.r.w - tw) * 0.5f;
+        const float ty = b.r.y + (b.r.h - f.size / s) * 0.5f - 1.f;
+        if (b.accent && b.enabled) text_shadow(f, b.label, tx, ty, tc);
+        else text(f, b.label, tx, ty, tc);
     }
 
     static bool hit(const SDL_FRect& r, float x, float y) { return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h; }
@@ -708,10 +764,11 @@ private:
     game_check check;
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
-    SDL_Texture* icon_tex = nullptr;
+    SDL_Texture* art_tex = nullptr;
+    int art_w = 0, art_h = 0;
     firmware_job job;
-    font regular, bold;
-    face title, play_font, heading, body, small;
+    font regular, semibold, black;
+    face hero_title, play_font, heading, body, small, micro;
     float s = 1, mouse_x = -1, mouse_y = -1;
     bool pressed = false, play = false;
     int focus = 0;

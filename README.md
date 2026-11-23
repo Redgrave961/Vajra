@@ -2,11 +2,6 @@
   <img src="assets/banner.jpg" alt="Vajra — Asura's Wrath PC Recompilation" width="100%" />
 </p>
 
-<h1 align="center">
-  <img src="assets/vajra.png" alt="Vajra Icon" width="44" align="absmiddle" />
-  &nbsp;Vajra
-</h1>
-
 <p align="center">
   <strong>An unofficial native PC port of <em>Asura's Wrath</em> (PS3)</strong><br/>
   Windows &amp; Linux · Vulkan
