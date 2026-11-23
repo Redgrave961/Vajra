@@ -55,7 +55,7 @@ constexpr rgba c_disabled{ 24, 18, 19, 215 };
 
 constexpr rgba c_ok{ 98, 214, 122 }, c_warn{ 246, 188, 76 }, c_bad{ 242, 96, 82 }, c_missing{ 138, 122, 114 };
 
-enum action { a_game_folder, a_game_iso, a_update_pkg, a_dlc_add, a_dlc_clear, a_rap_add, a_download, a_play };
+enum action { a_game_folder, a_game_iso, a_update_download, a_dlc_add, a_dlc_clear, a_rap_add, a_download, a_play };
 
 struct face {
     SDL_Texture* tex = nullptr;
@@ -94,12 +94,14 @@ struct ember {
     float x, y, vy, size, phase, speed, alpha;
 };
 
-struct firmware_job {
+struct bg_job {
     std::thread worker;
+    std::atomic<int> row{ -1 };
     std::atomic<int> phase{ 0 };
     std::atomic<float> progress{ 0 };
     std::mutex lock;
     std::string error;
+    std::filesystem::path result;
 };
 
 // Distance to line segment (for 4x4 supersampled SDF icons)
@@ -468,7 +470,7 @@ private:
         const char* names[] = { "Game", "Update 1.02", "DLC", "Licenses", "Firmware" };
         const char* hints[] = {
             "BLES01227 disc folder or decrypted ISO",
-            "Official 1.02 update .pkg",
+            "Official 1.02 patch (automatic Sony download)",
             "Optional DLC .pkg packages",
             "Optional .rap keys for DLC",
             "PS3 audio codecs (automatic Sony download)",
@@ -638,7 +640,8 @@ private:
         };
 
         add_row_btns(0, { { "Select Folder", a_game_folder, btn_style::secondary }, { "Select ISO", a_game_iso, btn_style::secondary } });
-        add_row_btns(1, { { "Select .pkg", a_update_pkg, btn_style::secondary } });
+        add_row_btns(1, { { check.update.state == item_state::ok ? "Redownload" : "Download", a_update_download,
+                            check.update.state == item_state::ok ? btn_style::secondary : btn_style::gold } });
         if (paths.dlcs.empty()) add_row_btns(2, { { "Add DLC", a_dlc_add, btn_style::secondary } });
         else add_row_btns(2, { { "Add DLC", a_dlc_add, btn_style::secondary }, { "Clear", a_dlc_clear, btn_style::secondary } });
         if (check.licences.state == item_state::warn) add_row_btns(3, { { "Add .rap", a_rap_add, btn_style::gold } });
@@ -678,7 +681,7 @@ private:
             if (b.r.y >= r.y && b.r.y + b.r.h <= r.y + r.h) right = std::min(right, b.r.x - 18.f);
         const float width = std::max(80.f, right - (r.x + 64.f));
 
-        if (i == 4 && (job.phase == 1 || job.phase == 2)) {
+        if (i == job.row.load() && (job.phase == 1 || job.phase == 2)) {
             const float p = std::clamp(job.progress.load(), 0.f, 1.f);
             aa_rect({ r.x + 64.f, r.y + 46.f, width, 8.f }, 4.f, { 42, 32, 30, 255 });
             if (p > 0.f) {
@@ -690,7 +693,7 @@ private:
             text(body, label, r.x + 64.f + width - measure(body, label), r.y + 15.f, c_gold);
             return;
         }
-        const bool failed = i == 4 && job.phase == 3;
+        const bool failed = i == job.row.load() && job.phase == 3;
         const std::string detail = failed ? job_error : (st.state == item_state::missing ? std::string(hint) : st.text);
         const rgba c = failed || st.state == item_state::bad ? c_bad : st.state == item_state::warn ? c_warn : st.state == item_state::ok ? c_sub : c_dim;
         text(body, fit(body, detail, width), r.x + 64.f, r.y + 41.f, c);
@@ -879,13 +882,12 @@ private:
     void activate(action id)
     {
         static const SDL_DialogFileFilter f_iso{ "PS3 ISO Image", "iso" };
-        static const SDL_DialogFileFilter f_pkg{ "PS3 Update Package", "pkg" };
         static const SDL_DialogFileFilter f_dlc{ "PS3 DLC / License", "pkg;rap" };
         static const SDL_DialogFileFilter f_rap{ "PS3 License (.rap)", "rap" };
         switch (id) {
         case a_game_folder: SDL_ShowOpenFolderDialog(on_pick, this, window, nullptr, false); break;
         case a_game_iso: SDL_ShowOpenFileDialog(on_pick, this, window, &f_iso, 1, nullptr, false); break;
-        case a_update_pkg: SDL_ShowOpenFileDialog(on_pick, this, window, &f_pkg, 1, nullptr, false); break;
+        case a_update_download: start_update_job(); break;
         case a_dlc_add: SDL_ShowOpenFileDialog(on_pick, this, window, &f_dlc, 1, nullptr, true); break;
         case a_dlc_clear:
             paths.dlcs.clear();
@@ -917,6 +919,23 @@ private:
         check = check_game_paths(exe, paths);
     }
 
+    void start_update_job()
+    {
+        if (job.worker.joinable()) job.worker.join();
+        const std::filesystem::path pkg = exe / "user" / "EP0102-BLES01227_00-PATCH02000000000-A0102-V0100-PE.pkg";
+        job.row = 1;
+        job.progress = 0;
+        job.phase = 1;
+        job.worker = std::thread([this, pkg] {
+            std::string error;
+            const bool ok = update_download(pkg, job.progress, error);
+            std::lock_guard<std::mutex> hold(job.lock);
+            job.error = error;
+            job.result = ok ? pkg : std::filesystem::path{};
+            job.phase = ok ? 4 : 3;
+        });
+    }
+
     void start_job(std::filesystem::path pup)
     {
         if (job.worker.joinable()) job.worker.join();
@@ -924,6 +943,7 @@ private:
         const std::filesystem::path flash = firmware_dir(exe, paths);
         const bool download = pup.empty();
         if (download) pup = exe / "user" / "PS3UPDAT.PUP";
+        job.row = 4;
         job.progress = 0;
         job.phase = download ? 1 : 2;
         job.worker = std::thread([this, pup, flash, download] {
@@ -940,6 +960,7 @@ private:
             }
             std::lock_guard<std::mutex> hold(job.lock);
             job.error = error;
+            job.result.clear();
             job.phase = ok ? 4 : 3;
         });
     }
@@ -948,10 +969,23 @@ private:
     {
         if (job.phase < 3 || !job.worker.joinable()) return;
         job.worker.join();
-        std::lock_guard<std::mutex> hold(job.lock);
-        job_error = job.error;
-        check.firmware = firmware_installed(firmware_dir(exe, paths)) ? item_status{ item_state::ok, "Installed" } : check.firmware;
-        if (job.phase == 4) job.phase = 0;
+        const int target = job.row.load();
+        const bool ok = job.phase == 4;
+        std::filesystem::path result;
+        {
+            std::lock_guard<std::mutex> hold(job.lock);
+            job_error = job.error;
+            result = std::move(job.result);
+        }
+        if (ok) {
+            job.phase = 0;
+            if (target == 1 && !result.empty()) {
+                paths.update = result;
+                recheck();
+            } else if (target == 4) {
+                check.firmware = firmware_installed(firmware_dir(exe, paths)) ? item_status{ item_state::ok, "Installed" } : check.firmware;
+            }
+        }
     }
 
     std::filesystem::path exe;
@@ -970,7 +1004,7 @@ private:
     int pill_r_px = 10, pill_sz = 32, shadow_sz = 96;
     float pill_corner = 12.f, shadow_corner = 32.f, shadow_pad = 18.f;
     int art_w = 0, art_h = 0;
-    firmware_job job;
+    bg_job job;
     font regular, semibold, black;
     face hero_title, hero_sub, play_font, heading, body, btn_font;
     float s = 1, mouse_x = -1, mouse_y = -1;

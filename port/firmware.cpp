@@ -24,6 +24,8 @@ namespace {
 
 constexpr const char* k_url = "http://dus01.ps3.update.playstation.net/update/ps3/image/us/2026_0318_a2b60b6ac1d2e49e230144345616927c/PS3UPDAT.PUP";
 constexpr uint64_t k_size = 206197916;
+constexpr const char* k_update_url = "http://b0.ww.np.dl.playstation.net/tppkg/np/BLES01227/BLES01227_T3/0c670c22fd332f45/EP0102-BLES01227_00-PATCH02000000000-A0102-V0100-PE.pkg";
+constexpr uint64_t k_update_size = 34731232;
 constexpr const char* k_files[] = { "sys/external/flashMP3.pic", "sys/external/flashATRAC.pic" };
 
 const uint8_t k_erk[32] = { 0xA9, 0x78, 0x18, 0xBD, 0x19, 0x3A, 0x67, 0xA1, 0x6F, 0xE8, 0x3A, 0x85, 0x5E, 0x1B, 0xE9, 0xFB,
@@ -155,13 +157,15 @@ bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::p
     return true;
 }
 
-bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& progress, std::string& error)
+namespace {
+
+bool download_file(const char* url, uint64_t expected_size, const std::filesystem::path& dst, std::atomic<float>& progress, std::string& error)
 {
     std::error_code ec;
-    std::filesystem::create_directories(pup.parent_path(), ec);
-    std::filesystem::remove(pup, ec);
+    std::filesystem::create_directories(dst.parent_path(), ec);
+    std::filesystem::remove(dst, ec);
 #ifdef _WIN32
-    std::wstring cmd = L"curl.exe -fsSL --retry 3 -o \"" + pup.wstring() + L"\" " + std::filesystem::path(k_url).wstring();
+    std::wstring cmd = L"curl.exe -fsSL --retry 3 -o \"" + dst.wstring() + L"\" " + std::filesystem::path(url).wstring();
     STARTUPINFOW si = { sizeof si };
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
@@ -169,14 +173,14 @@ bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& pro
         return false;
     }
     while (WaitForSingleObject(pi.hProcess, 100) == WAIT_TIMEOUT)
-        progress = (float)std::filesystem::file_size(pup, ec) / (float)k_size;
+        progress = (float)std::filesystem::file_size(dst, ec) / (float)expected_size;
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 #else
-    const std::string out = pup.string();
-    const char* argv[] = { "curl", "-fsSL", "--retry", "3", "-o", out.c_str(), k_url, nullptr };
+    const std::string out = dst.string();
+    const char* argv[] = { "curl", "-fsSL", "--retry", "3", "-o", out.c_str(), url, nullptr };
     pid_t pid;
     if (posix_spawnp(&pid, "curl", nullptr, nullptr, const_cast<char* const*>(argv), environ)) {
         error = "curl not found";
@@ -184,14 +188,28 @@ bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& pro
     }
     int status = 0;
     while (!waitpid(pid, &status, WNOHANG)) {
-        progress = (float)std::filesystem::file_size(pup, ec) / (float)k_size;
+        progress = (float)std::filesystem::file_size(dst, ec) / (float)expected_size;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 #endif
     if (code) {
+        std::filesystem::remove(dst, ec);
         error = "Download failed";
         return false;
     }
+    progress = 1.f;
     return true;
+}
+
+}
+
+bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& progress, std::string& error)
+{
+    return download_file(k_url, k_size, pup, progress, error);
+}
+
+bool update_download(const std::filesystem::path& pkg, std::atomic<float>& progress, std::string& error)
+{
+    return download_file(k_update_url, k_update_size, pkg, progress, error);
 }

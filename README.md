@@ -18,14 +18,14 @@
 - **In-Game PC Options Menu:** Adjust resolution, display mode (Windowed, Borderless, Exclusive Fullscreen), frame rate cap, controller prompt style, keybindings, and mouse settings right inside the game's native menu.
 - **Full Keyboard & Mouse + Controller Support:** Seamless hot-switching between Keyboard & Mouse, PlayStation, Xbox, and Nintendo button prompts, full custom keybinds, mouse sensitivity/invert controls, and tailored KBM QTE prompts.
 - **Trophies:** Full local trophy support with in-game icons and PS3-style unlock notifications.
-- **Built-In Setup:** Reads your disc dump/ISO, update `.pkg`, and DLC `.pkg`/`.rap` files directly, decrypts `EBOOT.BIN` automatically, and installs required PS3 firmware on first launch (no RPCS3 required to play).
+- **Built-In Setup:** Reads your disc dump/ISO and optional DLC `.pkg`/`.rap` files directly, downloads the official `1.02` update and PS3 firmware automatically from Sony, and decrypts `EBOOT.BIN` on first launch (no RPCS3 required to play).
 - **Windows & Linux:** Runs natively on Windows (`AsurasWrath.exe`) and Linux (`AsurasWrath-x86_64.AppImage`, Wayland & X11, including SteamOS / Steam Deck).
 
 ## Getting Started
 
-1. Obtain your own copy of *Asura's Wrath* (`BLES01227` disc folder or decrypted ISO) and the `1.02` update `.pkg` (plus any optional DLC `.pkg` + `.rap` files).
+1. Obtain your own copy of *Asura's Wrath* (`BLES01227` disc folder or decrypted ISO), plus any optional DLC `.pkg` + `.rap` files.
 2. Launch `AsurasWrath.exe` on Windows or `AsurasWrath-x86_64.AppImage` on Linux (or launch through RecompLauncher).
-3. On first launch, drop or select your game folder/ISO and `1.02` update `.pkg`. Vajra handles firmware setup and `EBOOT.BIN` decryption automatically.
+3. On first launch, drop or select your game folder/ISO and click **Download** for the `1.02` update and PS3 firmware. Vajra handles decryption and setup automatically.
 
 ## Building from Source
 
