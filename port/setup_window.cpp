@@ -39,19 +39,19 @@ rgba lerp_c(rgba a, rgba b, float t)
     };
 }
 
-// Volcanic obsidian -> molten crimson palette
-constexpr rgba c_bg_top{ 10, 7, 8 }, c_bg_bot{ 26, 10, 10 };
-constexpr rgba c_panel{ 19, 14, 15, 236 }, c_panel_border{ 138, 102, 72, 100 };
-constexpr rgba c_row_hover{ 52, 34, 32, 115 };
-constexpr rgba c_divider{ 222, 178, 118, 28 };
+// Deep volcanic obsidian -> molten crimson palette
+constexpr rgba c_bg_top{ 8, 6, 7 }, c_bg_bot{ 28, 9, 9 };
+constexpr rgba c_panel{ 15, 11, 12, 238 }, c_panel_border{ 156, 86, 56, 95 };
+constexpr rgba c_row_hover{ 46, 22, 22, 125 };
+constexpr rgba c_divider{ 210, 120, 74, 28 };
 
-constexpr rgba c_text{ 249, 245, 239 }, c_sub{ 206, 192, 182 }, c_dim{ 140, 126, 118 };
-constexpr rgba c_gold{ 244, 200, 112 }, c_gold_bright{ 255, 234, 178 };
+constexpr rgba c_text{ 248, 243, 238 }, c_sub{ 202, 186, 178 }, c_dim{ 134, 118, 112 };
+constexpr rgba c_gold{ 244, 194, 102 }, c_gold_bright{ 255, 230, 172 };
 
-constexpr rgba c_play_base{ 188, 36, 26 }, c_play_hot{ 228, 56, 36 }, c_play_down{ 138, 22, 18 };
-constexpr rgba c_btn_base{ 40, 31, 31, 224 }, c_btn_hot{ 66, 46, 42, 245 }, c_btn_down{ 28, 21, 21, 248 };
-constexpr rgba c_gold_base{ 66, 47, 25, 232 }, c_gold_hot{ 98, 68, 34, 248 };
-constexpr rgba c_disabled{ 33, 25, 25, 215 };
+constexpr rgba c_play_base{ 182, 30, 22 }, c_play_hot{ 226, 52, 30 }, c_play_down{ 130, 18, 16 };
+constexpr rgba c_btn_base{ 28, 20, 22, 234 }, c_btn_hot{ 56, 28, 26, 248 }, c_btn_down{ 20, 14, 15, 250 };
+constexpr rgba c_gold_base{ 56, 30, 18, 238 }, c_gold_hot{ 88, 46, 24, 250 };
+constexpr rgba c_disabled{ 24, 18, 19, 215 };
 
 constexpr rgba c_ok{ 98, 214, 122 }, c_warn{ 246, 188, 76 }, c_bad{ 242, 96, 82 }, c_missing{ 138, 122, 114 };
 
@@ -412,8 +412,10 @@ private:
             horiz_grad({ 0, 0, 480, k_hero_h + 40 }, { 10, 7, 8, 188 }, { 10, 7, 8, 0 });
         }
 
-        // 3. Bottom Mantra furnace glow & smooth anti-aliased glowing embers
-        radial_glow(k_w * 0.5f, k_h * 1.06f, k_w * 0.72f, k_h * 0.48f, { 180, 46, 18, 68 });
+        // 3. Volcanic obsidian furnace underglow + side ember depth + smooth glowing embers
+        radial_glow(k_w * 0.5f, k_h * 1.05f, k_w * 0.78f, k_h * 0.52f, { 196, 42, 18, 86 });
+        radial_glow(k_w * 0.12f, k_h * 0.72f, k_w * 0.36f, k_h * 0.34f, { 132, 24, 16, 46 });
+        radial_glow(k_w * 0.88f, k_h * 0.68f, k_w * 0.36f, k_h * 0.34f, { 148, 32, 16, 48 });
         if (glow_dot) {
             for (ember& em : embers) {
                 em.y -= em.vy * dt;
@@ -455,10 +457,11 @@ private:
         text_shadow(hero_sub, "ASURA'S WRATH", k_pad + 2.f, 96.f, c_gold, 2.5f);
         text_shadow(body, "Select your game files below, or drag and drop them anywhere.", k_pad, k_hero_h - 36.f, c_sub);
 
-        // 5. Unified Frosted Volcanic-Obsidian Panel (with real soft drop shadow & AA corners!)
+        // 5. Forged Volcanic-Obsidian Panel (deep shadow + subtle molten crimson underglow + obsidian glass)
         const float panel_h = 5.f * k_row_h + 16.f;
         const SDL_FRect pr{ k_pad, k_panel_y, k_w - 2 * k_pad, panel_h };
-        aa_shadow({ pr.x, pr.y + 4.f, pr.w, pr.h }, 12.f, 14.f, { 0, 0, 0, 145 });
+        aa_shadow({ pr.x, pr.y + 4.f, pr.w, pr.h }, 14.f, 14.f, { 0, 0, 0, 170 });
+        aa_shadow(pr, 10.f, 14.f, { 176, 44, 22, 42 });
         aa_rect(pr, 14.f, c_panel);
         aa_border(pr, 14.f, c_panel_border);
 
@@ -654,10 +657,8 @@ private:
         const SDL_FRect r = row_rect(i);
         const bool over = hit(r, mouse_x, mouse_y);
         row_hover[i] += ((over ? 1.f : 0.f) - row_hover[i]) * std::min(1.f, dt * 16.f);
-        if (row_hover[i] > 0.01f) {
+        if (row_hover[i] > 0.01f)
             aa_rect({ r.x + 2, r.y + 4, r.w - 4, r.h - 8 }, 10.f, { c_row_hover.r, c_row_hover.g, c_row_hover.b, (uint8_t)(c_row_hover.a * row_hover[i]) });
-            aa_rect({ r.x + 4, r.y + 18, 3.f, r.h - 36 }, 1.5f, { c_gold.r, c_gold.g, c_gold.b, (uint8_t)(190.f * row_hover[i]) });
-        }
 
         if (i > 0)
             grad_rect({ r.x + 16.f, r.y, r.w - 32.f, 1.f }, c_divider, c_divider);
@@ -767,13 +768,13 @@ private:
             }
         }
 
-        // Crisp 4x4 AA border
-        rgba border{ 86, 68, 64, 70 };
+        // Crisp 4x4 AA forged-obsidian border
+        rgba border{ 72, 50, 48, 80 };
         if (b.enabled) {
             if (focused) border = c_gold_bright;
-            else if (is_play) border = lerp_c({ 246, 174, 108, 150 }, { 255, 224, 166, 235 }, anim.hover);
-            else if (b.style == btn_style::gold) border = lerp_c({ 238, 188, 96, 185 }, c_gold_bright, anim.hover);
-            else border = lerp_c({ 184, 150, 120, 92 }, { 244, 200, 112, 225 }, anim.hover);
+            else if (is_play) border = lerp_c({ 246, 152, 88, 165 }, { 255, 224, 166, 240 }, anim.hover);
+            else if (b.style == btn_style::gold) border = lerp_c({ 238, 168, 78, 195 }, c_gold_bright, anim.hover);
+            else border = lerp_c({ 148, 92, 68, 105 }, { 244, 156, 82, 230 }, anim.hover);
         }
         aa_border(r, rad, border);
 
