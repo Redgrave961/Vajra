@@ -1595,3 +1595,27 @@ done:
     if (framed) ctx->gpr[1] += 0x120u;
     ctx->lr = saved_lr;
 }
+
+void func_005C5010(ppu_context* ctx) {
+    const ppu_mm m = ppu_mm_take();
+    const uint32_t self = (uint32_t)ctx->gpr[3];
+    const uint32_t l2w  = (uint32_t)ctx->gpr[4];
+    for (uint32_t i = 0; i < 16u; ++i) {
+        if ((fast32(m, l2w + i * 4u) & 0x7F800000u) == 0x7F800000u) return;
+    }
+    if (fast32(m, self + 0x378u) == 0u) {
+        if (fast32(m, self + 0x230u) == 0u) return;
+        const uint32_t pai = fast32(m, self + 0x234u);
+        if (pai == 0u || fast32(m, self + 0x1E4u) == 0u) return;
+        const int32_t n = (int32_t)fast32(m, pai + 0x48u);
+        if (n <= 0) return;
+        const uint32_t bodies = fast32(m, pai + 0x44u);
+        bool any = false;
+        for (int32_t i = 0; i < n; ++i) {
+            const uint32_t inst = fast32(m, bodies + (uint32_t)i * 4u);
+            if (fast32(m, inst + 0x60u) != 0u) { any = true; break; }
+        }
+        if (!any) return;
+    }
+    func_005C5010_lifted(ctx);
+}

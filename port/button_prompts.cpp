@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -91,6 +92,11 @@ struct cache {
     std::vector<uint8_t> data;
 };
 
+struct qte_cache {
+    uint32_t base_variant = ~0u;
+    std::unordered_map<uint32_t, std::vector<uint8_t>> by_lit;
+};
+
 constexpr prompt_frame h_face{ 16, 16, 27, 31, 27 }, h_wide{ 16, 16, 30, 31, 20 }, h_square{ 16, 16, 27, 31, 27 }, h_stick{ 16, 16, 32, 32, 32 };
 
 const cell k_cells[] = {
@@ -110,7 +116,7 @@ const atlas k_atlases[] = {
     { 0x3582050752B6F32Bull, 128, 64, 64, 32, k_plate_cells, std::size(k_plate_cells), false, true },
 };
 
-constexpr prompt_frame q_tilt{ 64, 60, 66, 104, 70 }, q_tilt_down{ 64, 64, 66, 104, 70 }, q_flat{ 64, 64, 62, 100, 62 }, q_stick{ 64, 66, 84, 84, 84 },
+constexpr prompt_frame q_tilt{ 64, 60, 66, 104, 70 }, q_tilt_down{ 64, 64, 66, 104, 70 }, q_flat{ 64, 64, 62, 100, 62 }, q_stick{ 64, 64, 94, 94, 94 },
     q_wide{ 63.5f, 61.5f, 62, 100, 36 }, q_square{ 63.5f, 60.5f, 56, 100, 56 }, q_big{ 63.5f, 61.5f, 96, 104, 96 }, q_label{ 64, 65, 0, 100, 34 };
 
 const qte k_qtes[] = {
@@ -173,7 +179,7 @@ constexpr uint8_t k_nintendo_cells[4] = { 1, 0, 3, 2 };
 constexpr const char* k_shoulders[4] = { "LB", "RB", "LT", "RT" };
 
 cache g_atlas[std::size(k_atlases)];
-cache g_qte[std::size(k_qtes)];
+qte_cache g_qte[std::size(k_qtes)];
 cache g_page[std::size(k_pages)];
 std::vector<uint8_t> g_ring[std::size(k_rings)];
 
@@ -303,14 +309,20 @@ void patch_qte(size_t index, uint32_t variant, uint8_t* staging)
 {
     if (variant == 0) return;
     const qte& q = k_qtes[index];
-    cache& c = g_qte[index];
-    const uint32_t key = q.s.glyph == g_lstick || q.s.glyph == g_rstick ? variant : variant & ~k_lit;
-    if (c.variant != key) {
-        c.variant = key;
-        c.data.resize((size_t)q.width * q.height);
-        if (!draw(q.s, key, q.width, q.height, c.data.data(), q.width / 4 * 16)) c.data.clear();
+    qte_cache& c = g_qte[index];
+    const uint32_t base = variant & ~k_lit;
+    const uint32_t key = q.s.glyph == g_lstick || q.s.glyph == g_rstick ? variant : base;
+    if (c.base_variant != base) {
+        c.base_variant = base;
+        c.by_lit.clear();
     }
-    if (!c.data.empty()) std::memcpy(staging, c.data.data(), c.data.size());
+    auto it = c.by_lit.find(key);
+    if (it == c.by_lit.end()) {
+        std::vector<uint8_t> buf((size_t)q.width * q.height);
+        if (!draw(q.s, key, q.width, q.height, buf.data(), q.width / 4 * 16)) buf.clear();
+        it = c.by_lit.emplace(key, std::move(buf)).first;
+    }
+    if (!it->second.empty()) std::memcpy(staging, it->second.data(), it->second.size());
 }
 
 uint32_t variant()
@@ -350,7 +362,7 @@ int apply(uint32_t v, uint32_t gcm_format, uint32_t width, uint32_t height, cons
     for (size_t i = 0; i < std::size(k_qtes); i++)
         if (dxt5 && width == k_qtes[i].width && height == k_qtes[i].height && hashed() == k_qtes[i].hash) {
             patch_qte(i, v, staging);
-            return 1;
+            return (v & 3) == k_kbm && k_qtes[i].s.glyph == g_lstick ? 3 : 1;
         }
     for (size_t i = 0; i < std::size(k_pages); i++)
         if (!dxt5 && width == k_page_width && height == k_page_height && hashed() == k_pages[i].hash) {
@@ -361,7 +373,7 @@ int apply(uint32_t v, uint32_t gcm_format, uint32_t width, uint32_t height, cons
         for (size_t i = 0; i < std::size(k_rings); i++)
             if (k_rings[i].bytes == bytes && (k_rings[i].op == ring::blank || (dxt5 && width == height)) && hashed() == k_rings[i].hash) {
                 patch_ring(i, v, width, gcm_format, guest, staging);
-                return 1;
+                return (v & 3) == k_kbm && k_rings[i].op == ring::squircle ? 2 : 1;
             }
     }
     return 0;

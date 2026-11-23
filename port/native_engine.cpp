@@ -749,3 +749,175 @@ void func_00CEFF60(ppu_context* ctx)
     gcm_put_words(m, cur, w, 2u);
     vm_write32_mm(&m, gcm_ctx + 8u, cur + 8u);
 }
+
+void func_002392C8(ppu_context* ctx)
+{
+    const ppu_mm m = ppu_mm_take();
+    const uint32_t actor = (uint32_t)ctx->gpr[3];
+    const uint32_t b_collision_only = (uint32_t)ctx->gpr[4];
+    const uint64_t sp = ctx->gpr[1];
+    const uint64_t lr = ctx->lr;
+    const uint32_t call_sp = (uint32_t)(sp - 0x1B0u);
+    const uint32_t mat_ea = call_sp + 0x70u;
+    frame(m, sp, 0x1B0u, lr);
+
+    const int32_t pitch = (int32_t)fast32(m, actor + 0x60u);
+    const int32_t yaw   = (int32_t)fast32(m, actor + 0x64u);
+    const int32_t roll  = (int32_t)fast32(m, actor + 0x68u);
+    const uint32_t sin_tab = 0x019EECDCu;
+    auto sin_lookup = [&](int32_t angle) -> float {
+        const uint32_t bits = fast32(m, sin_tab + (((uint32_t)(angle >> 2) & 0x3FFFu) << 2));
+        float f;
+        std::memcpy(&f, &bits, 4);
+        return f;
+    };
+    const float sp_f = sin_lookup(pitch);
+    const float cp_f = sin_lookup(pitch + 0x4000);
+    const float sy_f = sin_lookup(yaw);
+    const float cy_f = sin_lookup(yaw + 0x4000);
+    const float sr_f = sin_lookup(roll);
+    const float cr_f = sin_lookup(roll + 0x4000);
+
+    auto rd_f = [&](uint32_t ea) -> float {
+        const uint32_t bits = fast32(m, ea);
+        float f;
+        std::memcpy(&f, &bits, 4);
+        return f;
+    };
+    const float ds = rd_f(actor + 0x6Cu);
+    const float sx = rd_f(actor + 0x70u) * ds;
+    const float sy = rd_f(actor + 0x74u) * ds;
+    const float sz = rd_f(actor + 0x78u) * ds;
+    const float px = rd_f(actor + 0x7Cu);
+    const float py = rd_f(actor + 0x80u);
+    const float pz = rd_f(actor + 0x84u);
+    const float lx = rd_f(actor + 0x54u);
+    const float ly = rd_f(actor + 0x58u);
+    const float lz = rd_f(actor + 0x5Cu);
+
+    const float m00 = cp_f * cy_f * sx;
+    const float m01 = cp_f * sy_f * sx;
+    const float m02 = sp_f * sx;
+    const float m10 = (sr_f * sp_f * cy_f - cr_f * sy_f) * sy;
+    const float m11 = (sr_f * sp_f * sy_f + cr_f * cy_f) * sy;
+    const float m12 = -(sr_f * cp_f) * sy;
+    const float m20 = -(cr_f * sp_f * cy_f + sr_f * sy_f) * sz;
+    const float m21 = (cy_f * sr_f - cr_f * sp_f * sy_f) * sz;
+    const float m22 = cr_f * cp_f * sz;
+    const float m30 = lx - (px * m00 + py * m10 + pz * m20);
+    const float m31 = ly - (px * m01 + py * m11 + pz * m21);
+    const float m32 = lz - (px * m02 + py * m12 + pz * m22);
+
+    const float mat_f[16] = {
+        m00, m01, m02, 0.0f,
+        m10, m11, m12, 0.0f,
+        m20, m21, m22, 0.0f,
+        m30, m31, m32, 1.0f,
+    };
+    uint32_t mat_be[16];
+    for (int i = 0; i < 16; i++) {
+        uint32_t u;
+        std::memcpy(&u, &mat_f[i], 4);
+        mat_be[i] = __builtin_bswap32(u);
+    }
+    if (__builtin_expect(plain_store(m, mat_ea, 64), 1)) {
+        std::memcpy(m.vb + mat_ea, mat_be, 64);
+        vm_track_write(mat_ea, 64);
+    } else {
+        for (int i = 0; i < 16; i++) vm_write32_mm(&m, mat_ea + (uint32_t)i * 4u, __builtin_bswap32(mat_be[i]));
+    }
+
+    if (b_collision_only == 0) {
+        for (int32_t i = 0; i < (int32_t)fast32(m, actor + 0x40u); i++) {
+            const uint32_t data = fast32(m, actor + 0x3Cu);
+            const uint32_t comp = fast32(m, data + (uint32_t)i * 4u);
+            if (!comp) continue;
+            const uint32_t gworld = fast32(m, 0x019CCE80u);
+            const uint32_t scene = fast32(m, gworld + 0x40u);
+            const uint32_t flags = fast32(m, comp + 0x50u);
+            if ((flags & 0x80000000u) == 0) {
+                ctx->gpr[3] = comp;
+                ctx->gpr[4] = scene;
+                ctx->gpr[5] = actor;
+                ctx->gpr[6] = mat_ea;
+                call(ctx, call_sp, 0x0023979C, func_002294F4);
+            } else if (flags & 0x20000000u) {
+                ctx->gpr[3] = comp;
+                ctx->gpr[4] = 1u;
+                ctx->ctr = fast32(m, fast32(m, fast32(m, comp) + 0x134u));
+                call(ctx, call_sp, 0x002397E8, guest_icall);
+                vm_write32_mm(&m, comp + 0x48u, 0u);
+                vm_write32_mm(&m, comp + 0x4Cu, 0u);
+                ctx->gpr[3] = comp;
+                ctx->gpr[4] = scene;
+                ctx->gpr[5] = actor;
+                ctx->gpr[6] = mat_ea;
+                call(ctx, call_sp, 0x00239804, func_002294F4);
+            } else if (flags & 0x10000000u) {
+                vm_write32_mm(&m, comp + 0x50u, flags & ~0x10000000u);
+                ctx->gpr[3] = comp;
+                ctx->gpr[4] = mat_ea;
+                ctx->ctr = fast32(m, fast32(m, fast32(m, comp) + 0x128u));
+                call(ctx, call_sp, 0x0023983C, guest_icall);
+                if (fast32(m, comp + 0x50u) & 0x80000000u) {
+                    ctx->gpr[3] = comp;
+                    ctx->ctr = fast32(m, fast32(m, fast32(m, comp) + 0x130u));
+                    call(ctx, call_sp, 0x00239864, guest_icall);
+                }
+            }
+            ctx->gpr[3] = comp;
+            ctx->ctr = fast32(m, fast32(m, fast32(m, comp) + 0x140u));
+            call(ctx, call_sp, 0x002397B4, guest_icall);
+        }
+    } else {
+        for (uint32_t i = 0; i < fast32(m, actor + 0x40u); i++) {
+            const uint32_t data = fast32(m, actor + 0x3Cu);
+            const uint32_t comp = fast32(m, data + i * 4u);
+            if (!comp) continue;
+            uint32_t prim_cls = fast32(m, 0x019C2E98u);
+            if (!prim_cls) {
+                ctx->gpr[3] = 0x01691EA8u;
+                call(ctx, call_sp, 0x002399D4, func_001B74B0);
+                vm_write32_mm(&m, 0x019C2E98u, (uint32_t)ctx->gpr[3]);
+                call(ctx, call_sp, 0x002399E0, func_001B7400);
+                prim_cls = fast32(m, 0x019C2E98u);
+            }
+            if (prim_cls) {
+                uint32_t cls = fast32(m, comp + 0x34u);
+                while (cls && cls != prim_cls) cls = fast32(m, cls + 0x40u);
+                if (!cls) continue;
+            }
+            const uint32_t flags = fast32(m, comp + 0x50u);
+            if ((flags & 0x80000000u) == 0) continue;
+            if (comp != fast32(m, actor + 0x188u) && (fast32(m, comp + 0x12Cu) & 0x20000000u) == 0) continue;
+            const uint32_t gworld = fast32(m, 0x019CCE80u);
+            const uint32_t scene = fast32(m, gworld + 0x40u);
+            if (flags & 0x20000000u) {
+                ctx->gpr[3] = comp;
+                ctx->gpr[4] = 1u;
+                ctx->ctr = fast32(m, fast32(m, fast32(m, comp) + 0x134u));
+                call(ctx, call_sp, 0x002399AC, guest_icall);
+                vm_write32_mm(&m, comp + 0x48u, 0u);
+                vm_write32_mm(&m, comp + 0x4Cu, 0u);
+                ctx->gpr[3] = comp;
+                ctx->gpr[4] = scene;
+                ctx->gpr[5] = actor;
+                ctx->gpr[6] = mat_ea;
+                call(ctx, call_sp, 0x002399C8, func_002294F4);
+            } else if (flags & 0x10000000u) {
+                vm_write32_mm(&m, comp + 0x50u, flags & ~0x10000000u);
+                ctx->gpr[3] = comp;
+                ctx->gpr[4] = mat_ea;
+                ctx->ctr = fast32(m, fast32(m, fast32(m, comp) + 0x128u));
+                call(ctx, call_sp, 0x00239964, guest_icall);
+                if (fast32(m, comp + 0x50u) & 0x80000000u) {
+                    ctx->gpr[3] = comp;
+                    ctx->ctr = fast32(m, fast32(m, fast32(m, comp) + 0x130u));
+                    call(ctx, call_sp, 0x0023998C, guest_icall);
+                }
+            }
+        }
+    }
+    ctx->gpr[1] = sp;
+    ctx->lr = lr;
+}

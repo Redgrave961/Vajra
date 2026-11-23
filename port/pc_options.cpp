@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -281,6 +282,8 @@ constexpr uint64_t hook_bit(uint32_t fn) { return 1ull << ((fn * 0x9E3779B1u) >>
 std::atomic<uint64_t> g_hooks[std::size(k_hooks)];
 std::atomic<uint64_t> g_save_param{ 0 };
 std::atomic<uint32_t> g_stick_lit{ 0 };
+std::atomic<uint64_t> g_spin_ms{ 0 };
+std::atomic<uint8_t> g_spin_cmd{ 0 };
 std::atomic<uint64_t> g_scene_manager{ 0 };
 std::atomic<uint64_t> g_prompt{ 0 };
 std::atomic<uint64_t> g_hud{ 0 };
@@ -861,7 +864,13 @@ uint32_t pc_options_call_slow(uint32_t self, uint32_t function)
         if ((uint32_t)hook == hook_scene_manager && m_player_owner.object(self)) remember(g_hud, self);
         if ((uint32_t)hook != hook_stick_rotation) return (uint32_t)hook;
         const uint8_t command = m_command.byte(self);
-        if (m_judging.flag(self) && command >= k_left_rotation_first && command <= k_left_rotation_last) note_stick_rotation();
+        if (m_judging.flag(self) && command >= k_left_rotation_first && command <= k_left_rotation_last) {
+            note_stick_rotation();
+            const uint64_t now_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            g_spin_cmd.store(command, std::memory_order_relaxed);
+            g_spin_ms.store(now_ms, std::memory_order_relaxed);
+        }
         return 0;
     }
     return 0;
@@ -879,7 +888,20 @@ bool pc_options_controller_screen()
 
 uint32_t pc_options_stick_lit()
 {
-    return g_stick_lit.load(std::memory_order_relaxed) & ~k_start_judged;
+    uint32_t lit = g_stick_lit.load(std::memory_order_relaxed) & ~k_start_judged;
+    const uint64_t spin_ms = g_spin_ms.load(std::memory_order_relaxed);
+    if (spin_ms) {
+        const uint64_t now_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now_ms - spin_ms < 150u) {
+            constexpr uint32_t k_cw[4]  = { 1u, 8u, 4u, 2u };
+            constexpr uint32_t k_ccw[4] = { 1u, 2u, 4u, 8u };
+            const uint32_t phase = (uint32_t)((now_ms / 140u) & 3u);
+            const uint8_t cmd = g_spin_cmd.load(std::memory_order_relaxed);
+            lit = (lit & ~0xFu) | ((cmd & 1u) ? k_ccw[phase] : k_cw[phase]);
+        }
+    }
+    return lit;
 }
 
 void pc_options_mouse_scale(float* yaw, float* pitch)

@@ -533,7 +533,10 @@ int main(int argc, char** argv)
     }
     set_vfs_root(elf ? elf : "");
     cellGame_init_boot(ppu_vfs_root);
-    rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title(), (exe / "vk_pipelines.bin").string().c_str(), icon.string().c_str()));
+    std::error_code cache_ec;
+    const std::filesystem::path cache_dir = exe / "cache";
+    std::filesystem::create_directories(cache_dir, cache_ec);
+    rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title(), (cache_dir / "vk_pipelines.bin").string().c_str(), icon.string().c_str()));
     use_button_prompts();
 
     ppu_recomp_register();

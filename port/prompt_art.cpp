@@ -184,13 +184,14 @@ struct painter {
 
     void cluster(const prompt_glyph& g, float x, float y, float s)
     {
-        const float k = 0.3f * s, step = k + 0.04f * s;
-        const float dx[4] = { 0, -step, 0, step }, dy[4] = { -step / 2, step / 2, step / 2, step / 2 };
-        if (k < 16) {
+        const float kw = 0.285f * s, kh = 0.34f * s;
+        const float step_x = kw + 0.04f * s, step_y = kh + 0.055f * s;
+        const float dx[4] = { 0, -step_x, 0, step_x }, dy[4] = { -step_y / 2, step_y / 2, step_y / 2, step_y / 2 };
+        if (kw < 15) {
             const float h = 0.94f * s, letter = 0.26f * s, spread = 0.26f * s;
             cap(x, y, h / 2, h / 2, 0.22f * h);
             for (int i = 0; i < 4; i++) {
-                const float lx = x + dx[i] / step * spread, ly = y + dy[i] / step * (spread + 0.04f * s);
+                const float lx = x + dx[i] / step_x * spread, ly = y + dy[i] / step_y * (spread + 0.04f * s);
                 if (single(g.label[i]))
                     text(g.label[i], lx, ly, letter);
                 else
@@ -198,14 +199,16 @@ struct painter {
             }
             return;
         }
+        const float r = 0.22f * kw;
         for (int i = 0; i < 4; i++) {
-            const float kx = x + dx[i], ky = y + dy[i], edge = k / 2 + 0.02f * s;
-            cap(kx, ky, k / 2, k / 2, 0.2f * k);
-            if (g.lit && !(g.lit >> i & 1)) faint.push_back(face([=](float px, float py) { return sd_round_rect(px, py, kx, ky, edge, edge, 0.2f * k); }));
+            const float kx = x + dx[i], ky = y + dy[i];
+            const float ex = kw / 2 + 0.02f * s, ey = kh / 2 + 0.02f * s;
+            cap(kx, ky, kw / 2, kh / 2, r);
+            if (g.lit && !(g.lit >> i & 1)) faint.push_back(face([=](float px, float py) { return sd_round_rect(px, py, kx, ky, ex, ey, r); }));
             if (single(g.label[i]))
-                text(g.label[i], kx, ky, 0.6f * k);
+                text(g.label[i], kx, ky, 0.64f * kw);
             else
-                arrow(kx, ky, 0.3f * k, i);
+                arrow(kx, ky, 0.32f * kw, i);
         }
     }
 
@@ -431,7 +434,7 @@ bool prompt_render(prompt_skin skin, const prompt_frame& fr, const prompt_glyph&
     case prompt_kind::mouse_move: {
         const float h = fr.h, gap = std::max(1.2f, 0.05f * h);
         const bool compact = h < 64;
-        const float mm = (compact ? 0.44f : 0.56f) * h, at = (compact ? 0.33f : 0.4f) * h, head = (compact ? 0.1f : 0.13f) * h;
+        const float mm = (compact ? 0.44f : 0.46f) * h, at = (compact ? 0.33f : 0.345f) * h, head = (compact ? 0.1f : 0.11f) * h;
         auto outline = [=](float x, float y) { return sd_round_rect(x, y, fr.cx, fr.cy, 0.34f * mm, 0.5f * mm, 0.33f * mm); };
         if (compact) {
             p.cap(fr.cx, fr.cy, 0.47f * h, 0.47f * h, 0.2f * h);
