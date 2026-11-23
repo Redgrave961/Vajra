@@ -152,7 +152,7 @@ BEGIN
   BEGIN
     BLOCK \"040904B0\"
     BEGIN
-      VALUE \"FileDescription\", \"Vajra - Asura's Wrath\"
+      VALUE \"FileDescription\", \"Asura's Wrath\"
       VALUE \"ProductName\", \"Vajra\"
       VALUE \"InternalName\", \"Vajra\"
       VALUE \"OriginalFilename\", \"Vajra.exe\"
