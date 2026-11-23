@@ -1,0 +1,195 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Vajra (Asura's Wrath)",
+  "repo": "Redgrave961/Vajra",
+  "inputs": [
+    {
+      "id": "game",
+      "label": "Your PlayStation 3 copy of Asura's Wrath (BLES01227): disc folder (PS3_GAME) or decrypted .iso.",
+      "formats": [
+        { "type": "file", "extensions": ["iso"] },
+        { "type": "folder" }
+      ],
+      "check": {
+        "ids": ["BLES01227"]
+      }
+    },
+    {
+      "id": "update",
+      "label": "Official 1.02 update (.pkg). Optional: leave blank to download automatically from Sony during setup.",
+      "role": "update",
+      "optional": true,
+      "formats": [
+        { "type": "file", "extensions": ["pkg"] }
+      ]
+    }
+  ],
+  "prepare": {
+    "program": ["Vajra.exe", "Vajra-x86_64.AppImage"],
+    "args": ["--prepare", "--data", "{data}", "--game={input:game}", "--update={input:update}"],
+    "label": "Official 1.02 update and PS3 audio codecs",
+    "done": [
+      "{data}/user/dev_flash/sys/external/flashMP3.pic",
+      "{data}/user/dev_flash/sys/external/flashATRAC.pic",
+      "{data}/asura_paths.ini"
+    ]
+  },
+  "start": {
+    "program": ["Vajra.exe", "Vajra-x86_64.AppImage"],
+    "args": ["--data", "{data}", "--game={input:game}", "--update={input:update}"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{data}/asura_settings.ini" }]
+    }
+  ],
+  "settings": [
+    {
+      "id": "display",
+      "label": "Display Mode",
+      "help": "Windowed, borderless window, or exclusive fullscreen at the display's native mode.",
+      "group": "Graphics",
+      "choices": [
+        { "label": "Windowed", "set": { "display": "windowed" } },
+        { "label": "Borderless", "set": { "display": "borderless" } },
+        { "label": "Fullscreen", "set": { "display": "fullscreen" } }
+      ],
+      "defaults": { "display": "borderless" }
+    },
+    {
+      "id": "resolution",
+      "label": "Resolution",
+      "help": "Internal rendering resolution. 720p is the PlayStation 3 original.",
+      "group": "Graphics",
+      "choices": [
+        { "label": "720p (1280x720)", "set": { "resolution": "1280x720" } },
+        { "label": "900p (1600x900)", "set": { "resolution": "1600x900" } },
+        { "label": "1080p (1920x1080)", "set": { "resolution": "1920x1080" } },
+        { "label": "1440p (2560x1440)", "set": { "resolution": "2560x1440" } },
+        { "label": "1800p (3200x1800)", "set": { "resolution": "3200x1800" } },
+        { "label": "4K (3840x2160)", "set": { "resolution": "3840x2160" } }
+      ],
+      "defaults": { "resolution": "1920x1080" }
+    },
+    {
+      "id": "frame_rate",
+      "label": "Frame Rate",
+      "help": "Frame rate limit. 30 FPS uses the console's original pacing.",
+      "group": "Graphics",
+      "choices": [
+        { "label": "30 FPS (Console)", "set": { "frame_rate": "30" } },
+        { "label": "60 FPS", "set": { "frame_rate": "60" } },
+        { "label": "120 FPS", "set": { "frame_rate": "120" } },
+        { "label": "144 FPS", "set": { "frame_rate": "144" } },
+        { "label": "165 FPS", "set": { "frame_rate": "165" } },
+        { "label": "180 FPS", "set": { "frame_rate": "180" } },
+        { "label": "240 FPS", "set": { "frame_rate": "240" } },
+        { "label": "Unlimited", "set": { "frame_rate": "unlimited" } }
+      ],
+      "defaults": { "frame_rate": "unlimited" }
+    },
+    {
+      "id": "motion_blur",
+      "label": "Motion Blur",
+      "help": "Blur from camera and object motion.",
+      "group": "Graphics",
+      "choices": [
+        { "label": "On", "set": { "motion_blur": "on" } },
+        { "label": "Off", "set": { "motion_blur": "off" } }
+      ],
+      "defaults": { "motion_blur": "on" }
+    },
+    {
+      "id": "depth_of_field",
+      "label": "Depth of Field",
+      "help": "Blur outside the camera's focus, mainly in cutscenes.",
+      "group": "Graphics",
+      "choices": [
+        { "label": "On", "set": { "depth_of_field": "on" } },
+        { "label": "Off", "set": { "depth_of_field": "off" } }
+      ],
+      "defaults": { "depth_of_field": "on" }
+    },
+    {
+      "id": "bloom",
+      "label": "Bloom",
+      "help": "Glow around bright lights.",
+      "group": "Graphics",
+      "choices": [
+        { "label": "On", "set": { "bloom": "on" } },
+        { "label": "Off", "set": { "bloom": "off" } }
+      ],
+      "defaults": { "bloom": "on" }
+    },
+    {
+      "id": "mouse_sensitivity",
+      "label": "Mouse Sensitivity",
+      "help": "How fast the camera turns with the mouse.",
+      "group": "Controls",
+      "slider": {
+        "key": "mouse_sensitivity",
+        "min": 1,
+        "max": 20,
+        "step": 1,
+        "format": "%.0f"
+      },
+      "defaults": { "mouse_sensitivity": "10" }
+    },
+    {
+      "id": "invert_mouse_y",
+      "label": "Invert Mouse Y",
+      "help": "Moving the mouse forward looks down.",
+      "group": "Controls",
+      "choices": [
+        { "label": "Off", "set": { "invert_mouse_y": "off" } },
+        { "label": "On", "set": { "invert_mouse_y": "on" } }
+      ],
+      "defaults": { "invert_mouse_y": "off" }
+    }
+  ],
+  "saves": [
+    "{data}/user/dev_hdd0/home/00000001/savedata",
+    "{data}/user/dev_hdd0/home/00000001/trophy",
+    "{data}/asura_settings.ini"
+  ],
+  "folders": {
+    "data": [{ "path": "{data}" }],
+    "logs": [{ "path": "{data}" }],
+    "saves": [{ "path": "{data}/user/dev_hdd0/home/00000001/savedata" }]
+  },
+  "actions": [
+    {
+      "id": "open-saves",
+      "label": "Open Save Folder",
+      "open": "saves"
+    },
+    {
+      "id": "clear-cache",
+      "label": "Clear Shader Cache",
+      "help": "Deletes compiled Vulkan shader and pipeline caches so they rebuild on next launch.",
+      "clear": "data/cache"
+    }
+  ],
+  "looks": {
+    "graphics": "vulkan"
+  },
+  "exit_codes": {
+    "2": "Setup was cancelled or required game files are missing.",
+    "3": "No BLES01227 game copy was provided.",
+    "4": "Failed to download the official 1.02 update from Sony. Check your internet connection or select the .pkg manually.",
+    "5": "Failed to download or extract the PS3 firmware audio codecs from Sony. Check your internet connection.",
+    "6": "The selected game copy or update failed verification. Make sure you have a decrypted BLES01227 dump."
+  },
+  "system": {
+    "windows": {
+      "version": "10",
+      "graphics": { "vulkan": "1.1" }
+    },
+    "linux": {
+      "graphics": { "vulkan": "1.1" }
+    }
+  }
+}

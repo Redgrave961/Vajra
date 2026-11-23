@@ -126,10 +126,10 @@ set(SPU_SOURCES ${SPU_GENERATED_SOURCES} ${SPU_JOB_SOURCES} ${FIRMWARE_SPU_SOURC
 get_filename_component(PORT_GAME_DIR "${PORT_EBOOT}" DIRECTORY)
 get_filename_component(PORT_GAME_DIR "${PORT_GAME_DIR}" DIRECTORY)
 if(WIN32)
-    set(PORT_ICON "${CMAKE_CURRENT_BINARY_DIR}/AsurasWrath.ico")
+    set(PORT_ICON "${CMAKE_CURRENT_BINARY_DIR}/Vajra.ico")
 else()
     set(PORT_STAGE "${CMAKE_CURRENT_BINARY_DIR}/appimage")
-    set(PORT_ICON "${PORT_STAGE}/AsurasWrath.png")
+    set(PORT_ICON "${PORT_STAGE}/Vajra.png")
 endif()
 add_custom_command(
     OUTPUT "${PORT_ICON}"
@@ -138,9 +138,9 @@ add_custom_command(
     COMMENT "Building the icon from the game's ICON0.PNG")
 set(PORT_PLATFORM_SOURCES "")
 if(WIN32)
-    set(PORT_RC "${CMAKE_CURRENT_BINARY_DIR}/AsurasWrath.rc")
+    set(PORT_RC "${CMAKE_CURRENT_BINARY_DIR}/Vajra.rc")
     file(WRITE "${PORT_RC}"
-"1 ICON \"AsurasWrath.ico\"
+"1 ICON \"Vajra.ico\"
 1 VERSIONINFO
 FILEVERSION 1,0,0,0
 PRODUCTVERSION 1,0,0,0
@@ -151,10 +151,10 @@ BEGIN
   BEGIN
     BLOCK \"040904B0\"
     BEGIN
-      VALUE \"FileDescription\", \"Asura's Wrath\"
-      VALUE \"ProductName\", \"Asura's Wrath\"
-      VALUE \"InternalName\", \"AsurasWrath\"
-      VALUE \"OriginalFilename\", \"AsurasWrath.exe\"
+      VALUE \"FileDescription\", \"Vajra - Asura's Wrath\"
+      VALUE \"ProductName\", \"Vajra\"
+      VALUE \"InternalName\", \"Vajra\"
+      VALUE \"OriginalFilename\", \"Vajra.exe\"
       VALUE \"FileVersion\", \"1.0.0.0\"
       VALUE \"ProductVersion\", \"1.0.0.0\"
     END
@@ -222,7 +222,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 find_package(SDL3 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime SDL3::SDL3)
-set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX WIN32_EXECUTABLE TRUE OUTPUT_NAME AsurasWrath)
+set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX WIN32_EXECUTABLE TRUE OUTPUT_NAME Vajra)
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE dbghelp winmm)
     target_link_options(${PROJECT_NAME} PRIVATE -static)
@@ -251,32 +251,38 @@ if(ASURA_PROFILE)
     endforeach()
 endif()
 
-if(NOT WIN32)
+set(PORT_RECOMPLAUNCHER_JSON "${CMAKE_CURRENT_SOURCE_DIR}/../recomplauncher.json")
+if(WIN32)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PORT_RECOMPLAUNCHER_JSON}" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/recomplauncher.json"
+        COMMENT "Copying recomplauncher.json beside Vajra.exe")
+else()
     set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PORT_STAGE}")
     set(PORT_RUNTIME "${PORT_STAGE}/runtime-x86_64")
     file(DOWNLOAD https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64 "${PORT_RUNTIME}"
         EXPECTED_HASH SHA256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d)
-    set(PORT_DESKTOP "${PORT_STAGE}/AsurasWrath.desktop")
-    file(WRITE "${PORT_DESKTOP}" "[Desktop Entry]\nType=Application\nName=Asura's Wrath\nExec=AsurasWrath\nIcon=AsurasWrath\nCategories=Game;\nTerminal=false\nStartupWMClass=AsurasWrath\n")
-    set(PORT_STRIPPED "${PORT_STAGE}/AsurasWrath.stripped")
-    set(PORT_DEBUG "${PORT_STAGE}/AsurasWrath.debug")
+    set(PORT_DESKTOP "${PORT_STAGE}/Vajra.desktop")
+    file(WRITE "${PORT_DESKTOP}" "[Desktop Entry]\nType=Application\nName=Vajra\nComment=Asura's Wrath PC Recompilation\nExec=Vajra\nIcon=Vajra\nCategories=Game;\nTerminal=false\nStartupWMClass=Vajra\n")
+    set(PORT_STRIPPED "${PORT_STAGE}/Vajra.stripped")
+    set(PORT_DEBUG "${PORT_STAGE}/Vajra.debug")
     file(WRITE "${PORT_STAGE}/AppDir.list"
-"file /AsurasWrath 0755 0 0 ${PORT_STRIPPED}
-slink /AppRun 0777 0 0 AsurasWrath
-file /AsurasWrath.desktop 0644 0 0 ${PORT_DESKTOP}
-file /AsurasWrath.png 0644 0 0 ${PORT_ICON}
-slink /.DirIcon 0777 0 0 AsurasWrath.png
+"file /Vajra 0755 0 0 ${PORT_STRIPPED}
+slink /AppRun 0777 0 0 Vajra
+file /Vajra.desktop 0644 0 0 ${PORT_DESKTOP}
+file /Vajra.png 0644 0 0 ${PORT_ICON}
+slink /.DirIcon 0777 0 0 Vajra.png
+file /recomplauncher.json 0644 0 0 ${PORT_RECOMPLAUNCHER_JSON}
 ")
     find_program(ASURA_GENSQUASHFS gensquashfs REQUIRED)
     set(PORT_SQUASHFS "${PORT_STAGE}/AppDir.squashfs")
-    set(PORT_APPIMAGE "${CMAKE_CURRENT_BINARY_DIR}/AsurasWrath-x86_64.AppImage")
+    set(PORT_APPIMAGE "${CMAKE_CURRENT_BINARY_DIR}/Vajra-x86_64.AppImage")
     add_custom_command(
         OUTPUT "${PORT_APPIMAGE}"
         COMMAND "${CMAKE_OBJCOPY}" --only-keep-debug "$<TARGET_FILE:${PROJECT_NAME}>" "${PORT_DEBUG}"
         COMMAND "${CMAKE_OBJCOPY}" --strip-all "--add-gnu-debuglink=${PORT_DEBUG}" "$<TARGET_FILE:${PROJECT_NAME}>" "${PORT_STRIPPED}"
         COMMAND "${ASURA_GENSQUASHFS}" --pack-file "${PORT_STAGE}/AppDir.list" --compressor zstd --defaults mode=0755 --force "${PORT_SQUASHFS}"
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_appimage.py" "${PORT_RUNTIME}" "${PORT_SQUASHFS}" "${PORT_APPIMAGE}"
-        DEPENDS ${PROJECT_NAME} "${PORT_ICON}" "${PORT_DESKTOP}" "${PORT_STAGE}/AppDir.list" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_appimage.py"
-        COMMENT "Packing AsurasWrath-x86_64.AppImage")
+        DEPENDS ${PROJECT_NAME} "${PORT_ICON}" "${PORT_DESKTOP}" "${PORT_STAGE}/AppDir.list" "${PORT_RECOMPLAUNCHER_JSON}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_appimage.py"
+        COMMENT "Packing Vajra-x86_64.AppImage")
     add_custom_target(AppImage ALL DEPENDS "${PORT_APPIMAGE}")
 endif()
