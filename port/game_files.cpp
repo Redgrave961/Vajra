@@ -331,7 +331,8 @@ bool load_game_files(const std::filesystem::path& exe, const std::filesystem::pa
     std::filesystem::create_directories(out.hdd1, ec);
 
     mounted m = mount(exe, paths, out.user);
-    if (!m.check.ready()) {
+    const char* force_setup = std::getenv("VAJRA_SETUP");
+    if (!m.check.ready() || (force_setup && force_setup[0] && force_setup[0] != '0')) {
         if (!run_setup(exe, icon, paths, m.check)) return false;
         write_paths(exe, paths);
         std::filesystem::remove_all(exe / "user" / "check", ec);
