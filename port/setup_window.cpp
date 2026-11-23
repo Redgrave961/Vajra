@@ -28,24 +28,24 @@ struct rgba {
 
 // Volcanic obsidian -> molten crimson + burnished Vajra gold
 constexpr rgba c_bg_top{ 10, 7, 8 }, c_bg_bot{ 25, 10, 10 };
-constexpr rgba c_panel_top{ 20, 15, 16, 232 }, c_panel_bot{ 15, 11, 12, 242 };
-constexpr rgba c_panel_border{ 96, 68, 44, 150 };
-constexpr rgba c_row_hover{ 42, 28, 26, 130 };
-constexpr rgba c_divider{ 214, 168, 82, 32 };
+constexpr rgba c_panel_top{ 20, 14, 15, 232 }, c_panel_bot{ 14, 10, 11, 244 };
+constexpr rgba c_panel_border{ 108, 76, 46, 155 };
+constexpr rgba c_row_hover{ 46, 28, 25, 130 };
+constexpr rgba c_divider{ 218, 170, 82, 30 };
 
-constexpr rgba c_text{ 246, 239, 230 }, c_sub{ 176, 160, 148 }, c_dim{ 122, 108, 100 };
-constexpr rgba c_gold{ 240, 194, 102 }, c_gold_dim{ 168, 126, 58 }, c_gold_bright{ 255, 228, 158 };
+constexpr rgba c_text{ 248, 242, 234 }, c_sub{ 184, 168, 156 }, c_dim{ 126, 112, 104 };
+constexpr rgba c_gold{ 242, 196, 104 }, c_gold_dim{ 158, 118, 56 }, c_gold_bright{ 255, 232, 168 };
 
-constexpr rgba c_crimson_top{ 208, 44, 28 }, c_crimson_bot{ 142, 20, 18 };
-constexpr rgba c_crimson_hot_top{ 236, 68, 36 }, c_crimson_hot_bot{ 172, 30, 22 };
-constexpr rgba c_crimson_down{ 120, 18, 16 };
+constexpr rgba c_crimson_top{ 210, 42, 26 }, c_crimson_bot{ 132, 18, 16 };
+constexpr rgba c_crimson_hot_top{ 242, 68, 34 }, c_crimson_hot_bot{ 168, 26, 20 };
+constexpr rgba c_crimson_down{ 112, 16, 14 };
 
-constexpr rgba c_btn_top{ 48, 35, 32, 235 }, c_btn_bot{ 34, 25, 23, 245 };
-constexpr rgba c_btn_hot_top{ 72, 50, 42, 245 }, c_btn_hot_bot{ 52, 36, 31, 250 };
-constexpr rgba c_btn_down{ 28, 20, 19, 250 };
-constexpr rgba c_disabled{ 32, 25, 25, 220 };
+constexpr rgba c_plate_top{ 44, 30, 27, 238 }, c_plate_bot{ 26, 18, 17, 248 };
+constexpr rgba c_plate_hot_top{ 68, 44, 34, 248 }, c_plate_hot_bot{ 42, 26, 22, 252 };
+constexpr rgba c_plate_down{ 22, 15, 14, 252 };
+constexpr rgba c_disabled{ 28, 22, 22, 220 };
 
-constexpr rgba c_ok{ 96, 204, 118 }, c_warn{ 242, 182, 68 }, c_bad{ 236, 88, 74 }, c_missing{ 124, 106, 96 };
+constexpr rgba c_ok{ 96, 206, 118 }, c_warn{ 244, 184, 68 }, c_bad{ 238, 88, 74 }, c_missing{ 126, 108, 98 };
 
 enum action { a_files, a_folder, a_dlc_clear, a_download, a_play };
 
@@ -113,18 +113,16 @@ public:
         if (!load_font(regular, font_weight::regular) || !load_font(semibold, font_weight::semibold) || !load_font(black, font_weight::black))
             return false;
         const float ds = std::max(1.f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
-        window = SDL_CreateWindow("Vajra \xE2\x80\x93 Asura's Wrath", (int)(k_w * ds), (int)(k_h * ds), SDL_WINDOW_HIGH_PIXEL_DENSITY);
+        window = SDL_CreateWindow("Vajra", (int)(k_w * ds), (int)(k_h * ds), SDL_WINDOW_HIGH_PIXEL_DENSITY);
         renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
         if (!renderer) return false;
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-        // Window icon
         if (SDL_Surface* image = icon.empty() ? nullptr : SDL_LoadPNG(icon.string().c_str())) {
             SDL_SetWindowIcon(window, image);
             SDL_DestroySurface(image);
         }
 
-        // Decode embedded Vajra Asura key art
         int aw = 0, ah = 0, comp = 0;
         if (uint8_t* px = stbi_load_from_memory(k_launcher_art, (int)sizeof(k_launcher_art), &aw, &ah, &comp, 4)) {
             art_tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, aw, ah);
@@ -142,11 +140,11 @@ public:
         int pw = 0, ph = 0;
         SDL_GetCurrentRenderOutputSize(renderer, &pw, &ph);
         s = (float)pw / k_w;
-        bake(hero_title, black, 40);
+        bake(hero_title, black, 42);
         bake(play_font, black, 18);
         bake(heading, semibold, 15.5f);
         bake(body, regular, 14.f);
-        bake(small, semibold, 12.f);
+        bake(small, semibold, 12.5f);
         bake(micro, regular, 12.f);
         t0 = std::chrono::steady_clock::now();
         last_t = t0;
@@ -191,7 +189,7 @@ private:
         // 1. Volcanic obsidian -> crimson base canvas
         grad_rect({ 0, 0, k_w, k_h }, c_bg_top, c_bg_bot);
 
-        // 2. Full-bleed Vajra Asura artwork in upper half, smoothly fading into obsidian-crimson
+        // 2. Full-bleed Vajra Asura artwork in upper band fading cleanly into obsidian-crimson
         if (art_tex && art_w > 0 && art_h > 0) {
             const float target_h = 330.f;
             const float src_aspect = (float)art_w / (float)art_h;
@@ -199,27 +197,25 @@ private:
             SDL_FRect src{ 0, 0, (float)art_w, (float)art_h };
             if (src_aspect < dst_aspect) {
                 src.h = (float)art_w / dst_aspect;
-                src.y = ((float)art_h - src.h) * 0.22f; // frame Asura's six arms & fiery sky
+                src.y = ((float)art_h - src.h) * 0.22f;
             } else {
                 src.w = (float)art_h * dst_aspect;
                 src.x = ((float)art_w - src.w) * 0.5f;
             }
             const SDL_FRect dst{ 0, 0, k_w * s, target_h * s };
-            SDL_SetTextureAlphaMod(art_tex, 205);
+            SDL_SetTextureAlphaMod(art_tex, 212);
             SDL_RenderTexture(renderer, art_tex, &src, &dst);
 
-            // Cinematic dark vignette + smooth vertical melt into obsidian-crimson
-            grad_rect({ 0, 0, k_w, 95 }, { 10, 7, 8, 155 }, { 10, 7, 8, 15 });
-            grad_rect({ 0, 120, k_w, 212 }, { 13, 8, 9, 20 }, { 16, 8, 9, 255 });
-            // Left readability scrim behind VAJRA title
-            horiz_grad({ 0, 0, 440, k_hero_h + 40 }, { 10, 7, 8, 185 }, { 10, 7, 8, 0 });
+            grad_rect({ 0, 0, k_w, 90 }, { 10, 7, 8, 150 }, { 10, 7, 8, 10 });
+            grad_rect({ 0, 120, k_w, 212 }, { 13, 8, 9, 18 }, { 16, 8, 9, 255 });
+            horiz_grad({ 0, 0, 460, k_hero_h + 36 }, { 10, 7, 8, 195 }, { 10, 7, 8, 0 });
         }
 
-        // 3. Bottom molten Mantra furnace glow & subtle rotating mandala accent
-        radial_glow(k_w * 0.5f, k_h * 1.06f, k_w * 0.70f, k_h * 0.50f, { 172, 42, 18, 68 });
-        draw_mandala(k_w - 86.f, 76.f, 72.f, t * 0.09f);
+        // 3. Molten Mantra furnace glow & subtle rotating mandala
+        radial_glow(k_w * 0.5f, k_h * 1.06f, k_w * 0.72f, k_h * 0.50f, { 176, 44, 18, 68 });
+        draw_mandala(k_w - 86.f, 78.f, 74.f, t * 0.08f);
 
-        // 4. Drifting golden-crimson Mantra embers
+        // 4. Drifting golden-crimson embers
         for (ember& em : embers) {
             em.y -= em.vy * dt;
             if (em.y < -10.f) {
@@ -232,56 +228,42 @@ private:
             if (a > 3) {
                 round_rect({ ex - em.size * 1.6f, em.y - em.size * 1.6f, em.size * 3.2f, em.size * 3.2f }, em.size * 1.6f,
                            { 235, 110, 32, (uint8_t)(a / 3) });
-                round_rect({ ex - em.size * 0.5f, em.y - em.size * 0.5f, em.size, em.size }, em.size * 0.5f, { 255, 212, 122, a });
+                round_rect({ ex - em.size * 0.5f, em.y - em.size * 0.5f, em.size, em.size }, em.size * 0.5f, { 255, 214, 126, a });
             }
         }
 
         layout();
 
-        // 5. Clean Hero Title & Status Pill
-        text_shadow(hero_title, "VAJRA", k_pad, 44.f, c_gold_bright);
-        text_shadow(small, "ASURA'S WRATH  \xC2\xB7  PC PORT", k_pad + 2.f, 92.f, c_text);
+        // 5. Crisp Hero Title (tracked VAJRA logo + subtle subtitle)
+        text_shadow(hero_title, "VAJRA", k_pad, 40.f, c_gold_bright, 4.0f);
+        text_shadow(small, "ASURA'S WRATH", k_pad + 2.f, 90.f, c_gold, 2.6f);
+        text_shadow(body, "Drop ISO, game folder, 1.02 .pkg, or DLC files anywhere", k_pad, k_hero_h - 32.f, c_sub, 0.f);
 
-        int done_n = 0;
-        for (const item_status* st : { &check.game, &check.update, &check.dlc, &check.firmware })
-            if (st->state == item_state::ok) done_n++;
-        const bool all_ok = check.ready();
-        const std::string badge_txt = all_ok ? "READY" : (std::to_string(done_n) + " / 4 READY");
-        const float bw = measure(small, badge_txt) + 28.f;
-        const SDL_FRect br{ k_w - k_pad - bw, 52.f, bw, 28.f };
-        round_rect(br, 14, all_ok ? rgba{ 56, 120, 68, 220 } : rgba{ 112, 78, 38, 210 });
-        round_rect({ br.x + 1, br.y + 1, br.w - 2, br.h - 2 }, 13, all_ok ? rgba{ 18, 40, 22, 230 } : rgba{ 28, 18, 14, 230 });
-        text(small, badge_txt, br.x + 14.f, br.y + 7.f, all_ok ? c_ok : c_gold);
-
-        // Quick-add row cleanly anchored at bottom of hero band
-        text_shadow(body, "Drop your ISO, game folder, update .pkg, or DLC files anywhere", k_pad, k_hero_h - 32.f, c_sub);
-
-        // Engraved gold accent line separating hero art from setup panel
         draw_gold_divider(k_pad, k_hero_h + 2.f, k_w - 2 * k_pad);
 
         // 6. Unified frosted volcanic-obsidian checklist panel
         const float panel_h = 5.f * k_row_h + 12.f;
         const SDL_FRect pr{ k_pad, k_panel_y, k_w - 2 * k_pad, panel_h };
-        round_rect(pr, 12, c_panel_border);
-        round_rect_grad({ pr.x + 1, pr.y + 1, pr.w - 2, pr.h - 2 }, 11, c_panel_top, c_panel_bot);
+        chamfer_rect(pr, 8.f, c_panel_border);
+        chamfer_rect_grad({ pr.x + 1, pr.y + 1, pr.w - 2, pr.h - 2 }, 7.f, c_panel_top, c_panel_bot);
 
         const char* names[] = { "Game", "Update 1.02", "DLC", "Licences", "Firmware" };
         const char* hints[] = {
-            "Drop BLES01227 disc folder or decrypted ISO",
+            "Drop BLES01227 folder or decrypted ISO",
             "Drop official 1.02 update .pkg",
-            "Optional \xE2\x80\x93 drop DLC .pkg packages",
-            "Optional \xE2\x80\x93 drop matching .rap files for DLC",
-            "Click Download to install Sony audio codecs automatically",
+            "Optional \xE2\x80\x93 drop DLC .pkg files",
+            "Optional \xE2\x80\x93 drop .rap files for DLC",
+            "Install required audio codecs automatically",
         };
         const item_status* items[] = { &check.game, &check.update, &check.dlc, &check.licences, &check.firmware };
         for (int i = 0; i < 5; i++) draw_row(i, names[i], hints[i], *items[i]);
 
-        // 7. Action buttons + Hero PLAY bar
+        // 7. Mantra-beveled buttons + Hero PLAY blade
         for (size_t i = 0; i < buttons.size(); i++) draw_button(buttons[i], (int)i == focus, t);
 
         // 8. Minimal footer
         const std::string foot = "Drag & drop files  \xC2\xB7  Keyboard / Gamepad supported  \xC2\xB7  Esc to quit";
-        text(micro, foot, (k_w - measure(micro, foot)) * 0.5f, k_h - 21.f, c_dim);
+        text(micro, foot, (k_w - measure(micro, foot)) * 0.5f, k_h - 21.f, c_dim, 0.f);
 
         SDL_RenderPresent(renderer);
     }
@@ -310,14 +292,19 @@ private:
         f.tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, f.aw, f.ah);
         SDL_UpdateTexture(f.tex, nullptr, px.data(), f.aw * 4);
         SDL_SetTextureBlendMode(f.tex, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(f.tex, SDL_SCALEMODE_NEAREST);
     }
 
-    float measure(const face& f, const std::string& str) const
+    float measure(const face& f, const std::string& str, float track = 0.f) const
     {
         float x = 0, y = 0;
+        int n = 0;
         stbtt_aligned_quad q;
-        for (size_t i = 0; i < str.size();) stbtt_GetPackedQuad(f.chars.data(), f.aw, f.ah, glyph_index(next_cp(str, i)), &x, &y, &q, 0);
-        return x / s;
+        for (size_t i = 0; i < str.size(); n++) {
+            stbtt_GetPackedQuad(f.chars.data(), f.aw, f.ah, glyph_index(next_cp(str, i)), &x, &y, &q, 1);
+            x += track * s;
+        }
+        return std::max(0.f, (x - (n > 0 ? track * s : 0.f)) / s);
     }
 
     std::string fit(const face& f, const std::string& str, float width) const
@@ -333,24 +320,25 @@ private:
         return "\xE2\x80\xA6";
     }
 
-    void text(const face& f, const std::string& str, float x, float y, rgba c)
+    void text(const face& f, const std::string& str, float x, float y, rgba c, float track = 0.f)
     {
         SDL_SetTextureColorMod(f.tex, c.r, c.g, c.b);
         SDL_SetTextureAlphaMod(f.tex, c.a);
         float px = std::round(x * s), py = std::round(y * s + f.ascent);
         stbtt_aligned_quad q;
         for (size_t i = 0; i < str.size();) {
-            stbtt_GetPackedQuad(f.chars.data(), f.aw, f.ah, glyph_index(next_cp(str, i)), &px, &py, &q, 0);
+            stbtt_GetPackedQuad(f.chars.data(), f.aw, f.ah, glyph_index(next_cp(str, i)), &px, &py, &q, 1);
             const SDL_FRect src{ q.s0 * f.aw, q.t0 * f.ah, (q.s1 - q.s0) * f.aw, (q.t1 - q.t0) * f.ah };
-            const SDL_FRect dst{ q.x0, q.y0, q.x1 - q.x0, q.y1 - q.y0 };
+            const SDL_FRect dst{ std::round(q.x0), std::round(q.y0), std::round(q.x1 - q.x0), std::round(q.y1 - q.y0) };
             SDL_RenderTexture(renderer, f.tex, &src, &dst);
+            px += track * s;
         }
     }
 
-    void text_shadow(const face& f, const std::string& str, float x, float y, rgba c)
+    void text_shadow(const face& f, const std::string& str, float x, float y, rgba c, float track = 0.f)
     {
-        text(f, str, x + 1.f, y + 1.5f, { 0, 0, 0, (uint8_t)(c.a * 0.75f) });
-        text(f, str, x, y, c);
+        text(f, str, x + 1.f, y + 1.5f, { 0, 0, 0, (uint8_t)(c.a * 0.80f) }, track);
+        text(f, str, x, y, c, track);
     }
 
     static SDL_FColor fcol(rgba c) { return { c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f }; }
@@ -405,8 +393,8 @@ private:
     void draw_mandala(float cx, float cy, float radius, float angle)
     {
         constexpr int spokes = 12;
-        const rgba ring_col{ 240, 194, 102, 26 };
-        const rgba spoke_col{ 240, 194, 102, 18 };
+        const rgba ring_col{ 242, 196, 104, 28 };
+        const rgba spoke_col{ 242, 196, 104, 18 };
         for (int r_idx = 0; r_idx < 2; r_idx++) {
             const float rad = r_idx == 0 ? radius : radius * 0.62f;
             constexpr int n = 36;
@@ -423,11 +411,21 @@ private:
         }
     }
 
+    void draw_diamond(float cx, float cy, float r, rgba c)
+    {
+        const float rs = r * s, x = cx * s, y = cy * s;
+        const SDL_FColor col = fcol(c);
+        const SDL_Vertex v[4] = { { { x, y - rs }, col, {} }, { { x + rs, y }, col, {} },
+                                  { { x, y + rs }, col, {} }, { { x - rs, y }, col, {} } };
+        const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+        SDL_RenderGeometry(renderer, nullptr, v, 4, idx, 6);
+    }
+
     void draw_gold_divider(float x, float y, float w)
     {
         const float mid = x + w * 0.5f;
         const SDL_FColor dim{ 214 / 255.f, 168 / 255.f, 82 / 255.f, 0.f };
-        const SDL_FColor hi{ 240 / 255.f, 194 / 255.f, 102 / 255.f, 0.75f };
+        const SDL_FColor hi{ 242 / 255.f, 196 / 255.f, 104 / 255.f, 0.78f };
         const float y0 = y * s, y1 = (y + 1.5f) * s;
         const SDL_Vertex vl[4] = { { { x * s, y0 }, dim, {} }, { { mid * s, y0 }, hi, {} },
                                    { { mid * s, y1 }, hi, {} }, { { x * s, y1 }, dim, {} } };
@@ -436,12 +434,42 @@ private:
         const int idx[6] = { 0, 1, 2, 0, 2, 3 };
         SDL_RenderGeometry(renderer, nullptr, vl, 4, idx, 6);
         SDL_RenderGeometry(renderer, nullptr, vr, 4, idx, 6);
-        const float d = 4.2f * s, ym = (y + 0.75f) * s;
-        const SDL_FColor jewel = fcol(c_gold_bright);
-        const SDL_Vertex dm[4] = { { { mid * s, ym - d }, jewel, {} }, { { mid * s + d, ym }, jewel, {} },
-                                   { { mid * s, ym + d }, jewel, {} }, { { mid * s - d, ym }, jewel, {} } };
-        SDL_RenderGeometry(renderer, nullptr, dm, 4, idx, 6);
+        draw_diamond(mid, y + 0.75f, 4.2f, c_gold_bright);
     }
+
+    // Chamfered 8-point Mantra plate (45-degree beveled corners, Asura's Wrath HUD style)
+    void chamfer_rect_grad(SDL_FRect r, float cut, rgba top, rgba bot)
+    {
+        r = { r.x * s, r.y * s, r.w * s, r.h * s };
+        const float c = std::min(cut * s, std::min(r.w, r.h) * 0.45f);
+        auto sample = [&](float py) -> SDL_FColor {
+            const float t = r.h > 0 ? std::clamp((py - r.y) / r.h, 0.f, 1.f) : 0.f;
+            return {
+                (top.r + (bot.r - top.r) * t) / 255.f,
+                (top.g + (bot.g - top.g) * t) / 255.f,
+                (top.b + (bot.b - top.b) * t) / 255.f,
+                (top.a + (bot.a - top.a) * t) / 255.f,
+            };
+        };
+        const float pts[8][2] = {
+            { r.x + c, r.y },         { r.x + r.w - c, r.y },
+            { r.x + r.w, r.y + c },   { r.x + r.w, r.y + r.h - c },
+            { r.x + r.w - c, r.y + r.h }, { r.x + c, r.y + r.h },
+            { r.x, r.y + r.h - c },   { r.x, r.y + c },
+        };
+        std::array<SDL_Vertex, 9> v;
+        v[0] = { { r.x + r.w * 0.5f, r.y + r.h * 0.5f }, sample(r.y + r.h * 0.5f), {} };
+        for (int i = 0; i < 8; i++) v[(size_t)i + 1] = { { pts[i][0], pts[i][1] }, sample(pts[i][1]), {} };
+        std::array<int, 24> idx;
+        for (int i = 0; i < 8; i++) {
+            idx[(size_t)i * 3] = 0;
+            idx[(size_t)i * 3 + 1] = i + 1;
+            idx[(size_t)i * 3 + 2] = (i + 1) % 8 + 1;
+        }
+        SDL_RenderGeometry(renderer, nullptr, v.data(), (int)v.size(), idx.data(), (int)idx.size());
+    }
+
+    void chamfer_rect(SDL_FRect r, float cut, rgba c) { chamfer_rect_grad(r, cut, c, c); }
 
     void round_rect_grad(SDL_FRect r, float radius, rgba top, rgba bot)
     {
@@ -494,7 +522,7 @@ private:
     void status_icon(float cx, float cy, item_state st)
     {
         const rgba c = st == item_state::ok ? c_ok : st == item_state::warn ? c_warn : st == item_state::bad ? c_bad : c_missing;
-        round_rect({ cx - 14, cy - 14, 28, 28 }, 14, { c.r, c.g, c.b, 34 });
+        round_rect({ cx - 14, cy - 14, 28, 28 }, 14, { c.r, c.g, c.b, 32 });
         round_rect({ cx - 10, cy - 10, 20, 20 }, 10, c);
         if (st == item_state::ok) {
             line(cx - 4.6f, cy + 0.4f, cx - 1.0f, cy + 3.8f, 2.3f, c_bg_top);
@@ -517,15 +545,14 @@ private:
         buttons.clear();
         const bool busy = job.phase == 1 || job.phase == 2;
 
-        // Clean Add Files / Add Folder buttons right-aligned on the hero bottom bar
-        const float bw_folder = 112.f, bw_files = 104.f;
+        const float bw_folder = 114.f, bw_files = 104.f;
         const float by = k_hero_h - 42.f;
-        buttons.push_back({ { k_w - k_pad - bw_folder - 8.f - bw_files, by, bw_files, 32.f }, "Add Files", a_files, !busy, false, true });
+        buttons.push_back({ { k_w - k_pad - bw_folder - 10.f - bw_files, by, bw_files, 32.f }, "Add Files", a_files, !busy, false, true });
         buttons.push_back({ { k_w - k_pad - bw_folder, by, bw_folder, 32.f }, "Add Folder", a_folder, !busy, false, true });
 
         auto add_row_btn = [&](int row, const char* label, action act, bool gold) {
             const SDL_FRect r = row_rect(row);
-            const float w = std::max(90.f, measure(small, label) + 28.f);
+            const float w = std::max(94.f, measure(small, label, 0.8f) + 32.f);
             buttons.push_back({ { r.x + r.w - 14.f - w, r.y + (r.h - 30.f) * 0.5f, w, 30.f }, label, act, !busy, false, gold });
         };
 
@@ -545,9 +572,8 @@ private:
     {
         const SDL_FRect r = row_rect(i);
         if (hit(r, mouse_x, mouse_y))
-            round_rect({ r.x + 2, r.y + 3, r.w - 4, r.h - 6 }, 8, c_row_hover);
+            chamfer_rect({ r.x + 2, r.y + 3, r.w - 4, r.h - 6 }, 5.f, c_row_hover);
 
-        // Hairline gold divider between rows
         if (i > 0)
             round_rect({ r.x + 14.f, r.y, r.w - 28.f, 1.f }, 0, c_divider);
 
@@ -578,36 +604,58 @@ private:
     {
         const bool hot = b.enabled && hit(b.r, mouse_x, mouse_y);
         const bool down = hot && pressed;
+        const float cut = b.accent ? 11.f : 6.f;
 
+        // Soft volcanic glow under active PLAY blade or hovered secondary plate
         if (b.accent && b.enabled) {
             const float pulse = 0.5f + 0.5f * std::sin(t * 2.6f);
-            round_rect({ b.r.x - 4, b.r.y - 4, b.r.w + 8, b.r.h + 8 }, 13, { 226, 68, 28, (uint8_t)(38 + pulse * 46) });
-        }
-        if (focused && b.enabled) {
-            round_rect({ b.r.x - 2.5f, b.r.y - 2.5f, b.r.w + 5, b.r.h + 5 }, 11, c_gold);
-        } else if (b.gold_outline && b.enabled) {
-            round_rect({ b.r.x - 1, b.r.y - 1, b.r.w + 2, b.r.h + 2 }, 9, hot ? c_gold : c_gold_dim);
-        } else if (b.accent && b.enabled) {
-            round_rect({ b.r.x - 1, b.r.y - 1, b.r.w + 2, b.r.h + 2 }, 10, { 246, 184, 92, 190 });
+            chamfer_rect({ b.r.x - 4, b.r.y - 3, b.r.w + 8, b.r.h + 6 }, cut + 2.f, { 232, 74, 28, (uint8_t)(42 + pulse * 48) });
+        } else if (hot) {
+            chamfer_rect({ b.r.x - 2, b.r.y - 2, b.r.w + 4, b.r.h + 4 }, cut + 1.f, { 240, 186, 86, 42 });
         }
 
+        // Outer metallic Mantra border
+        rgba border{ 92, 66, 46, 170 };
+        if (!b.enabled) border = { 52, 40, 38, 120 };
+        else if (focused) border = c_gold_bright;
+        else if (b.accent) border = hot ? c_gold_bright : c_gold;
+        else if (hot) border = c_gold;
+        else if (b.gold_outline) border = { 176, 132, 64, 220 };
+        chamfer_rect({ b.r.x - 1, b.r.y - 1, b.r.w + 2, b.r.h + 2 }, cut + 0.5f, border);
+
+        // Plate fill
         if (!b.enabled) {
-            round_rect(b.r, b.accent ? 9.f : 8.f, c_disabled);
+            chamfer_rect(b.r, cut, c_disabled);
         } else if (b.accent) {
-            if (down) round_rect(b.r, 9, c_crimson_down);
-            else round_rect_grad(b.r, 9, hot ? c_crimson_hot_top : c_crimson_top, hot ? c_crimson_hot_bot : c_crimson_bot);
+            if (down) chamfer_rect(b.r, cut, c_crimson_down);
+            else chamfer_rect_grad(b.r, cut, hot ? c_crimson_hot_top : c_crimson_top, hot ? c_crimson_hot_bot : c_crimson_bot);
         } else {
-            if (down) round_rect(b.r, 8, c_btn_down);
-            else round_rect_grad(b.r, 8, hot ? c_btn_hot_top : c_btn_top, hot ? c_btn_hot_bot : c_btn_bot);
+            if (down) chamfer_rect(b.r, cut, c_plate_down);
+            else chamfer_rect_grad(b.r, cut, hot ? c_plate_hot_top : c_plate_top, hot ? c_plate_hot_bot : c_plate_bot);
+        }
+
+        // Top inner specular sheen line (gives machined-metal Mantra plate depth)
+        if (b.enabled && !down) {
+            const rgba sheen = b.accent ? rgba{ 255, 224, 160, 72 } : rgba{ 255, 214, 138, (uint8_t)(hot ? 58 : 30) };
+            round_rect({ b.r.x + cut + 2.f, b.r.y + 1.f, b.r.w - (cut + 2.f) * 2.f, 1.f }, 0, sheen);
+        }
+
+        // Engraved Mantra diamond accents flanking the PLAY blade
+        if (b.accent && b.enabled) {
+            const float cy = b.r.y + b.r.h * 0.5f;
+            const rgba gem = hot ? c_gold_bright : c_gold;
+            draw_diamond(b.r.x + 26.f, cy, 4.0f, gem);
+            draw_diamond(b.r.x + b.r.w - 26.f, cy, 4.0f, gem);
         }
 
         const face& f = b.accent ? (b.enabled ? play_font : small) : small;
-        const float tw = measure(f, b.label);
-        const rgba tc = b.enabled ? (b.accent ? c_gold_bright : c_text) : c_dim;
+        const float track = b.accent ? (b.enabled ? 4.5f : 1.5f) : 0.8f;
+        const float tw = measure(f, b.label, track);
+        const rgba tc = b.enabled ? (b.accent ? c_gold_bright : (hot ? c_gold_bright : c_text)) : c_dim;
         const float tx = b.r.x + (b.r.w - tw) * 0.5f;
         const float ty = b.r.y + (b.r.h - f.size / s) * 0.5f - 1.f;
-        if (b.accent && b.enabled) text_shadow(f, b.label, tx, ty, tc);
-        else text(f, b.label, tx, ty, tc);
+        if (b.accent && b.enabled) text_shadow(f, b.label, tx, ty, tc, track);
+        else text(f, b.label, tx, ty, tc, track);
     }
 
     static bool hit(const SDL_FRect& r, float x, float y) { return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h; }
