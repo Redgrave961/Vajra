@@ -184,8 +184,8 @@ struct painter {
 
     void cluster(const prompt_glyph& g, float x, float y, float s)
     {
-        const float kw = 0.285f * s, kh = 0.34f * s;
-        const float step_x = kw + 0.04f * s, step_y = kh + 0.055f * s;
+        const float kw = 0.25f * s, kh = 0.31f * s;
+        const float step_x = kw + 0.035f * s, step_y = kh + 0.05f * s;
         const float dx[4] = { 0, -step_x, 0, step_x }, dy[4] = { -step_y / 2, step_y / 2, step_y / 2, step_y / 2 };
         if (kw < 15) {
             const float h = 0.94f * s, letter = 0.26f * s, spread = 0.26f * s;

@@ -116,7 +116,7 @@ const atlas k_atlases[] = {
     { 0x3582050752B6F32Bull, 128, 64, 64, 32, k_plate_cells, std::size(k_plate_cells), false, true },
 };
 
-constexpr prompt_frame q_tilt{ 64, 60, 66, 104, 70 }, q_tilt_down{ 64, 64, 66, 104, 70 }, q_flat{ 64, 64, 62, 100, 62 }, q_stick{ 64, 64, 94, 94, 94 },
+constexpr prompt_frame q_tilt{ 64, 60, 66, 104, 70 }, q_tilt_down{ 64, 64, 66, 104, 70 }, q_flat{ 64, 64, 62, 100, 62 }, q_stick{ 64, 64, 90, 90, 90 },
     q_wide{ 63.5f, 61.5f, 62, 100, 36 }, q_square{ 63.5f, 60.5f, 56, 100, 56 }, q_big{ 63.5f, 61.5f, 96, 104, 96 }, q_label{ 64, 65, 0, 100, 34 };
 
 const qte k_qtes[] = {
