@@ -2,9 +2,12 @@
 #include "game_files.h"
 #include "guest.h"
 #include "pc_options.h"
+#include "rl_achievements.h"
 #include "rsx_core.h"
 #include "vk/rsx_vk.h"
 #include "vm_track.h"
+#include "../ps3recomp/libs/network/sceNpTrophy.h"
+#include "../ps3recomp/libs/system/cellSaveData.h"
 
 #include <atomic>
 #include <cstdint>
@@ -413,6 +416,8 @@ void default_env(const char* name, const std::filesystem::path& value)
 
 void attach_log(const std::filesystem::path& exe)
 {
+    const char* log_env = std::getenv("VAJRA_LOG");
+    if (!log_env || !*log_env || !std::strcmp(log_env, "0")) return;
     const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
     if (err && err != INVALID_HANDLE_VALUE) return;
     const std::string log = (exe / "asura.log").string();
@@ -437,6 +442,8 @@ void default_env(const char* name, const std::filesystem::path& value) { setenv(
 
 void attach_log(const std::filesystem::path& exe)
 {
+    const char* log_env = std::getenv("VAJRA_LOG");
+    if (!log_env || !*log_env || !std::strcmp(log_env, "0")) return;
     struct stat st;
     if (isatty(STDERR_FILENO) || (!fstat(STDERR_FILENO, &st) && (S_ISREG(st.st_mode) || S_ISFIFO(st.st_mode)))) return;
     const std::string log = (exe / "asura.log").string();
@@ -478,6 +485,27 @@ bool skipped_intro(uint32_t name)
         if (!intro[i] && !vm_read16(name + 2 * i)) return true;
     }
     return false;
+}
+
+void on_trophy_register(int id, const char* name, const char* detail, char grade, int unlocked)
+{
+    const uint32_t pts = grade == 'P' ? 180u : grade == 'G' ? 90u : grade == 'S' ? 30u : 15u;
+    rl_ach_native_define((uint32_t)id, name, detail, pts);
+    if (unlocked) rl_ach_native_earlier((uint32_t)id);
+}
+
+void on_trophy_unlock(int id) { rl_ach_native((uint32_t)id); }
+int is_trophy_quiet(void) { return rl_ach_quiet_toasts(); }
+void on_trophy_frame(void) { rl_ach_frame(); }
+void on_save_loaded(void) { rl_ach_save_loaded(); }
+
+void init_recomp_achievements()
+{
+    rl_ach_set_info("vajra", "1.0.0");
+    if (rl_ach_init("ps3", nullptr, nullptr)) {
+        ps3_trophy_set_callbacks(on_trophy_register, on_trophy_unlock, is_trophy_quiet, on_trophy_frame);
+        cellSaveData_set_load_callback(on_save_loaded);
+    }
 }
 
 void use_game_files(const game_files& files)
@@ -591,6 +619,8 @@ int main(int argc, char** argv)
 
     if (const char* dbg = std::getenv("PS3_DEBUG"); dbg && *dbg) std::thread(debug_console, dbg).detach();
 
+    init_recomp_achievements();
     ppu_run(entry, k_stack_top);
+    rl_ach_shutdown();
     return g_sys_process_exit_called ? (int)g_sys_process_exit_code : 0;
 }

@@ -107,6 +107,7 @@ set(PS3RECOMP_SPU_GUEST_REGIONS ON)
 set(PS3RECOMP_SPU_MERGE_CHUNKS ON)
 
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk" EXCLUDE_FROM_ALL)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/rl_achievements" "${CMAKE_BINARY_DIR}/rl_achievements" EXCLUDE_FROM_ALL)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(HLE_NID_TABLE "${CMAKE_CURRENT_BINARY_DIR}/ppu_hle_nids.cpp")
@@ -221,7 +222,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${PS3RECOMP_DIR}/libs/video")
 
 find_package(SDL3 CONFIG REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime SDL3::SDL3)
+target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime rl_achievements SDL3::SDL3)
 set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX WIN32_EXECUTABLE TRUE OUTPUT_NAME Vajra)
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE dbghelp winmm)

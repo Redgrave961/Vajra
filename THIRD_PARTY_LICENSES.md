@@ -8,3 +8,4 @@ Vajra builds upon and links against the following open-source projects:
 - **[volk](https://github.com/zeux/volk)** — MIT License
 - **[Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers)** — Apache-2.0 / MIT License
 - **[stb (`stb_image`, `stb_truetype`)](https://github.com/nothings/stb)** — MIT License / Public Domain
+- **[RecompAchievements](https://github.com/elripalda/RecompAchievements)** — Recomp Achievements License 1.0 (includes **rcheevos** and **cJSON**, MIT License)

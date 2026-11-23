@@ -21,7 +21,7 @@
 - **High-Resolution Rendering:** Scale past the original 720p up to 1080p, 1440p, 4K, and beyond, with properly scaled effects, shadows, bloom, and depth of field.
 - **In-Game PC Options Menu:** Adjust resolution, display mode (Windowed, Borderless, Exclusive Fullscreen), frame rate cap, controller prompt style, keybindings, and mouse settings right inside the game's native menu.
 - **Full Keyboard & Mouse + Controller Support:** Seamless hot-switching between Keyboard & Mouse, PlayStation, Xbox, and Nintendo button prompts, full custom keybinds, mouse sensitivity/invert controls, and tailored KBM QTE prompts.
-- **Trophies:** Full local trophy support with in-game icons and PS3-style unlock notifications.
+- **Trophies & Recomp Achievements:** Full local PS3 trophy support with in-game icons and PS3-style unlock notifications, plus native [Recomp Achievements](https://github.com/elripalda/RecompAchievements) integration when launched through RecompLauncher.
 - **One-Click Setup & RecompLauncher Support:** Reads your `BLES01227` disc folder or decrypted ISO and optional DLC `.pkg`/`.rap` files directly, downloads the official `1.02` update and PS3 audio codecs from Sony automatically, and decrypts `EBOOT.BIN` on first launch (no RPCS3 required). Ships with `recomplauncher.json` for Easy Setup, launcher settings, and save backups.
 - **Windows & Linux:** Runs natively on Windows (`Vajra.exe`) and Linux (`Vajra-x86_64.AppImage`, Wayland & X11, including SteamOS / Steam Deck).
 
@@ -33,7 +33,7 @@
 
 ### Command-Line Options
 
-When running standalone, Vajra stores saves, settings (`asura_settings.ini`), logs (`asura.log`), and caches (`cache/`) next to the executable. You can also pass optional flags (used by RecompLauncher and custom shortcuts):
+When running standalone, Vajra stores saves, settings (`asura_settings.ini`), and caches (`cache/`) next to the executable (set `VAJRA_LOG=1` to write `asura.log`). You can also pass optional flags (used by RecompLauncher and custom shortcuts):
 
 - `--data <path>` (or `RECOMPLAUNCHER_DATA`): store all writable data (saves, settings, logs, caches, user files) in `<path>`.
 - `--game <path>`: path to your `BLES01227` disc folder or decrypted `.iso`.
