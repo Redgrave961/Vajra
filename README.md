@@ -8,34 +8,46 @@
 </h1>
 
 <p align="center">
-  <strong>Native PC Recompilation of <em>Asura's Wrath</em> (PS3 — BLES01227, v1.02)</strong><br/>
-  Windows &amp; Linux · Vulkan · High FPS · 4K+ · KBM &amp; Controller · Native Trophies
+  <strong>An unofficial native PC port of <em>Asura's Wrath</em> (PS3)</strong><br/>
+  Windows &amp; Linux · Vulkan
 </p>
 
 ---
 
-> **Legal Notice:** Vajra contains **no** copyrighted game code or assets. You must provide your own legally owned copy of *Asura's Wrath* (`BLES01227`, update `1.02`) and PS3 firmware (`dev_flash`).
+**Vajra** is a static recompilation of the PlayStation 3 version of *Asura's Wrath* (`BLES01227`, update `1.02`) to native x86-64 PC, powered by [ps3recomp](https://github.com/sp00nznet/ps3recomp). It brings the full game to Windows and Linux with native performance, modern display support, full keyboard & mouse controls, and quality-of-life enhancements — all configurable directly from the in-game options menu.
 
 ## Features
 
-- **High FPS & Uncapped** — Display-matched frame rate caps (plus Uncapped) via the in-game PC Options menu.
-- **4K+ Resolution Scaling** — Full high-res rendering, shadows, and UI with properly scaled bloom and depth-of-field; Windowed, Borderless, and Exclusive Fullscreen modes.
-- **Full Keyboard & Mouse + Controller Support** — Hot-switching PlayStation, Xbox, Nintendo, and KBM prompts, custom keybinds, mouse sensitivity/invert, and dedicated KBM QTE prompts.
-- **Native PS3-Style Trophies** — Persistent local unlocks, working in-game trophy icons, and a PS3 XMB-style unlock popup with icon, grade badge, and chime.
-- **Windows & Linux** — Native `AsurasWrath.exe` on Windows and portable `AsurasWrath-x86_64.AppImage` on Linux (Wayland & X11, including SteamOS / Steam Deck).
+- **High Framerate Support** — Play beyond the original 30 FPS cap with smooth, display-matched frame rate limits or completely uncapped framerates.
+- **High-Resolution Rendering** — Scale past the original 720p up to 1080p, 1440p, 4K, and beyond, with properly scaled effects, shadows, bloom, and depth of field.
+- **In-Game PC Options Menu** — Adjust resolution, display mode (Windowed, Borderless, Exclusive Fullscreen), frame rate cap, controller prompt style, keybindings, and mouse settings right inside the game's native menu.
+- **Full Keyboard & Mouse + Controller Support** — Seamless hot-switching between Keyboard & Mouse, PlayStation, Xbox, and Nintendo button prompts, full custom keybinds, mouse sensitivity/invert controls, and tailored KBM QTE prompts.
+- **Trophies** — Full local trophy support with in-game icons and PS3-style unlock notifications.
+- **Windows & Linux** — Runs natively on Windows and Linux (portable AppImage supporting Wayland and X11, including SteamOS / Steam Deck).
 
-## Quick Start
+## Requirements
 
-1. Place your dumped `BLES01227` disc files in `data/dev_bdvd/`, update `1.02` in `data/dev_hdd0/game/BLES01227/`, and PS3 firmware in `data/dev_flash/`.
-2. Decrypt `EBOOT.BIN` with RPCS3 (`rpcs3 --decrypt data/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN`).
-3. Lift and build:
-   - **Lift:** `python port/lift.py` and `python port/lift_firmware.py`
+- A legally dumped copy of *Asura's Wrath* for PlayStation 3 (`BLES01227`) and official update `1.02`
+- PS3 firmware (`dev_flash`) and [RPCS3](https://rpcs3.net/) to decrypt `EBOOT.BIN`
+- A Vulkan-capable GPU on Windows or Linux (x86-64)
+
+## Setup & Building
+
+1. Place your dumped disc files in `data/dev_bdvd/`, update `1.02` in `data/dev_hdd0/game/BLES01227/`, and PS3 firmware in `data/dev_flash/`.
+2. Decrypt `EBOOT.BIN` with RPCS3:
+   ```bash
+   rpcs3 --decrypt data/dev_bdvd/PS3_GAME/USRDIR/EBOOT.BIN
+   ```
+3. Lift the game and firmware modules:
+   ```bash
+   python port/lift.py
+   python port/lift_firmware.py
+   ```
+4. Build:
    - **Windows:** `.\port\build.ps1` → `port\build\AsurasWrath.exe`
    - **Linux (from Windows):** `.\port\build.ps1 -Target linux` → `port\build-linux\AsurasWrath-x86_64.AppImage`
    - **Linux (native):** `./port/build.sh` → `port/build-linux/AsurasWrath-x86_64.AppImage`
 
----
+## Disclaimer
 
-<p align="center">
-  Built on <a href="https://github.com/sp00nznet/ps3recomp">ps3recomp</a> · Do not redistribute compiled binaries.
-</p>
+This project is **not** affiliated with or endorsed by Capcom or CyberConnect2. No copyrighted game code, binaries, or assets are included in this repository — you must provide your own legally obtained copy of the game, and compiled binaries must not be redistributed.
