@@ -51,3 +51,7 @@
 ## Disclaimer
 
 This project is **not** affiliated with or endorsed by Capcom or CyberConnect2. No copyrighted game code, binaries, or assets are included in this repository — you must provide your own legally obtained copy of the game, and compiled binaries must not be redistributed.
+
+## License
+
+Vajra is licensed under the [MIT License](LICENSE). See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for third-party component attributions.
