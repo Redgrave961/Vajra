@@ -34,7 +34,7 @@ constexpr rgba c_row_hover{ 46, 28, 25, 130 };
 constexpr rgba c_divider{ 218, 170, 82, 30 };
 
 constexpr rgba c_text{ 248, 242, 234 }, c_sub{ 184, 168, 156 }, c_dim{ 126, 112, 104 };
-constexpr rgba c_gold{ 242, 196, 104 }, c_gold_dim{ 158, 118, 56 }, c_gold_bright{ 255, 232, 168 };
+constexpr rgba c_gold{ 242, 196, 104 }, c_gold_bright{ 255, 232, 168 };
 
 constexpr rgba c_crimson_top{ 210, 42, 26 }, c_crimson_bot{ 132, 18, 16 };
 constexpr rgba c_crimson_hot_top{ 242, 68, 34 }, c_crimson_hot_bot{ 168, 26, 20 };
