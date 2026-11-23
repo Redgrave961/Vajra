@@ -3,6 +3,7 @@
 #include "firmware.h"
 #include "font.h"
 #include "launcher_art.h"
+#include "raster.h"
 #include "../ps3recomp/libs/codec/stb_image.h"
 
 #include <SDL3/SDL.h>
@@ -14,40 +15,45 @@
 #include <cmath>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 namespace {
 
 constexpr float k_w = 940, k_h = 690, k_pad = 40;
-constexpr float k_hero_h = 188;
-constexpr float k_panel_y = 204, k_row_h = 74;
+constexpr float k_hero_h = 186;
+constexpr float k_panel_y = 202, k_row_h = 74;
 constexpr float k_pi = 3.14159265359f;
 
 struct rgba {
     uint8_t r, g, b, a = 255;
 };
 
-// Volcanic obsidian -> crimson palette with refined warm gold & ivory typography
+rgba lerp_c(rgba a, rgba b, float t)
+{
+    t = std::clamp(t, 0.f, 1.f);
+    return {
+        (uint8_t)std::lround(a.r + (b.r - a.r) * t),
+        (uint8_t)std::lround(a.g + (b.g - a.g) * t),
+        (uint8_t)std::lround(a.b + (b.b - a.b) * t),
+        (uint8_t)std::lround(a.a + (b.a - a.a) * t),
+    };
+}
+
+// Volcanic obsidian -> molten crimson palette
 constexpr rgba c_bg_top{ 10, 7, 8 }, c_bg_bot{ 26, 10, 10 };
-constexpr rgba c_panel_top{ 20, 15, 16, 232 }, c_panel_bot{ 15, 11, 12, 244 };
-constexpr rgba c_panel_border{ 120, 88, 62, 95 };
-constexpr rgba c_row_hover{ 48, 32, 30, 105 };
-constexpr rgba c_divider{ 220, 178, 118, 28 };
+constexpr rgba c_panel{ 19, 14, 15, 236 }, c_panel_border{ 138, 102, 72, 100 };
+constexpr rgba c_row_hover{ 52, 34, 32, 115 };
+constexpr rgba c_divider{ 222, 178, 118, 28 };
 
-constexpr rgba c_text{ 248, 244, 238 }, c_sub{ 202, 188, 178 }, c_dim{ 138, 124, 116 };
-constexpr rgba c_gold{ 242, 198, 110 }, c_gold_bright{ 255, 232, 174 };
+constexpr rgba c_text{ 249, 245, 239 }, c_sub{ 206, 192, 182 }, c_dim{ 140, 126, 118 };
+constexpr rgba c_gold{ 244, 200, 112 }, c_gold_bright{ 255, 234, 178 };
 
-constexpr rgba c_play_top{ 214, 50, 34 }, c_play_bot{ 156, 24, 20 };
-constexpr rgba c_play_hot_top{ 236, 68, 42 }, c_play_hot_bot{ 182, 32, 24 };
-constexpr rgba c_play_down{ 132, 20, 18 };
+constexpr rgba c_play_base{ 188, 36, 26 }, c_play_hot{ 228, 56, 36 }, c_play_down{ 138, 22, 18 };
+constexpr rgba c_btn_base{ 40, 31, 31, 224 }, c_btn_hot{ 66, 46, 42, 245 }, c_btn_down{ 28, 21, 21, 248 };
+constexpr rgba c_gold_base{ 66, 47, 25, 232 }, c_gold_hot{ 98, 68, 34, 248 };
+constexpr rgba c_disabled{ 33, 25, 25, 215 };
 
-constexpr rgba c_btn_fill{ 44, 34, 34, 218 }, c_btn_border{ 178, 146, 116, 85 };
-constexpr rgba c_btn_hot{ 68, 48, 44, 242 }, c_btn_hot_border{ 242, 198, 110, 195 };
-constexpr rgba c_btn_down{ 30, 22, 22, 245 };
-
-constexpr rgba c_gold_btn_fill{ 68, 48, 26, 230 }, c_gold_btn_hot{ 96, 66, 32, 245 };
-constexpr rgba c_disabled{ 34, 26, 26, 210 }, c_disabled_border{ 86, 68, 64, 70 };
-
-constexpr rgba c_ok{ 102, 212, 124 }, c_warn{ 245, 186, 74 }, c_bad{ 240, 96, 82 }, c_missing{ 136, 120, 112 };
+constexpr rgba c_ok{ 98, 214, 122 }, c_warn{ 246, 188, 76 }, c_bad{ 242, 96, 82 }, c_missing{ 138, 122, 114 };
 
 enum action { a_game_folder, a_game_iso, a_update_pkg, a_dlc_add, a_dlc_clear, a_rap_add, a_download, a_play };
 
@@ -78,6 +84,12 @@ struct button {
     btn_style style;
 };
 
+struct btn_anim {
+    float hover = 0.f;
+    float press = 0.f;
+    float sweep = -1.f;
+};
+
 struct ember {
     float x, y, vy, size, phase, speed, alpha;
 };
@@ -89,6 +101,14 @@ struct firmware_job {
     std::mutex lock;
     std::string error;
 };
+
+// Distance to line segment (for 4x4 supersampled SDF icons)
+float sd_seg(float px, float py, float ax, float ay, float bx, float by)
+{
+    const float pax = px - ax, pay = py - ay, bax = bx - ax, bay = by - ay;
+    const float h = std::clamp((pax * bax + pay * bay) / std::max(1e-6f, bax * bax + bay * bay), 0.f, 1.f);
+    return std::hypot(pax - bax * h, pay - bay * h);
+}
 
 class setup_ui {
 public:
@@ -105,10 +125,10 @@ public:
             em.x = rng() * k_w;
             em.y = rng() * k_h;
             em.vy = 13.f + rng() * 24.f;
-            em.size = 1.5f + rng() * 2.4f;
+            em.size = 1.6f + rng() * 2.4f;
             em.phase = rng() * k_pi * 2.f;
             em.speed = 0.7f + rng() * 1.2f;
-            em.alpha = 0.20f + rng() * 0.48f;
+            em.alpha = 0.22f + rng() * 0.48f;
         }
     }
 
@@ -122,6 +142,9 @@ public:
         renderer = window ? SDL_CreateRenderer(window, nullptr) : nullptr;
         if (!renderer) return false;
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+        cur_default = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_DEFAULT);
+        cur_pointer = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
 
         if (SDL_Surface* image = icon.empty() ? nullptr : SDL_LoadPNG(icon.string().c_str())) {
             SDL_SetWindowIcon(window, image);
@@ -145,12 +168,16 @@ public:
         int pw = 0, ph = 0;
         SDL_GetCurrentRenderOutputSize(renderer, &pw, &ph);
         s = (float)pw / k_w;
+
         bake(hero_title, black, 46);
         bake(hero_sub, semibold, 14.5f);
         bake(play_font, black, 20);
         bake(heading, semibold, 18);
         bake(body, regular, 15.5f);
         bake(btn_font, semibold, 15);
+
+        bake_aa_assets();
+
         t0 = std::chrono::steady_clock::now();
         last_t = t0;
         return true;
@@ -159,7 +186,13 @@ public:
     ~setup_ui()
     {
         if (job.worker.joinable()) job.worker.join();
+        if (cur_pointer) SDL_DestroyCursor(cur_pointer);
+        if (cur_default) SDL_DestroyCursor(cur_default);
         if (art_tex) SDL_DestroyTexture(art_tex);
+        for (SDL_Texture* t : { pill_fill, pill_border, pill_shadow, glow_dot })
+            if (t) SDL_DestroyTexture(t);
+        for (SDL_Texture* t : status_tex)
+            if (t) SDL_DestroyTexture(t);
         for (face* f : { &hero_title, &hero_sub, &play_font, &heading, &body, &btn_font })
             if (f->tex) SDL_DestroyTexture(f->tex);
         if (renderer) SDL_DestroyRenderer(renderer);
@@ -184,6 +217,156 @@ public:
     }
 
 private:
+    // Bake 4x4 supersampled SDF textures so EVERY rounded corner, border, shadow, glow & icon is razor-sharp!
+    void bake_aa_assets()
+    {
+        auto make_tex = [&](int w, int h, const std::vector<uint8_t>& px) -> SDL_Texture* {
+            SDL_Texture* tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, w, h);
+            if (tex) {
+                SDL_UpdateTexture(tex, nullptr, px.data(), w * 4);
+                SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+                SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+            }
+            return tex;
+        };
+
+        // 1. 9-slice anti-aliased rounded pill fill & 1px border (64x64 physical texels, corner = 20)
+        {
+            constexpr int sz = 64;
+            const float c = sz * 0.5f, r = 20.f, half = sz * 0.5f - 1.f;
+            std::vector<uint8_t> fill_px((size_t)sz * sz * 4, 255);
+            std::vector<uint8_t> border_px((size_t)sz * sz * 4, 255);
+            for (int y = 0; y < sz; y++) {
+                for (int x = 0; x < sz; x++) {
+                    const float a_in = area([&](float u, float v) { return sd_round_rect(u, v, c, c, half, half, r); }, x + 0.5f, y + 0.5f, 4);
+                    const float a_inner = area([&](float u, float v) { return sd_round_rect(u, v, c, c, half - 1.4f, half - 1.4f, r - 1.4f); },
+                                               x + 0.5f, y + 0.5f, 4);
+                    fill_px[((size_t)y * sz + x) * 4 + 3] = (uint8_t)std::lround(a_in * 255.f);
+                    border_px[((size_t)y * sz + x) * 4 + 3] = (uint8_t)std::lround(std::max(0.f, a_in - a_inner) * 255.f);
+                }
+            }
+            pill_fill = make_tex(sz, sz, fill_px);
+            pill_border = make_tex(sz, sz, border_px);
+
+            // Soft Gaussian shadow / glow 9-slice (80x80 with sigma=6 blur)
+            constexpr int ssz = 80;
+            const float sc = ssz * 0.5f;
+            grid m = mask(ssz, ssz, [&](float u, float v) { return area([&](float x, float y) { return sd_round_rect(x, y, sc, sc, 24.f, 24.f, 14.f); }, u, v, 2); });
+            grid soft = blur(m, 6.0f);
+            std::vector<uint8_t> sh_px((size_t)ssz * ssz * 4, 255);
+            for (int i = 0; i < ssz * ssz; i++) sh_px[(size_t)i * 4 + 3] = (uint8_t)std::lround(std::clamp(soft.v[i], 0.f, 1.f) * 255.f);
+            pill_shadow = make_tex(ssz, ssz, sh_px);
+        }
+
+        // 2. Smooth radial glow sprite (for embers & mouse-tracking button spotlight)
+        {
+            constexpr int sz = 64;
+            const float c = sz * 0.5f;
+            std::vector<uint8_t> px((size_t)sz * sz * 4, 255);
+            for (int y = 0; y < sz; y++)
+                for (int x = 0; x < sz; x++) {
+                    const float d = std::hypot(x + 0.5f - c, y + 0.5f - c) / c;
+                    const float a = std::clamp(1.f - d, 0.f, 1.f);
+                    px[((size_t)y * sz + x) * 4 + 3] = (uint8_t)std::lround(a * a * (3.f - 2.f * a) * 255.f);
+                }
+            glow_dot = make_tex(sz, sz, px);
+        }
+
+        // 3. 4x4 supersampled anti-aliased status icons (ok, warn, bad, missing) at exact physical pixel DPI!
+        {
+            const int sz = std::max(44, (int)std::lround(40.f * s));
+            const float c = sz * 0.5f;
+            const float rad = sz * 0.30f;
+            const rgba cols[4] = { c_ok, c_warn, c_bad, c_missing };
+            for (int st = 0; st < 4; st++) {
+                std::vector<uint8_t> px((size_t)sz * sz * 4, 0);
+                const rgba col = cols[st];
+                for (int y = 0; y < sz; y++) {
+                    for (int x = 0; x < sz; x++) {
+                        const float u = x + 0.5f, v = y + 0.5f;
+                        const float dist = std::hypot(u - c, v - c);
+                        // Soft outer halo
+                        const float halo = std::clamp(1.f - (dist - rad) / (sz * 0.20f), 0.f, 1.f);
+                        float ga = (dist > rad ? halo * halo * 0.24f : 0.f);
+                        // Crisp 4x4 AA circle disc
+                        const float disc = area([&](float px0, float py0) { return std::hypot(px0 - c, py0 - c) - rad; }, u, v, 4);
+                        // Crisp 4x4 AA inner glyph
+                        const float stroke = std::max(1.3f, sz * 0.038f);
+                        float glyph = 0.f;
+                        if (disc > 0.01f) {
+                            if (st == 0) { // Checkmark
+                                glyph = area([&](float px0, float py0) {
+                                    const float d1 = sd_seg(px0, py0, c - rad * 0.44f, c + rad * 0.04f, c - rad * 0.10f, c + rad * 0.38f);
+                                    const float d2 = sd_seg(px0, py0, c - rad * 0.10f, c + rad * 0.38f, c + rad * 0.48f, c - rad * 0.32f);
+                                    return std::min(d1, d2) - stroke;
+                                }, u, v, 4);
+                            } else if (st == 1) { // Exclamation
+                                glyph = area([&](float px0, float py0) {
+                                    const float d1 = sd_seg(px0, py0, c, c - rad * 0.46f, c, c + rad * 0.08f) - stroke;
+                                    const float d2 = std::hypot(px0 - c, py0 - (c + rad * 0.38f)) - stroke * 1.05f;
+                                    return std::min(d1, d2);
+                                }, u, v, 4);
+                            } else if (st == 2) { // Cross X
+                                glyph = area([&](float px0, float py0) {
+                                    const float d1 = sd_seg(px0, py0, c - rad * 0.36f, c - rad * 0.36f, c + rad * 0.36f, c + rad * 0.36f);
+                                    const float d2 = sd_seg(px0, py0, c + rad * 0.36f, c - rad * 0.36f, c - rad * 0.36f, c + rad * 0.36f);
+                                    return std::min(d1, d2) - stroke;
+                                }, u, v, 4);
+                            } else { // Minus
+                                glyph = area([&](float px0, float py0) {
+                                    return sd_seg(px0, py0, c - rad * 0.38f, c, c + rad * 0.38f, c) - stroke;
+                                }, u, v, 4);
+                            }
+                        }
+                        const float fa = std::max(ga, disc);
+                        if (fa <= 0.002f) continue;
+                        // Blend dark glyph onto bright disc
+                        const float k = glyph * disc;
+                        const uint8_t r = (uint8_t)std::lround(col.r * (1.f - k) + 12.f * k);
+                        const uint8_t g = (uint8_t)std::lround(col.g * (1.f - k) + 9.f * k);
+                        const uint8_t b = (uint8_t)std::lround(col.b * (1.f - k) + 10.f * k);
+                        uint8_t* o = &px[((size_t)y * sz + x) * 4];
+                        o[0] = r; o[1] = g; o[2] = b;
+                        o[3] = (uint8_t)std::lround(fa * 255.f);
+                    }
+                }
+                status_tex[st] = make_tex(sz, sz, px);
+            }
+        }
+    }
+
+    // Smooth anti-aliased 9-slice draw
+    void draw_9slice(SDL_Texture* tex, int tex_sz, float tex_corner, SDL_FRect r, float dst_corner, rgba c)
+    {
+        if (!tex) return;
+        SDL_SetTextureColorMod(tex, c.r, c.g, c.b);
+        SDL_SetTextureAlphaMod(tex, c.a);
+        const float x = r.x * s, y = r.y * s, w = r.w * s, h = r.h * s;
+        const float dc = std::min(dst_corner * s, std::min(w, h) * 0.5f);
+        const float sx[4] = { 0.f, tex_corner, (float)tex_sz - tex_corner, (float)tex_sz };
+        const float sy[4] = { 0.f, tex_corner, (float)tex_sz - tex_corner, (float)tex_sz };
+        const float dx[4] = { x, x + dc, x + w - dc, x + w };
+        const float dy[4] = { y, y + dc, y + h - dc, y + h };
+        for (int iy = 0; iy < 3; iy++) {
+            const float dh = dy[iy + 1] - dy[iy];
+            if (dh <= 0.1f) continue;
+            for (int ix = 0; ix < 3; ix++) {
+                const float dw = dx[ix + 1] - dx[ix];
+                if (dw <= 0.1f) continue;
+                const SDL_FRect src{ sx[ix], sy[iy], sx[ix + 1] - sx[ix], sy[iy + 1] - sy[iy] };
+                const SDL_FRect dst{ dx[ix], dy[iy], dw, dh };
+                SDL_RenderTexture(renderer, tex, &src, &dst);
+            }
+        }
+    }
+
+    void aa_rect(SDL_FRect r, float radius, rgba c) { draw_9slice(pill_fill, 64, 22.f, r, radius, c); }
+    void aa_border(SDL_FRect r, float radius, rgba c) { draw_9slice(pill_border, 64, 22.f, r, radius, c); }
+    void aa_shadow(SDL_FRect r, float expand, float radius, rgba c)
+    {
+        draw_9slice(pill_shadow, 80, 32.f, { r.x - expand, r.y - expand, r.w + expand * 2.f, r.h + expand * 2.f }, radius + expand, c);
+    }
+
     void draw()
     {
         const auto now = std::chrono::steady_clock::now();
@@ -194,7 +377,7 @@ private:
         // 1. Volcanic obsidian -> crimson base
         grad_rect({ 0, 0, k_w, k_h }, c_bg_top, c_bg_bot);
 
-        // 2. Full-bleed Vajra Asura hero artwork fading smoothly into obsidian-crimson
+        // 2. Full-bleed Vajra Asura hero artwork fading cleanly into obsidian-crimson
         if (art_tex && art_w > 0 && art_h > 0) {
             const float target_h = 340.f;
             const float src_aspect = (float)art_w / (float)art_h;
@@ -208,44 +391,63 @@ private:
                 src.x = ((float)art_w - src.w) * 0.5f;
             }
             const SDL_FRect dst{ 0, 0, k_w * s, target_h * s };
-            SDL_SetTextureAlphaMod(art_tex, 215);
+            SDL_SetTextureAlphaMod(art_tex, 218);
             SDL_RenderTexture(renderer, art_tex, &src, &dst);
 
-            grad_rect({ 0, 0, k_w, 84 }, { 10, 7, 8, 145 }, { 10, 7, 8, 10 });
+            grad_rect({ 0, 0, k_w, 84 }, { 10, 7, 8, 140 }, { 10, 7, 8, 10 });
             grad_rect({ 0, 120, k_w, 222 }, { 13, 8, 9, 15 }, { 16, 8, 9, 255 });
-            horiz_grad({ 0, 0, 480, k_hero_h + 40 }, { 10, 7, 8, 190 }, { 10, 7, 8, 0 });
+            horiz_grad({ 0, 0, 480, k_hero_h + 40 }, { 10, 7, 8, 188 }, { 10, 7, 8, 0 });
         }
 
-        // 3. Subtle volcanic bottom furnace glow & drifting embers
-        radial_glow(k_w * 0.5f, k_h * 1.06f, k_w * 0.72f, k_h * 0.48f, { 176, 44, 18, 66 });
-        for (ember& em : embers) {
-            em.y -= em.vy * dt;
-            if (em.y < -10.f) {
-                em.y = k_h + 10.f;
-                em.x = std::fmod(em.x + 173.f, k_w);
-            }
-            const float ex = em.x + std::sin(t * em.speed + em.phase) * 14.f;
-            const float fade = std::clamp(std::min(em.y / 130.f, (k_h - em.y) / 80.f), 0.f, 1.f);
-            const uint8_t a = (uint8_t)(em.alpha * fade * 255.f);
-            if (a > 3) {
-                round_rect({ ex - em.size * 1.6f, em.y - em.size * 1.6f, em.size * 3.2f, em.size * 3.2f }, em.size * 1.6f,
-                           { 235, 110, 32, (uint8_t)(a / 3) });
-                round_rect({ ex - em.size * 0.5f, em.y - em.size * 0.5f, em.size, em.size }, em.size * 0.5f, { 255, 214, 126, a });
+        // 3. Bottom Mantra furnace glow & smooth anti-aliased glowing embers
+        radial_glow(k_w * 0.5f, k_h * 1.06f, k_w * 0.72f, k_h * 0.48f, { 180, 46, 18, 68 });
+        if (glow_dot) {
+            for (ember& em : embers) {
+                em.y -= em.vy * dt;
+                if (em.y < -12.f) {
+                    em.y = k_h + 12.f;
+                    em.x = std::fmod(em.x + 173.f, k_w);
+                }
+                const float ex = em.x + std::sin(t * em.speed + em.phase) * 14.f;
+                const float fade = std::clamp(std::min(em.y / 130.f, (k_h - em.y) / 80.f), 0.f, 1.f);
+                const uint8_t a = (uint8_t)(em.alpha * fade * 255.f);
+                if (a > 3) {
+                    const float gsz = em.size * 5.2f * s;
+                    SDL_SetTextureColorMod(glow_dot, 240, 120, 36);
+                    SDL_SetTextureAlphaMod(glow_dot, (uint8_t)(a * 0.45f));
+                    const SDL_FRect gd{ ex * s - gsz * 0.5f, em.y * s - gsz * 0.5f, gsz, gsz };
+                    SDL_RenderTexture(renderer, glow_dot, nullptr, &gd);
+                    const float csz = em.size * 1.6f * s;
+                    SDL_SetTextureColorMod(glow_dot, 255, 224, 148);
+                    SDL_SetTextureAlphaMod(glow_dot, a);
+                    const SDL_FRect cd{ ex * s - csz * 0.5f, em.y * s - csz * 0.5f, csz, csz };
+                    SDL_RenderTexture(renderer, glow_dot, nullptr, &cd);
+                }
             }
         }
 
         layout();
 
-        // 4. Clean Hero Title & Drop Hint
+        // Update pointer cursor whenever hovering any interactive button
+        bool over_interactive = false;
+        for (const button& b : buttons)
+            if (b.enabled && hit(b.r, mouse_x, mouse_y)) over_interactive = true;
+        if (over_interactive != is_pointer) {
+            is_pointer = over_interactive;
+            if (cur_pointer && cur_default) SDL_SetCursor(is_pointer ? cur_pointer : cur_default);
+        }
+
+        // 4. Clean Hero Title
         text_shadow(hero_title, "VAJRA", k_pad, 42.f, c_gold_bright, 3.5f);
         text_shadow(hero_sub, "ASURA'S WRATH", k_pad + 2.f, 96.f, c_gold, 2.5f);
         text_shadow(body, "Select your game files below, or drag and drop them anywhere.", k_pad, k_hero_h - 36.f, c_sub);
 
-        // 5. Unified Frosted Volcanic-Obsidian Setup Panel
+        // 5. Unified Frosted Volcanic-Obsidian Panel (with real soft drop shadow & AA corners!)
         const float panel_h = 5.f * k_row_h + 16.f;
         const SDL_FRect pr{ k_pad, k_panel_y, k_w - 2 * k_pad, panel_h };
-        round_rect(pr, 14.f, c_panel_border);
-        round_rect_grad({ pr.x + 1, pr.y + 1, pr.w - 2, pr.h - 2 }, 13.f, c_panel_top, c_panel_bot);
+        aa_shadow({ pr.x, pr.y + 4.f, pr.w, pr.h }, 12.f, 14.f, { 0, 0, 0, 145 });
+        aa_rect(pr, 14.f, c_panel);
+        aa_border(pr, 14.f, c_panel_border);
 
         const char* names[] = { "Game", "Update 1.02", "DLC", "Licences", "Firmware" };
         const char* hints[] = {
@@ -256,10 +458,23 @@ private:
             "PS3 audio codecs (automatic Sony download)",
         };
         const item_status* items[] = { &check.game, &check.update, &check.dlc, &check.licences, &check.firmware };
-        for (int i = 0; i < 5; i++) draw_row(i, names[i], hints[i], *items[i]);
+        for (int i = 0; i < 5; i++) draw_row(i, names[i], hints[i], *items[i], dt);
 
-        // 6. Clean Modern Buttons + Play CTA
-        for (size_t i = 0; i < buttons.size(); i++) draw_button(buttons[i], (int)i == focus, t);
+        // 6. Tactile animated buttons + Play CTA
+        for (size_t i = 0; i < buttons.size(); i++) draw_button(buttons[i], kbd_nav && (int)i == focus, dt, t);
+
+        // 7. Live Drag-and-Drop Overlay
+        const float drop_target = dragging ? 1.f : 0.f;
+        drop_alpha += (drop_target - drop_alpha) * std::min(1.f, dt * 14.f);
+        if (drop_alpha > 0.01f) {
+            grad_rect({ 0, 0, k_w, k_h }, { 10, 6, 7, (uint8_t)(drop_alpha * 185.f) }, { 24, 9, 9, (uint8_t)(drop_alpha * 205.f) });
+            const SDL_FRect dr{ 56.f, 56.f, k_w - 112.f, k_h - 112.f };
+            aa_shadow(dr, 18.f, 18.f, { 242, 188, 86, (uint8_t)(drop_alpha * 70.f) });
+            aa_border(dr, 18.f, { 244, 200, 112, (uint8_t)(drop_alpha * 235.f) });
+            const std::string msg = "Drop files to add to Vajra";
+            text_shadow(play_font, msg, (k_w - measure(play_font, msg)) * 0.5f, k_h * 0.5f - 14.f,
+                        { 255, 236, 184, (uint8_t)(drop_alpha * 255.f) });
+        }
 
         SDL_RenderPresent(renderer);
     }
@@ -288,7 +503,7 @@ private:
         f.tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, f.aw, f.ah);
         SDL_UpdateTexture(f.tex, nullptr, px.data(), f.aw * 4);
         SDL_SetTextureBlendMode(f.tex, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(f.tex, SDL_SCALEMODE_NEAREST);
+        SDL_SetTextureScaleMode(f.tex, SDL_SCALEMODE_LINEAR);
     }
 
     float measure(const face& f, const std::string& str, float track = 0.f) const
@@ -325,7 +540,7 @@ private:
         for (size_t i = 0; i < str.size();) {
             stbtt_GetPackedQuad(f.chars.data(), f.aw, f.ah, glyph_index(next_cp(str, i)), &px, &py, &q, 1);
             const SDL_FRect src{ q.s0 * f.aw, q.t0 * f.ah, (q.s1 - q.s0) * f.aw, (q.t1 - q.t0) * f.ah };
-            const SDL_FRect dst{ std::round(q.x0), std::round(q.y0), std::round(q.x1 - q.x0), std::round(q.y1 - q.y0) };
+            const SDL_FRect dst{ std::round(q.x0), std::round(q.y0), q.x1 - q.x0, q.y1 - q.y0 };
             SDL_RenderTexture(renderer, f.tex, &src, &dst);
             px += track * s;
         }
@@ -333,7 +548,7 @@ private:
 
     void text_shadow(const face& f, const std::string& str, float x, float y, rgba c, float track = 0.f)
     {
-        text(f, str, x + 1.f, y + 1.5f, { 0, 0, 0, (uint8_t)(c.a * 0.80f) }, track);
+        text(f, str, x + 1.f, y + 1.5f, { 0, 0, 0, (uint8_t)(c.a * 0.78f) }, track);
         text(f, str, x, y, c, track);
     }
 
@@ -386,73 +601,6 @@ private:
         SDL_RenderGeometry(renderer, nullptr, v.data(), (int)v.size(), idx.data(), (int)idx.size());
     }
 
-    void round_rect_grad(SDL_FRect r, float radius, rgba top, rgba bot)
-    {
-        r = { r.x * s, r.y * s, r.w * s, r.h * s };
-        radius = std::min(radius * s, std::min(r.w, r.h) / 2);
-        auto sample = [&](float py) -> SDL_FColor {
-            const float t = r.h > 0 ? std::clamp((py - r.y) / r.h, 0.f, 1.f) : 0.f;
-            return {
-                (top.r + (bot.r - top.r) * t) / 255.f,
-                (top.g + (bot.g - top.g) * t) / 255.f,
-                (top.b + (bot.b - top.b) * t) / 255.f,
-                (top.a + (bot.a - top.a) * t) / 255.f,
-            };
-        };
-        std::array<SDL_Vertex, 37> v;
-        v[0] = { { r.x + r.w / 2, r.y + r.h / 2 }, sample(r.y + r.h / 2), {} };
-        const float cx[4] = { r.x + r.w - radius, r.x + radius, r.x + radius, r.x + r.w - radius };
-        const float cy[4] = { r.y + radius, r.y + radius, r.y + r.h - radius, r.y + r.h - radius };
-        size_t nv = 1;
-        for (int k = 0; k < 4; k++)
-            for (int j = 0; j <= 8; j++) {
-                const float a = (float)(k * 90 + j * 90 / 8) * k_pi / 180.f;
-                const float px = cx[k] + std::cos(a) * radius;
-                const float py = cy[k] - std::sin(a) * radius;
-                v[nv++] = { { px, py }, sample(py), {} };
-            }
-        std::array<int, 36 * 3> idx;
-        for (int i = 1; i < 37; i++) {
-            idx[(size_t)(i - 1) * 3] = 0;
-            idx[(size_t)(i - 1) * 3 + 1] = i;
-            idx[(size_t)(i - 1) * 3 + 2] = i + 1 < 37 ? i + 1 : 1;
-        }
-        SDL_RenderGeometry(renderer, nullptr, v.data(), (int)v.size(), idx.data(), (int)idx.size());
-    }
-
-    void round_rect(SDL_FRect r, float radius, rgba c) { round_rect_grad(r, radius, c, c); }
-
-    void line(float x0, float y0, float x1, float y1, float w, rgba c)
-    {
-        const float dx = x1 - x0, dy = y1 - y0, len = std::sqrt(dx * dx + dy * dy);
-        if (len <= 0) return;
-        const float nx = -dy / len * w / 2 * s, ny = dx / len * w / 2 * s;
-        const SDL_FColor col = fcol(c);
-        const SDL_Vertex v[4] = { { { x0 * s + nx, y0 * s + ny }, col, {} }, { { x1 * s + nx, y1 * s + ny }, col, {} },
-                                  { { x1 * s - nx, y1 * s - ny }, col, {} }, { { x0 * s - nx, y0 * s - ny }, col, {} } };
-        const int idx[6] = { 0, 1, 2, 0, 2, 3 };
-        SDL_RenderGeometry(renderer, nullptr, v, 4, idx, 6);
-    }
-
-    void status_icon(float cx, float cy, item_state st)
-    {
-        const rgba c = st == item_state::ok ? c_ok : st == item_state::warn ? c_warn : st == item_state::bad ? c_bad : c_missing;
-        round_rect({ cx - 16, cy - 16, 32, 32 }, 16, { c.r, c.g, c.b, 30 });
-        round_rect({ cx - 11.5f, cy - 11.5f, 23, 23 }, 11.5f, c);
-        if (st == item_state::ok) {
-            line(cx - 5.2f, cy + 0.5f, cx - 1.2f, cy + 4.4f, 2.5f, c_bg_top);
-            line(cx - 1.2f, cy + 4.4f, cx + 5.6f, cy - 3.6f, 2.5f, c_bg_top);
-        } else if (st == item_state::bad) {
-            line(cx - 4.2f, cy - 4.2f, cx + 4.2f, cy + 4.2f, 2.5f, c_bg_top);
-            line(cx + 4.2f, cy - 4.2f, cx - 4.2f, cy + 4.2f, 2.5f, c_bg_top);
-        } else if (st == item_state::warn) {
-            line(cx, cy - 5.2f, cx, cy + 1.2f, 2.5f, c_bg_top);
-            round_rect({ cx - 1.5f, cy + 3.4f, 3.f, 3.f }, 1.5f, c_bg_top);
-        } else {
-            line(cx - 4.5f, cy, cx + 4.5f, cy, 2.5f, c_bg_top);
-        }
-    }
-
     SDL_FRect row_rect(int i) const { return { k_pad + 8.f, k_panel_y + 8.f + i * k_row_h, k_w - 2 * k_pad - 16.f, k_row_h }; }
 
     void layout()
@@ -473,7 +621,6 @@ private:
             std::reverse(buttons.end() - (ptrdiff_t)items.size(), buttons.end());
         };
 
-        // Direct per-row controls (clear, intuitive, zero ambiguity)
         add_row_btns(0, { { "Select Folder", a_game_folder, btn_style::secondary }, { "Select ISO", a_game_iso, btn_style::secondary } });
         add_row_btns(1, { { "Select .pkg", a_update_pkg, btn_style::secondary } });
         if (paths.dlcs.empty()) add_row_btns(2, { { "Add DLC", a_dlc_add, btn_style::secondary } });
@@ -489,16 +636,27 @@ private:
         focus = std::clamp(focus, 0, (int)buttons.size() - 1);
     }
 
-    void draw_row(int i, const char* name, const char* hint, const item_status& st)
+    void draw_row(int i, const char* name, const char* hint, const item_status& st, float dt)
     {
         const SDL_FRect r = row_rect(i);
-        if (hit(r, mouse_x, mouse_y))
-            round_rect({ r.x + 2, r.y + 4, r.w - 4, r.h - 8 }, 10.f, c_row_hover);
+        const bool over = hit(r, mouse_x, mouse_y);
+        row_hover[i] += ((over ? 1.f : 0.f) - row_hover[i]) * std::min(1.f, dt * 16.f);
+        if (row_hover[i] > 0.01f) {
+            aa_rect({ r.x + 2, r.y + 4, r.w - 4, r.h - 8 }, 10.f, { c_row_hover.r, c_row_hover.g, c_row_hover.b, (uint8_t)(c_row_hover.a * row_hover[i]) });
+            aa_rect({ r.x + 4, r.y + 18, 3.f, r.h - 36 }, 1.5f, { c_gold.r, c_gold.g, c_gold.b, (uint8_t)(190.f * row_hover[i]) });
+        }
 
         if (i > 0)
-            round_rect({ r.x + 16.f, r.y, r.w - 32.f, 1.f }, 0, c_divider);
+            grad_rect({ r.x + 16.f, r.y, r.w - 32.f, 1.f }, c_divider, c_divider);
 
-        status_icon(r.x + 32.f, r.y + r.h * 0.5f, st.state);
+        // Razor-sharp 4x4 supersampled SDF status icon
+        const int idx = st.state == item_state::ok ? 0 : st.state == item_state::warn ? 1 : st.state == item_state::bad ? 2 : 3;
+        if (SDL_Texture* itex = status_tex[idx]) {
+            const float isz = 40.f * s;
+            const SDL_FRect dst{ (r.x + 32.f) * s - isz * 0.5f, (r.y + r.h * 0.5f) * s - isz * 0.5f, isz, isz };
+            SDL_RenderTexture(renderer, itex, nullptr, &dst);
+        }
+
         text(heading, name, r.x + 64.f, r.y + 13.f, c_text);
 
         float right = r.x + r.w - 18.f;
@@ -508,9 +666,12 @@ private:
 
         if (i == 4 && (job.phase == 1 || job.phase == 2)) {
             const float p = std::clamp(job.progress.load(), 0.f, 1.f);
-            round_rect({ r.x + 64.f, r.y + 46.f, width, 8.f }, 4.f, { 42, 32, 30, 255 });
-            if (p > 0.f)
-                round_rect_grad({ r.x + 64.f, r.y + 46.f, std::max(8.f, width * p), 8.f }, 4.f, c_gold, c_play_hot_top);
+            aa_rect({ r.x + 64.f, r.y + 46.f, width, 8.f }, 4.f, { 42, 32, 30, 255 });
+            if (p > 0.f) {
+                const float fw = std::max(10.f, width * p);
+                aa_shadow({ r.x + 64.f, r.y + 46.f, fw, 8.f }, 4.f, 4.f, { 242, 160, 54, 110 });
+                aa_rect({ r.x + 64.f, r.y + 46.f, fw, 8.f }, 4.f, c_gold);
+            }
             const std::string label = std::string(job.phase == 1 ? "Downloading " : "Installing ") + std::to_string((int)(p * 100)) + "%";
             text(body, label, r.x + 64.f + width - measure(body, label), r.y + 15.f, c_gold);
             return;
@@ -521,51 +682,94 @@ private:
         text(body, fit(body, detail, width), r.x + 64.f, r.y + 41.f, c);
     }
 
-    void draw_button(const button& b, bool focused, float t)
+    void draw_button(const button& b, bool focused, float dt, float t)
     {
         const bool hot = b.enabled && hit(b.r, mouse_x, mouse_y);
         const bool down = hot && pressed;
         const bool is_play = b.style == btn_style::play;
-        const float rad = is_play ? 11.f : 9.f;
 
-        if (is_play && b.enabled) {
-            const float pulse = 0.5f + 0.5f * std::sin(t * 2.4f);
-            round_rect({ b.r.x - 4, b.r.y - 3, b.r.w + 8, b.r.h + 6 }, rad + 3.f, { 224, 62, 28, (uint8_t)(34 + pulse * 40) });
+        btn_anim& anim = anims[(int)b.id];
+        const float rate = std::min(1.f, dt * 16.f);
+        const float prev_h = anim.hover;
+        anim.hover += ((hot ? 1.f : 0.f) - anim.hover) * rate;
+        anim.press += ((down ? 1.f : 0.f) - anim.press) * std::min(1.f, dt * 24.f);
+        // Trigger subtle specular light sweep when entering hover
+        if (hot && prev_h < 0.08f && anim.sweep < 0.f) anim.sweep = 0.f;
+        if (anim.sweep >= 0.f) {
+            anim.sweep += dt * 2.1f;
+            if (anim.sweep > 1.35f) anim.sweep = -1.f;
         }
 
-        // Refined 1px border
-        rgba border = c_btn_border;
-        if (!b.enabled) border = c_disabled_border;
-        else if (focused) border = c_gold_bright;
-        else if (is_play) border = hot ? rgba{ 255, 198, 134, 210 } : rgba{ 242, 166, 98, 145 };
-        else if (b.style == btn_style::gold) border = hot ? c_gold_bright : rgba{ 236, 186, 94, 185 };
-        else if (hot) border = c_btn_hot_border;
-        round_rect({ b.r.x - 1, b.r.y - 1, b.r.w + 2, b.r.h + 2 }, rad + 1.f, border);
+        // Tactile lift on hover (-1.5px), press down (+1.2px)
+        const float lift = b.enabled ? (-1.4f * anim.hover + 2.4f * anim.press) : 0.f;
+        const SDL_FRect r{ b.r.x, b.r.y + lift, b.r.w, b.r.h };
+        const float rad = is_play ? 12.f : 9.f;
 
-        // Clean modern fill
-        if (!b.enabled) {
-            round_rect(b.r, rad, c_disabled);
-        } else if (is_play) {
-            if (down) round_rect(b.r, rad, c_play_down);
-            else round_rect_grad(b.r, rad, hot ? c_play_hot_top : c_play_top, hot ? c_play_hot_bot : c_play_bot);
-        } else if (b.style == btn_style::gold) {
-            round_rect(b.r, rad, down ? c_btn_down : hot ? c_gold_btn_hot : c_gold_btn_fill);
-        } else {
-            round_rect(b.r, rad, down ? c_btn_down : hot ? c_btn_hot : c_btn_fill);
+        // Real Gaussian drop shadow + smooth blooming hover / Play aura
+        if (b.enabled) {
+            aa_shadow({ r.x, r.y + 3.f, r.w, r.h }, 7.f, rad, { 0, 0, 0, (uint8_t)(95 + anim.hover * 45) });
+            if (is_play) {
+                const float pulse = 0.5f + 0.5f * std::sin(t * 2.4f);
+                aa_shadow(r, 11.f + anim.hover * 4.f, rad, { 232, 68, 28, (uint8_t)(60 + pulse * 45 + anim.hover * 65) });
+            } else if (anim.hover > 0.01f) {
+                aa_shadow(r, 8.f, rad, { 244, 192, 92, (uint8_t)(anim.hover * 72.f) });
+            }
         }
 
-        // Subtle top glass specular highlight
-        if (b.enabled && !down) {
-            const rgba hi = is_play ? rgba{ 255, 226, 190, 68 } : rgba{ 255, 238, 214, (uint8_t)(hot ? 36 : 18) };
-            round_rect({ b.r.x + rad, b.r.y + 1.f, b.r.w - rad * 2.f, 1.f }, 0, hi);
+        // Smoothly animated fill color
+        rgba fill = c_disabled;
+        if (b.enabled) {
+            if (is_play) fill = lerp_c(lerp_c(c_play_base, c_play_hot, anim.hover), c_play_down, anim.press);
+            else if (b.style == btn_style::gold) fill = lerp_c(lerp_c(c_gold_base, c_gold_hot, anim.hover), c_btn_down, anim.press);
+            else fill = lerp_c(lerp_c(c_btn_base, c_btn_hot, anim.hover), c_btn_down, anim.press);
         }
+        aa_rect(r, rad, fill);
+
+        // Mouse-tracking radial spotlight + specular shimmer sweep clipped cleanly inside button!
+        if (b.enabled && (anim.hover > 0.01f || anim.sweep >= 0.f || is_play)) {
+            const SDL_Rect clip{ (int)std::floor(r.x * s), (int)std::floor(r.y * s), (int)std::ceil(r.w * s), (int)std::ceil(r.h * s) };
+            SDL_SetRenderClipRect(renderer, &clip);
+            if (glow_dot && anim.hover > 0.01f) {
+                const float gw = std::max(r.w * 0.75f, 120.f) * s, gh = r.h * 2.4f * s;
+                SDL_SetTextureColorMod(glow_dot, 255, is_play ? 210 : 216, is_play ? 150 : 140);
+                SDL_SetTextureAlphaMod(glow_dot, (uint8_t)(anim.hover * (is_play ? 62.f : 44.f)));
+                const SDL_FRect gd{ mouse_x * s - gw * 0.5f, mouse_y * s - gh * 0.5f, gw, gh };
+                SDL_RenderTexture(renderer, glow_dot, nullptr, &gd);
+            }
+            // Periodic gentle shimmer on Play button, or hover-enter sweep on any button
+            float sp = anim.sweep;
+            if (is_play && sp < 0.f) {
+                const float cycle = std::fmod(t, 4.2f);
+                if (cycle < 0.75f) sp = cycle / 0.75f * 1.3f;
+            }
+            if (sp >= 0.f && glow_dot) {
+                const float sx = r.x - 40.f + sp * (r.w + 80.f);
+                const float sw = 96.f * s, sh = r.h * 2.4f * s;
+                SDL_SetTextureColorMod(glow_dot, 255, 238, 198);
+                SDL_SetTextureAlphaMod(glow_dot, (uint8_t)(is_play ? 54 : 42));
+                const SDL_FRect sd{ sx * s - sw * 0.5f, (r.y + r.h * 0.5f) * s - sh * 0.5f, sw, sh };
+                SDL_RenderTexture(renderer, glow_dot, nullptr, &sd);
+            }
+            SDL_SetRenderClipRect(renderer, nullptr);
+        }
+
+        // Crisp 4x4 AA border
+        rgba border{ 86, 68, 64, 70 };
+        if (b.enabled) {
+            if (focused) border = c_gold_bright;
+            else if (is_play) border = lerp_c({ 246, 174, 108, 150 }, { 255, 224, 166, 235 }, anim.hover);
+            else if (b.style == btn_style::gold) border = lerp_c({ 238, 188, 96, 185 }, c_gold_bright, anim.hover);
+            else border = lerp_c({ 184, 150, 120, 92 }, { 244, 200, 112, 225 }, anim.hover);
+        }
+        aa_border(r, rad, border);
 
         const face& f = is_play ? (b.enabled ? play_font : body) : btn_font;
         const float track = is_play && b.enabled ? 1.5f : 0.f;
         const float tw = measure(f, b.label, track);
-        const rgba tc = !b.enabled ? c_dim : is_play ? c_text : (b.style == btn_style::gold ? c_gold_bright : (hot ? c_text : c_sub));
-        const float tx = b.r.x + (b.r.w - tw) * 0.5f;
-        const float ty = b.r.y + (b.r.h - f.size / s) * 0.5f - 1.f;
+        const rgba tc = !b.enabled ? c_dim : is_play ? c_text
+                      : (b.style == btn_style::gold ? c_gold_bright : lerp_c(c_sub, c_text, anim.hover));
+        const float tx = r.x + (r.w - tw) * 0.5f;
+        const float ty = r.y + (r.h - f.size / s) * 0.5f - 1.f;
         if (is_play && b.enabled) text_shadow(f, b.label, tx, ty, tc, track);
         else text(f, b.label, tx, ty, tc, track);
     }
@@ -582,9 +786,11 @@ private:
         case SDL_EVENT_MOUSE_MOTION:
             mouse_x = e.motion.x / s;
             mouse_y = e.motion.y / s;
+            kbd_nav = false;
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
             pressed = e.button.button == SDL_BUTTON_LEFT;
+            kbd_nav = false;
             break;
         case SDL_EVENT_MOUSE_BUTTON_UP: {
             if (!pressed || e.button.button != SDL_BUTTON_LEFT) break;
@@ -597,6 +803,12 @@ private:
                 }
             break;
         }
+        case SDL_EVENT_DROP_BEGIN:
+            dragging = true;
+            break;
+        case SDL_EVENT_DROP_COMPLETE:
+            dragging = false;
+            break;
         case SDL_EVENT_DROP_FILE: {
             std::lock_guard<std::mutex> hold(picks_lock);
             picks.push_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(e.drop.data))));
@@ -604,6 +816,7 @@ private:
         }
         case SDL_EVENT_KEY_DOWN:
             if (e.key.key == SDLK_ESCAPE) return false;
+            kbd_nav = true;
             if (e.key.key == SDLK_UP || e.key.key == SDLK_LEFT || (e.key.key == SDLK_TAB && (e.key.mod & SDL_KMOD_SHIFT))) move(-1);
             else if (e.key.key == SDLK_DOWN || e.key.key == SDLK_RIGHT || e.key.key == SDLK_TAB) move(1);
             else if (e.key.key == SDLK_RETURN || e.key.key == SDLK_SPACE || e.key.key == SDLK_KP_ENTER) press_focus();
@@ -612,6 +825,7 @@ private:
             SDL_OpenGamepad(e.gdevice.which);
             break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            kbd_nav = true;
             if (e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_UP || e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_LEFT) move(-1);
             else if (e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_DOWN || e.gbutton.button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT) move(1);
             else if (e.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) press_focus();
@@ -730,15 +944,25 @@ private:
     game_check check;
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
+    SDL_Cursor* cur_default = nullptr;
+    SDL_Cursor* cur_pointer = nullptr;
     SDL_Texture* art_tex = nullptr;
+    SDL_Texture* pill_fill = nullptr;
+    SDL_Texture* pill_border = nullptr;
+    SDL_Texture* pill_shadow = nullptr;
+    SDL_Texture* glow_dot = nullptr;
+    SDL_Texture* status_tex[4]{};
     int art_w = 0, art_h = 0;
     firmware_job job;
     font regular, semibold, black;
     face hero_title, hero_sub, play_font, heading, body, btn_font;
     float s = 1, mouse_x = -1, mouse_y = -1;
-    bool pressed = false, play = false;
+    bool pressed = false, play = false, is_pointer = false, kbd_nav = false, dragging = false;
+    float drop_alpha = 0.f;
     int focus = 0;
     std::vector<button> buttons;
+    std::unordered_map<int, btn_anim> anims;
+    float row_hover[5]{};
     std::string job_error;
     std::mutex picks_lock;
     std::vector<std::filesystem::path> picks;
