@@ -453,8 +453,8 @@ private:
         }
 
         // 4. Clean Hero Title
-        text_shadow(hero_title, "VAJRA", k_pad, 42.f, c_gold_bright, 3.5f);
-        text_shadow(hero_sub, "ASURA'S WRATH", k_pad + 2.f, 96.f, c_gold, 2.5f);
+        text_shadow(hero_title, "VAJRA", k_pad, 42.f, c_gold_bright, 3.0f);
+        text_shadow(hero_sub, "ASURA'S WRATH", k_pad + 2.f, 96.f, c_gold, 0.8f);
         text_shadow(body, "Select your game files below, or drag and drop them anywhere.", k_pad, k_hero_h - 36.f, c_sub);
 
         // 5. Forged Volcanic-Obsidian Panel (deep shadow + subtle molten crimson underglow + obsidian glass)
