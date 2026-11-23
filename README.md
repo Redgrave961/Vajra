@@ -19,10 +19,10 @@
 
 - **High Framerate Support:** Play beyond the original 30 FPS cap with smooth, display-matched frame rate limits or completely uncapped framerates.
 - **High-Resolution Rendering:** Scale past the original 720p up to 1080p, 1440p, 4K, and beyond, with properly scaled effects, shadows, bloom, and depth of field.
-- **In-Game PC Options Menu:** Adjust resolution, display mode (Windowed, Borderless, Exclusive Fullscreen), frame rate cap, controller prompt style, keybindings, and mouse settings right inside the game's native menu.
-- **Full Keyboard & Mouse + Controller Support:** Seamless hot-switching between Keyboard & Mouse, PlayStation, Xbox, and Nintendo button prompts, full custom keybinds, mouse sensitivity/invert controls, and tailored KBM QTE prompts.
-- **Trophies & Recomp Achievements:** Full local PS3 trophy support with in-game icons and PS3-style unlock notifications, plus native [Recomp Achievements](https://github.com/elripalda/RecompAchievements) integration when launched through RecompLauncher.
-- **One-Click Setup & RecompLauncher Support:** Reads your `BLES01227` disc folder or decrypted ISO and optional DLC `.pkg`/`.rap` files directly, downloads the official `1.02` update and PS3 audio codecs from Sony automatically, and decrypts `EBOOT.BIN` on first launch (no RPCS3 required). Ships with `recomplauncher.json` for Easy Setup, launcher settings, and save backups.
+- **In-Game PC Options Menu:** Adjust resolution, display mode (Windowed, Borderless, Exclusive Fullscreen), frame rate cap, post-processing (Motion Blur, Depth of Field, Bloom), keybindings, and mouse settings right inside the game's native menu.
+- **Full Keyboard & Mouse + Controller Support:** Automatic hot-switching between Keyboard & Mouse, PlayStation, Xbox, and Nintendo button prompts, full custom keybinds, mouse sensitivity/invert controls, and tailored KBM QTE prompts.
+- **Trophies & Recomp Achievements:** Local PS3 trophy support with in-game icons and PS3-style unlock notifications, plus native [Recomp Achievements](https://github.com/elripalda/RecompAchievements) integration when launched through RecompLauncher.
+- **One-Click Setup & RecompLauncher Support:** Reads your `BLES01227` disc folder or decrypted ISO and optional DLC `.pkg`/`.rap` files directly, downloads the official `1.02` update and PS3 firmware from Sony automatically, and decrypts `EBOOT.BIN` on first launch (no RPCS3 required). Ships with `recomplauncher.json` for Easy Setup, launcher settings, and save backups.
 - **Windows & Linux:** Runs natively on Windows (`Vajra.exe`) and Linux (`Vajra-x86_64.AppImage`, Wayland & X11, including SteamOS / Steam Deck).
 
 ## Getting Started
@@ -39,7 +39,7 @@ When running standalone, Vajra stores saves, settings (`asura_settings.ini`), an
 - `--game <path>`: path to your `BLES01227` disc folder or decrypted `.iso`.
 - `--update <path>`: optional path to a local `1.02` update `.pkg`.
 - `--dlc <path>`: optional DLC `.pkg` or `.rap` file (may be passed multiple times).
-- `--prepare`: run windowless setup (downloads the `1.02` update and PS3 audio codecs if missing and verifies files).
+- `--prepare`: run windowless setup (downloads the `1.02` update and PS3 firmware if missing and verifies files).
 
 ## Building from Source
 
