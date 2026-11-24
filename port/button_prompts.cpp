@@ -166,12 +166,12 @@ struct ring_texture {
 };
 
 const ring_texture k_rings[] = {
-    { 0xC4B16F12A1AA30A8ull, 16384, ring::blank },    { 0x5AD6D93E7CD81FA4ull, 512, ring::blank },
-    { 0x75929EC3FB67FE41ull, 128, ring::blank },      { 0xBE57FE83A25CC8ECull, 4096, ring::blank },
-    { 0xA86C3339314E8A95ull, 16384, ring::squircle }, { 0x09411377F5C58CF5ull, 16384, ring::squircle },
-    { 0xF7C36A2107A7036Eull, 16384, ring::squircle }, { 0xB4BA7F930E7C6CCDull, 16384, ring::blank },
-    { 0x2A6A879E6AC506C9ull, 16384, ring::squircle }, { 0xB0AFFB72FD2DFAA1ull, 65536, ring::blank },
-    { 0x30118477881F80F4ull, 65536, ring::blank },    { 0x2A1F509DCC49054Dull, 65536, ring::blank },
+    { 0xC4B16F12A1AA30A8ull, 16384, ring::blank }, { 0x5AD6D93E7CD81FA4ull, 512, ring::blank },
+    { 0x75929EC3FB67FE41ull, 128, ring::blank },   { 0xBE57FE83A25CC8ECull, 4096, ring::blank },
+    { 0xA86C3339314E8A95ull, 16384, ring::blank }, { 0x09411377F5C58CF5ull, 16384, ring::blank },
+    { 0xF7C36A2107A7036Eull, 16384, ring::blank }, { 0xB4BA7F930E7C6CCDull, 16384, ring::blank },
+    { 0x2A6A879E6AC506C9ull, 16384, ring::blank }, { 0xB0AFFB72FD2DFAA1ull, 65536, ring::blank },
+    { 0x30118477881F80F4ull, 65536, ring::blank }, { 0x2A1F509DCC49054Dull, 65536, ring::blank },
 };
 
 constexpr char k_letters[2][4] = { { 'A', 'B', 'X', 'Y' }, { 'B', 'A', 'Y', 'X' } };
@@ -373,7 +373,7 @@ int apply(uint32_t v, uint32_t gcm_format, uint32_t width, uint32_t height, cons
         for (size_t i = 0; i < std::size(k_rings); i++)
             if (k_rings[i].bytes == bytes && (k_rings[i].op == ring::blank || (dxt5 && width == height)) && hashed() == k_rings[i].hash) {
                 patch_ring(i, v, width, gcm_format, guest, staging);
-                return (v & 3) == k_kbm && k_rings[i].op == ring::squircle ? 2 : 1;
+                return (v & 3) == k_kbm && (bytes == 16384 || bytes == 65536) ? 2 : 1;
             }
     }
     return 0;
