@@ -17,8 +17,6 @@ constexpr uint32_t k_qte_size = 128;
 
 enum glyph : uint8_t { g_lstick = PAD_ACTION_COUNT, g_rstick, g_dpad };
 
-enum class ring : uint8_t { blank, squircle };
-
 struct slot {
     uint8_t glyph;
     prompt_skin skin;
@@ -162,16 +160,15 @@ const qte k_qtes[] = {
 struct ring_texture {
     uint64_t hash;
     uint32_t bytes;
-    ring op;
 };
 
 const ring_texture k_rings[] = {
-    { 0xC4B16F12A1AA30A8ull, 16384, ring::blank }, { 0x5AD6D93E7CD81FA4ull, 512, ring::blank },
-    { 0x75929EC3FB67FE41ull, 128, ring::blank },   { 0xBE57FE83A25CC8ECull, 4096, ring::blank },
-    { 0xA86C3339314E8A95ull, 16384, ring::blank }, { 0x09411377F5C58CF5ull, 16384, ring::blank },
-    { 0xF7C36A2107A7036Eull, 16384, ring::blank }, { 0xB4BA7F930E7C6CCDull, 16384, ring::blank },
-    { 0x2A6A879E6AC506C9ull, 16384, ring::blank }, { 0xB0AFFB72FD2DFAA1ull, 65536, ring::blank },
-    { 0x30118477881F80F4ull, 65536, ring::blank }, { 0x2A1F509DCC49054Dull, 65536, ring::blank },
+    { 0xC4B16F12A1AA30A8ull, 16384 }, { 0x5AD6D93E7CD81FA4ull, 512 },
+    { 0x75929EC3FB67FE41ull, 128 },   { 0xBE57FE83A25CC8ECull, 4096 },
+    { 0xA86C3339314E8A95ull, 16384 }, { 0x09411377F5C58CF5ull, 16384 },
+    { 0xF7C36A2107A7036Eull, 16384 }, { 0xB4BA7F930E7C6CCDull, 16384 },
+    { 0x2A6A879E6AC506C9ull, 16384 }, { 0xB0AFFB72FD2DFAA1ull, 65536 },
+    { 0x30118477881F80F4ull, 65536 }, { 0x2A1F509DCC49054Dull, 65536 },
 };
 
 constexpr char k_letters[2][4] = { { 'A', 'B', 'X', 'Y' }, { 'B', 'A', 'Y', 'X' } };
@@ -181,7 +178,6 @@ constexpr const char* k_shoulders[4] = { "LB", "RB", "LT", "RT" };
 cache g_atlas[std::size(k_atlases)];
 qte_cache g_qte[std::size(k_qtes)];
 cache g_page[std::size(k_pages)];
-std::vector<uint8_t> g_ring[std::size(k_rings)];
 
 uint64_t hash(const uint8_t* p, uint64_t n)
 {
@@ -331,19 +327,12 @@ uint32_t variant()
     return pad_bindings_version() << k_version_shift | pc_options_stick_lit() << k_lit_shift | (pad_menu_active() ? k_menu : 0) | k_kbm;
 }
 
-void patch_ring(size_t index, uint32_t variant, uint32_t width, uint32_t gcm_format, const uint8_t* guest, uint8_t* staging)
+void patch_ring(uint32_t bytes, uint32_t variant, uint32_t gcm_format, uint8_t* staging)
 {
     if ((variant & 3) != k_kbm) return;
-    std::vector<uint8_t>& data = g_ring[index];
-    const uint32_t bytes = k_rings[index].bytes;
-    if (data.empty()) {
-        data.assign(bytes, 0);
-        if (k_rings[index].op == ring::squircle)
-            prompt_squircle(guest, (int)width, data.data());
-        else if (gcm_format == k_dxt1)
-            for (uint32_t i = 4; i < bytes; i += 8) std::memset(data.data() + i, 0xFF, 4);
-    }
-    std::memcpy(staging, data.data(), bytes);
+    std::memset(staging, 0, bytes);
+    if (gcm_format == k_dxt1)
+        for (uint32_t i = 4; i < bytes; i += 8) std::memset(staging + i, 0xFF, 4);
 }
 
 int apply(uint32_t v, uint32_t gcm_format, uint32_t width, uint32_t height, const uint8_t* guest, uint64_t guest_size, uint8_t* staging)
@@ -371,8 +360,8 @@ int apply(uint32_t v, uint32_t gcm_format, uint32_t width, uint32_t height, cons
         }
     if (bytes == 128 || bytes == 512 || bytes == 4096 || bytes == 16384 || bytes == 65536) {
         for (size_t i = 0; i < std::size(k_rings); i++)
-            if (k_rings[i].bytes == bytes && (k_rings[i].op == ring::blank || (dxt5 && width == height)) && hashed() == k_rings[i].hash) {
-                patch_ring(i, v, width, gcm_format, guest, staging);
+            if (k_rings[i].bytes == bytes && hashed() == k_rings[i].hash) {
+                patch_ring(k_rings[i].bytes, v, gcm_format, staging);
                 return (v & 3) == k_kbm && (bytes == 16384 || bytes == 65536) ? 2 : 1;
             }
     }

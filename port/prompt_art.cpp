@@ -315,10 +315,10 @@ void encode_alpha(const uint8_t* a, uint8_t* out)
     for (int k = 0; k < 6; k++) out[2 + k] = (uint8_t)(bits >> (8 * k));
 }
 
-void decode_colors(const uint8_t* b, bool dxt1, float (*out)[3])
+void decode_colors(const uint8_t* b, float (*out)[3])
 {
     const uint16_t c0 = (uint16_t)(b[0] | b[1] << 8), c1 = (uint16_t)(b[2] | b[3] << 8);
-    const bool three = dxt1 && c0 <= c1;
+    const bool three = c0 <= c1;
     float pal[4][3];
     expand(c0, pal[0]);
     expand(c1, pal[1]);
@@ -529,42 +529,6 @@ void prompt_glow(uint8_t* rgba, int size)
     }
 }
 
-void prompt_squircle(const uint8_t* bc3, int size, uint8_t* out)
-{
-    std::vector<float> src((size_t)size * size * 4);
-    for (int by = 0; by < size / 4; by++)
-        for (int bx = 0; bx < size / 4; bx++) {
-            const uint8_t* b = bc3 + (by * (size / 4) + bx) * 16;
-            int a[8] = { b[0], b[1] };
-            for (int k = 1; k < 7; k++) a[k + 1] = a[0] > a[1] ? ((7 - k) * a[0] + k * a[1]) / 7 : k < 5 ? ((5 - k) * a[0] + k * a[1]) / 5 : k == 5 ? 0 : 255;
-            uint64_t abits = 0;
-            for (int k = 0; k < 6; k++) abits |= (uint64_t)b[2 + k] << (8 * k);
-            float colors[16][3];
-            decode_colors(b + 8, false, colors);
-            for (int i = 0; i < 16; i++) {
-                float* px = &src[(((size_t)by * 4 + i / 4) * size + bx * 4 + i % 4) * 4];
-                std::memcpy(px, colors[i], 3 * sizeof(float));
-                px[3] = (float)a[abits >> (3 * i) & 7];
-            }
-        }
-    auto texel = [&](int x, int y, int ch) { return src[((size_t)std::clamp(y, 0, size - 1) * size + std::clamp(x, 0, size - 1)) * 4 + ch]; };
-    std::vector<uint8_t> rgba((size_t)size * size * 4);
-    const float c = size / 2.f;
-    for (int y = 0; y < size; y++)
-        for (int x = 0; x < size; x++) {
-            const float dx = x + 0.5f - c, dy = y + 0.5f - c, round = std::hypot(dx, dy);
-            const float k = round > 0 ? std::sqrt(std::sqrt(dx * dx * dx * dx + dy * dy * dy * dy)) / round : 0;
-            const float u = c + dx * k - 0.5f, v = c + dy * k - 0.5f, fu = u - std::floor(u), fv = v - std::floor(v);
-            const int iu = (int)std::floor(u), iv = (int)std::floor(v);
-            for (int ch = 0; ch < 4; ch++) {
-                const float top = texel(iu, iv, ch) + (texel(iu + 1, iv, ch) - texel(iu, iv, ch)) * fu;
-                const float bottom = texel(iu, iv + 1, ch) + (texel(iu + 1, iv + 1, ch) - texel(iu, iv + 1, ch)) * fu;
-                rgba[((size_t)y * size + x) * 4 + ch] = (uint8_t)std::lround(std::clamp(top + (bottom - top) * fv, 0.f, 255.f));
-            }
-        }
-    prompt_bc3(rgba.data(), size, size, out, (size_t)size / 4 * 16);
-}
-
 void prompt_mark_dxt1(uint8_t* dxt1, int width, int height, const prompt_mark& m, prompt_skin skin, const prompt_glyph& g)
 {
     const float max_w = 1.3f * m.w;
@@ -576,7 +540,7 @@ void prompt_mark_dxt1(uint8_t* dxt1, int width, int height, const prompt_mark& m
     for (int by = 0; by < size / 4; by++)
         for (int bx = 0; bx < size / 4; bx++) {
             float colors[16][3];
-            decode_colors(block(bx, by), true, colors);
+            decode_colors(block(bx, by), colors);
             for (int i = 0; i < 16; i++) std::memcpy(&px[(((size_t)by * 4 + i / 4) * size + bx * 4 + i % 4) * 3], colors[i], sizeof colors[i]);
         }
     const float fx = m.x - x0, fy = m.y - y0, r = m.round ? std::min(m.w, m.h) / 2 : 3.f;

@@ -468,7 +468,7 @@ uint8_t* reserve_guest_memory()
 
 std::filesystem::path desktop_identity()
 {
-    SDL_SetAppMetadata("Vajra", "1.0.2.0", "Vajra");
+    SDL_SetAppMetadata("Vajra", VAJRA_VERSION ".0", "Vajra");
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
     return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "Vajra.png";
 }
@@ -506,7 +506,7 @@ void on_save_loaded(void) { rl_ach_save_loaded(); }
 
 void init_recomp_achievements()
 {
-    rl_ach_set_info("vajra", "1.0.2");
+    rl_ach_set_info("vajra", VAJRA_VERSION);
     rl_ach_init("ps3", nullptr, nullptr);
     ps3_trophy_set_callbacks(on_trophy_register, on_trophy_unlock, is_trophy_quiet, on_trophy_frame);
     cellSaveData_set_load_callback(on_save_loaded);

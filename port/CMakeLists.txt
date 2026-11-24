@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(AsuraRecomp LANGUAGES C CXX)
+project(AsuraRecomp VERSION 1.0.3 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -37,14 +37,15 @@ else()
 endif()
 
 set(ASURA_PROFILE "${ASURA_PGO_DIR}/asura.profdata")
-set(ASURA_PGO_NAMES "-mllvm -static-func-full-module-prefix=false")
+set(ASURA_PGO_COMPILE_OPTIONS "")
 if(ASURA_PGO STREQUAL "gen")
     file(GLOB ASURA_RAW "${ASURA_PGO_DIR}/raw/*.profraw")
     if(ASURA_RAW)
         file(REMOVE ${ASURA_RAW})
     endif()
     file(MAKE_DIRECTORY "${ASURA_PGO_DIR}/raw")
-    string(APPEND ASURA_FLAGS " -fprofile-instr-generate=${ASURA_PGO_DIR}/raw/asura-%p.profraw -DASURA_PGO_GEN ${ASURA_PGO_NAMES}")
+    string(APPEND ASURA_FLAGS " -fprofile-instr-generate=${ASURA_PGO_DIR}/raw/asura-%p.profraw -DASURA_PGO_GEN")
+    list(APPEND ASURA_PGO_COMPILE_OPTIONS -mllvm -static-func-full-module-prefix=false)
     string(APPEND ASURA_LINK " -Wl,-mllvm,-static-func-full-module-prefix=false")
     set(ASURA_PROFILE "")
 elseif(ASURA_PGO STREQUAL "auto")
@@ -58,13 +59,17 @@ elseif(ASURA_PGO STREQUAL "auto")
         endif()
     endforeach()
     if(EXISTS "${ASURA_PROFILE}")
-        string(APPEND ASURA_FLAGS " -fprofile-instr-use=${ASURA_PROFILE} -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin ${ASURA_PGO_NAMES}")
+        string(APPEND ASURA_FLAGS " -fprofile-instr-use=${ASURA_PROFILE} -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin")
+        list(APPEND ASURA_PGO_COMPILE_OPTIONS -mllvm -static-func-full-module-prefix=false)
         string(APPEND ASURA_LINK " -Wl,-mllvm,-static-func-full-module-prefix=false")
     else()
         set(ASURA_PROFILE "")
     endif()
 else()
     set(ASURA_PROFILE "")
+endif()
+if(ASURA_PGO_COMPILE_OPTIONS)
+    add_compile_options(${ASURA_PGO_COMPILE_OPTIONS})
 endif()
 
 set(CMAKE_C_FLAGS_RELEASE "${ASURA_FLAGS}")
@@ -143,8 +148,8 @@ if(WIN32)
     file(WRITE "${PORT_RC}"
 "1 ICON \"Vajra.ico\"
 1 VERSIONINFO
-FILEVERSION 1,0,2,0
-PRODUCTVERSION 1,0,2,0
+FILEVERSION ${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0
+PRODUCTVERSION ${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -156,8 +161,8 @@ BEGIN
       VALUE \"ProductName\", \"Vajra\"
       VALUE \"InternalName\", \"Vajra\"
       VALUE \"OriginalFilename\", \"Vajra.exe\"
-      VALUE \"FileVersion\", \"1.0.2.0\"
-      VALUE \"ProductVersion\", \"1.0.2.0\"
+      VALUE \"FileVersion\", \"${PROJECT_VERSION}.0\"
+      VALUE \"ProductVersion\", \"${PROJECT_VERSION}.0\"
     END
   END
   BLOCK \"VarFileInfo\"
@@ -240,14 +245,15 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     -ffp-contract=off)
 
 file(SHA256 "${PORT_EBOOT}" PORT_EBOOT_SHA256)
+set_source_files_properties(main.cpp PROPERTIES COMPILE_DEFINITIONS VAJRA_VERSION="${PROJECT_VERSION}")
 set_source_files_properties(game_files.cpp PROPERTIES COMPILE_DEFINITIONS PORT_EBOOT_SHA256="${PORT_EBOOT_SHA256}")
 set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "-w" COMPILE_DEFINITIONS "PPU_FAST_FP")
 set_source_files_properties(${SPU_SOURCES} PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
-    COMPILE_OPTIONS "${PS3RECOMP_OPT_FLAG}")
+    COMPILE_OPTIONS "${PS3RECOMP_OPT_FLAG};-w")
 
 if(ASURA_PROFILE)
-    foreach(target IN ITEMS ${PROJECT_NAME} ps3recomp_runtime)
+    foreach(target IN ITEMS ${PROJECT_NAME} ps3recomp_runtime rl_achievements)
         get_target_property(sources ${target} SOURCES)
         set_property(SOURCE ${sources} TARGET_DIRECTORY ${target} APPEND PROPERTY OBJECT_DEPENDS "${ASURA_PROFILE}")
     endforeach()

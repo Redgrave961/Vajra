@@ -2,6 +2,7 @@
 
 #include "../ps3recomp/libs/filesystem/ps3_aes.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -143,7 +144,12 @@ bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::p
                 if (f.name == std::string("dev_flash/") + want) {
                     const std::filesystem::path dst = flash / want;
                     std::filesystem::create_directories(dst.parent_path());
-                    std::ofstream(dst, std::ios::binary).write(reinterpret_cast<const char*>(tar.data() + at + 512), (std::streamsize)f.size);
+                    std::ofstream out(dst, std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(tar.data() + at + 512), (std::streamsize)f.size);
+                    if (!out) {
+                        error = "Write failed";
+                        return false;
+                    }
                     found++;
                 }
             at += 512 + ((f.size + 511) & ~511ull);
@@ -173,7 +179,7 @@ bool download_file(const char* url, uint64_t expected_size, const std::filesyste
         return false;
     }
     while (WaitForSingleObject(pi.hProcess, 100) == WAIT_TIMEOUT)
-        progress = (float)std::filesystem::file_size(dst, ec) / (float)expected_size;
+        progress = std::clamp((float)std::filesystem::file_size(dst, ec) / (float)expected_size, 0.f, 1.f);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);
@@ -188,7 +194,7 @@ bool download_file(const char* url, uint64_t expected_size, const std::filesyste
     }
     int status = 0;
     while (!waitpid(pid, &status, WNOHANG)) {
-        progress = (float)std::filesystem::file_size(dst, ec) / (float)expected_size;
+        progress = std::clamp((float)std::filesystem::file_size(dst, ec) / (float)expected_size, 0.f, 1.f);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;

@@ -27,6 +27,5 @@ struct prompt_mark {
 
 bool prompt_render(prompt_skin skin, const prompt_frame& frame, const prompt_glyph& glyph, int size, uint8_t* rgba);
 void prompt_glow(uint8_t* rgba, int size);
-void prompt_squircle(const uint8_t* bc3, int size, uint8_t* out);
 void prompt_mark_dxt1(uint8_t* dxt1, int width, int height, const prompt_mark& mark, prompt_skin skin, const prompt_glyph& glyph);
 void prompt_bc3(const uint8_t* rgba, int w, int h, uint8_t* out, size_t row_pitch);
