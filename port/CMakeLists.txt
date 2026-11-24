@@ -143,8 +143,8 @@ if(WIN32)
     file(WRITE "${PORT_RC}"
 "1 ICON \"Vajra.ico\"
 1 VERSIONINFO
-FILEVERSION 1,0,1,0
-PRODUCTVERSION 1,0,1,0
+FILEVERSION 1,0,2,0
+PRODUCTVERSION 1,0,2,0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -156,8 +156,8 @@ BEGIN
       VALUE \"ProductName\", \"Vajra\"
       VALUE \"InternalName\", \"Vajra\"
       VALUE \"OriginalFilename\", \"Vajra.exe\"
-      VALUE \"FileVersion\", \"1.0.1.0\"
-      VALUE \"ProductVersion\", \"1.0.1.0\"
+      VALUE \"FileVersion\", \"1.0.2.0\"
+      VALUE \"ProductVersion\", \"1.0.2.0\"
     END
   END
   BLOCK \"VarFileInfo\"

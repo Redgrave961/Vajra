@@ -92,6 +92,17 @@
       "defaults": { "frame_rate": "unlimited" }
     },
     {
+      "id": "anti_aliasing",
+      "label": "SMAA",
+      "help": "Subpixel morphological anti-aliasing for smoother edges.",
+      "group": "Graphics",
+      "choices": [
+        { "label": "On", "set": { "anti_aliasing": "on" } },
+        { "label": "Off", "set": { "anti_aliasing": "off" } }
+      ],
+      "defaults": { "anti_aliasing": "on" }
+    },
+    {
       "id": "motion_blur",
       "label": "Motion Blur",
       "help": "Blur from camera and object motion.",

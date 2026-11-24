@@ -164,7 +164,7 @@ Choices frame_rate_choices()
     return list;
 }
 
-enum : uint32_t { row_display = 0, row_frame_rate = 2, row_mouse = 6 };
+enum : uint32_t { row_display = 0, row_frame_rate = 2, row_mouse = 7 };
 
 bool g_settings_parsed;
 std::atomic<bool> g_motion_blur{ true };
@@ -175,6 +175,7 @@ std::atomic<bool> g_invert_mouse{ false };
 
 void apply_display(uint32_t value) { rsx_vk_set_display((rsx_vk_display)value); }
 void apply_resolution(uint32_t value) { rsx_vk_set_resolution_scale(value, 720); }
+void apply_aa(uint32_t value) { rsx_vk_set_aa(value ? RSX_VK_AA_SMAA : RSX_VK_AA_OFF); }
 void apply_frame_rate(uint32_t value)
 {
     const bool console = value == 30;
@@ -201,6 +202,7 @@ const Option k_options[] = {
     { "display", "Display Mode", "Windowed, borderless window, or exclusive fullscreen at the display's native mode.", display_choices, "borderless", nullptr, apply_display },
     { "resolution", "Resolution", "Internal rendering resolution.", resolution_choices, nullptr, parse_resolution, apply_resolution },
     { "frame_rate", "Frame Rate", "Frame rate limit. 30 uses the console's original pacing.", frame_rate_choices, "unlimited", parse_frame_rate, apply_frame_rate },
+    { "anti_aliasing", "SMAA", "Subpixel morphological anti-aliasing for smoother edges.", switch_choices, "on", nullptr, apply_aa },
     { "motion_blur", "Motion Blur", "Blur from camera and object motion.", switch_choices, "on", nullptr, apply_motion_blur },
     { "depth_of_field", "Depth of Field", "Blur outside the camera's focus, mainly in cutscenes.", switch_choices, "on", nullptr, apply_depth_of_field },
     { "bloom", "Bloom", "Glow around bright lights.", switch_choices, "on", nullptr, apply_bloom },
