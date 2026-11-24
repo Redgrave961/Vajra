@@ -143,8 +143,8 @@ if(WIN32)
     file(WRITE "${PORT_RC}"
 "1 ICON \"Vajra.ico\"
 1 VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION 1,0,1,0
+PRODUCTVERSION 1,0,1,0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -156,8 +156,8 @@ BEGIN
       VALUE \"ProductName\", \"Vajra\"
       VALUE \"InternalName\", \"Vajra\"
       VALUE \"OriginalFilename\", \"Vajra.exe\"
-      VALUE \"FileVersion\", \"1.0.0.0\"
-      VALUE \"ProductVersion\", \"1.0.0.0\"
+      VALUE \"FileVersion\", \"1.0.1.0\"
+      VALUE \"ProductVersion\", \"1.0.1.0\"
     END
   END
   BLOCK \"VarFileInfo\"
@@ -198,6 +198,7 @@ add_executable(${PROJECT_NAME}
     native_script.cpp
     native_script_core.cpp
     pc_options.cpp
+    presence.cpp
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_hle.cpp"
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"

@@ -2,6 +2,7 @@
 #include "game_files.h"
 #include "guest.h"
 #include "pc_options.h"
+#include "presence.h"
 #include "rl_achievements.h"
 #include "rsx_core.h"
 #include "vk/rsx_vk.h"
@@ -54,6 +55,7 @@ void ps3_load_prx_modules(void);
 void ppu_hle_init(void);
 void ppu_sysprx_register(void);
 void ppu_fs_register(void);
+void ppu_fs_set_open_callback(void (*cb)(const char*));
 void lv2_init_syscalls(void);
 int ppu_run(uint32_t entry_opd, uint32_t stack_top);
 void ppu_report_guest_lrs(void);
@@ -466,7 +468,7 @@ uint8_t* reserve_guest_memory()
 
 std::filesystem::path desktop_identity()
 {
-    SDL_SetAppMetadata("Vajra", "1.0.0.0", "Vajra");
+    SDL_SetAppMetadata("Vajra", "1.0.1.0", "Vajra");
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
     return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "Vajra.png";
 }
@@ -494,18 +496,20 @@ void on_trophy_register(int id, const char* name, const char* detail, char grade
     if (unlocked) rl_ach_native_earlier((uint32_t)id);
 }
 
-void on_trophy_unlock(int id) { rl_ach_native((uint32_t)id); }
+void on_trophy_unlock(int id)
+{
+    rl_ach_native((uint32_t)id);
+}
 int is_trophy_quiet(void) { return rl_ach_quiet_toasts(); }
 void on_trophy_frame(void) { rl_ach_frame(); }
 void on_save_loaded(void) { rl_ach_save_loaded(); }
 
 void init_recomp_achievements()
 {
-    rl_ach_set_info("vajra", "1.0.0");
-    if (rl_ach_init("ps3", nullptr, nullptr)) {
-        ps3_trophy_set_callbacks(on_trophy_register, on_trophy_unlock, is_trophy_quiet, on_trophy_frame);
-        cellSaveData_set_load_callback(on_save_loaded);
-    }
+    rl_ach_set_info("vajra", "1.0.1");
+    rl_ach_init("ps3", nullptr, nullptr);
+    ps3_trophy_set_callbacks(on_trophy_register, on_trophy_unlock, is_trophy_quiet, on_trophy_frame);
+    cellSaveData_set_load_callback(on_save_loaded);
 }
 
 void use_game_files(const game_files& files)
@@ -620,7 +624,11 @@ int main(int argc, char** argv)
     if (const char* dbg = std::getenv("PS3_DEBUG"); dbg && *dbg) std::thread(debug_console, dbg).detach();
 
     init_recomp_achievements();
+    presence_init();
+    ppu_fs_set_open_callback(presence_on_file_open);
     ppu_run(entry, k_stack_top);
+    ppu_fs_set_open_callback(nullptr);
+    presence_shutdown();
     rl_ach_shutdown();
     return g_sys_process_exit_called ? (int)g_sys_process_exit_code : 0;
 }
