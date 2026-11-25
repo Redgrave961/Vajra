@@ -28,6 +28,28 @@ constexpr uint32_t k_value_size = 0x10;
 constexpr uint32_t k_proxy_blur[] = { 0x14, 0x18, 0x1C };
 constexpr uint32_t k_proxy_bloom_scale = 0x38;
 constexpr uint32_t k_proxy_motion_blur = 0x110;
+constexpr uint32_t k_sys_settings = 0x01A56AB4;
+constexpr uint32_t k_sys_min_shadow_res = k_sys_settings + 0x388;
+constexpr uint32_t k_sys_max_shadow_res = k_sys_settings + 0x390;
+constexpr uint32_t k_sys_max_dom_shadow_res = k_sys_settings + 0x394;
+constexpr uint32_t k_sys_shadow_texels_per_pixel = k_sys_settings + 0x398;
+constexpr uint32_t k_sys_shadow_filter_radius = k_sys_settings + 0x3B8;
+constexpr uint32_t k_sys_shadow_depth_bias = k_sys_settings + 0x3BC;
+constexpr uint32_t k_rhi_max_shadow_x = 0x019C2F6C;
+constexpr uint32_t k_rhi_max_shadow_y = 0x019C2F70;
+constexpr uint32_t k_rhi_max_dom_shadow = 0x019C2F74;
+constexpr uint32_t k_shadow_res = 1024;
+constexpr uint32_t k_sys_tex_lod_base = 0x01A56B58;
+constexpr uint32_t k_sys_tex_lod_count = 28;
+constexpr uint32_t k_sys_tex_lod_stride = 24;
+constexpr uint32_t k_tex_mips = 0xC4;
+constexpr uint32_t k_bulk_flags = 0x04;
+constexpr uint32_t k_bulk_elements = 0x08;
+constexpr uint32_t k_bulk_offset = 0x0C;
+constexpr uint32_t k_bulk_size_on_disk = 0x10;
+constexpr uint32_t k_bulk_data = 0x24;
+constexpr uint32_t k_bulk_separate_file = 0x01;
+constexpr uint32_t k_bulk_unused = 0x20;
 constexpr uint32_t k_use_vsync = 0x01A56E04;
 constexpr uint32_t k_gnames = 0x01A0B014;
 constexpr uint32_t k_object_name = 0x2C;
@@ -603,6 +625,34 @@ Member m_current_scene{ "CurrentScene" }, m_pause_menu{ "PauseMenu" }, m_common{
     m_player_owner{ "PlayerOwner" }, m_player_pawn{ "BCPlayerPawn" }, m_generated_events{ "GeneratedEvents" }, m_enabled{ "bEnabled" },
     m_trigger_count{ "TriggerCount" }, m_max_trigger_count{ "MaxTriggerCount" }, m_input_buttons{ "InputButtons" };
 std::atomic<uint32_t> g_push_button_class{ 0 };
+std::atomic<uint32_t> g_texture2d_class{ 0 };
+
+bool is_texture2d(uint32_t object)
+{
+    const uint32_t cls = object ? vm_read32(object + k_object_class) : 0;
+    if (!cls) return false;
+    const uint32_t cached = g_texture2d_class.load(std::memory_order_relaxed);
+    if (cached && cls == cached) return true;
+    for (uint32_t c = cls; c; c = vm_read32(c + k_struct_super)) {
+        if (cached ? (c == cached) : object_name_eq(c, "Texture2D")) {
+            if (!cached) g_texture2d_class.store(c, std::memory_order_relaxed);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool mip_has_data(uint32_t mip)
+{
+    if (!mip) return false;
+    const uint32_t flags = vm_read32(mip + k_bulk_flags);
+    if (flags & k_bulk_unused) return false;
+    if ((int32_t)vm_read32(mip + k_bulk_elements) <= 0) return false;
+    const int32_t size_on_disk = (int32_t)vm_read32(mip + k_bulk_size_on_disk);
+    if (flags & k_bulk_separate_file)
+        return size_on_disk > 0 && vm_read32(mip + k_bulk_offset) != 0xFFFFFFFFu;
+    return vm_read32(mip + k_bulk_data) != 0 || size_on_disk > 0;
+}
 
 bool push_button_event(uint32_t event)
 {
@@ -912,12 +962,48 @@ void pc_options_mouse_scale(float* yaw, float* pitch)
     *pitch = g_invert_mouse.load(std::memory_order_relaxed) ? -*yaw : *yaw;
 }
 
+void func_001F43B4(ppu_context* ctx)
+{
+    const uint32_t tex = (uint32_t)ctx->gpr[4];
+    run(func_001F43B4_lifted, ctx);
+    const int32_t bias = (int32_t)ctx->gpr[3];
+    if (bias < 0 || !is_texture2d(tex)) return;
+    const uint32_t mips_data = vm_read32(tex + k_tex_mips);
+    const int32_t mips_num = (int32_t)vm_read32(tex + k_tex_mips + 4u);
+    if (!mips_data || mips_num <= 1 || bias >= mips_num) return;
+    int32_t valid = bias;
+    while (valid < mips_num && !mip_has_data(vm_read32(mips_data + (uint32_t)valid * 4u)))
+        valid++;
+    if (valid < mips_num && valid != bias)
+        ctx->gpr[3] = (uint64_t)(int64_t)valid;
+}
+
+extern void func_00873378_lifted(ppu_context* ctx);
+
+void func_00873378(ppu_context* ctx)
+{
+    run(func_00873378_lifted, ctx);
+    vm_write32(k_rhi_max_shadow_x, k_shadow_res);
+    vm_write32(k_rhi_max_shadow_y, k_shadow_res);
+    vm_write32(k_rhi_max_dom_shadow, k_shadow_res);
+}
+
 void func_001F8100(ppu_context* ctx)
 {
     run(func_001F8100_lifted, ctx);
     std::lock_guard<std::mutex> hold(g_settings_lock);
     g_settings_parsed = true;
     vm_write32(k_use_vsync, g_applied[row_frame_rate] == 30u);
+    for (uint32_t g = 0; g < k_sys_tex_lod_count; g++) {
+        const uint32_t bias_ea = k_sys_tex_lod_base + g * k_sys_tex_lod_stride + 8u;
+        if ((int32_t)vm_read32(bias_ea) > 0) vm_write32(bias_ea, 0u);
+    }
+    vm_write32(k_sys_min_shadow_res, 128u);
+    vm_write32(k_sys_max_shadow_res, k_shadow_res);
+    vm_write32(k_sys_max_dom_shadow_res, k_shadow_res);
+    vm_write32(k_sys_shadow_texels_per_pixel, to_bits(2.0f));
+    vm_write32(k_sys_shadow_filter_radius, to_bits(4.0f));
+    vm_write32(k_sys_shadow_depth_bias, to_bits(0.024f));
 }
 
 void func_014749B8(ppu_context* ctx)

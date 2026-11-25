@@ -520,6 +520,7 @@ void use_game_files(const game_files& files)
     default_env("PS3_GAMEDATA_ROOT", files.user);
     default_env("PS3_DEV_FLASH", files.flash);
     default_env("PS3_VERBOSE", "0");
+    default_env("PS3_ARGV", "-POOLSIZE=320");
 }
 
 }
