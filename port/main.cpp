@@ -23,6 +23,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #include <timeapi.h>
 #else
 #include <SDL3/SDL_hints.h>
@@ -113,10 +114,18 @@ unsigned env_hash(const char* s)
 
 const char* env_os(const char* name)
 {
-    const DWORD n = GetEnvironmentVariableA(name, nullptr, 0);
-    if (!n) return nullptr;
-    char* v = static_cast<char*>(std::malloc(n));
-    if (!v || GetEnvironmentVariableA(name, v, n) >= n) {
+    wchar_t wname[256];
+    if (!MultiByteToWideChar(CP_UTF8, 0, name, -1, wname, 256)) return nullptr;
+    const DWORD wn = GetEnvironmentVariableW(wname, nullptr, 0);
+    if (!wn) return nullptr;
+    std::wstring wval(wn, L'\0');
+    const DWORD got = GetEnvironmentVariableW(wname, wval.data(), wn);
+    if (!got || got >= wn) return nullptr;
+    wval.resize(got);
+    const int n = WideCharToMultiByte(CP_UTF8, 0, wval.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return nullptr;
+    char* v = static_cast<char*>(std::malloc((size_t)n));
+    if (!v || !WideCharToMultiByte(CP_UTF8, 0, wval.c_str(), -1, v, n, nullptr, nullptr)) {
         std::free(v);
         return nullptr;
     }
@@ -369,10 +378,12 @@ void debug_console(const char* path)
             ppu_report_guest_lrs();
         } else if (std::sscanf(cmd, "mem %x %u", &a, &b) >= 1) {
             if (b == 0 || b > 4096) b = 64;
-            for (unsigned off = 0; off < b; off += 16) {
-                std::fprintf(o, "  0x%08X", a + off);
-                for (unsigned i = 0; i < 16 && off + i < b; i++) std::fprintf(o, " %02X", vm_base[(size_t)a + off + i]);
-                std::fprintf(o, "\n");
+            if ((uint64_t)a + b <= k_vm_size) {
+                for (unsigned off = 0; off < b; off += 16) {
+                    std::fprintf(o, "  0x%08X", a + off);
+                    for (unsigned i = 0; i < 16 && off + i < b; i++) std::fprintf(o, " %02X", vm_base[(size_t)a + off + i]);
+                    std::fprintf(o, "\n");
+                }
             }
         } else {
             std::fprintf(o, "  commands: stat, threads, mem <hex> [len]\n");
@@ -411,8 +422,9 @@ std::filesystem::path executable_dir()
 
 void default_env(const char* name, const std::filesystem::path& value)
 {
-    if (GetEnvironmentVariableA(name, nullptr, 0)) return;
-    _wputenv_s(std::filesystem::path(name).c_str(), value.c_str());
+    const std::filesystem::path wname(name);
+    if (GetEnvironmentVariableW(wname.c_str(), nullptr, 0)) return;
+    _wputenv_s(wname.c_str(), value.c_str());
     env_cache_update(name);
 }
 
@@ -422,10 +434,10 @@ void attach_log(const std::filesystem::path& exe)
     if (!log_env || !*log_env || !std::strcmp(log_env, "0")) return;
     const HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
     if (err && err != INVALID_HANDLE_VALUE) return;
-    const std::string log = (exe / "asura.log").string();
-    if (FILE* f = std::fopen(log.c_str(), "wb")) std::fclose(f);
-    std::freopen(log.c_str(), "a", stderr);
-    std::freopen(log.c_str(), "a", stdout);
+    const std::filesystem::path log = exe / "asura.log";
+    if (FILE* f = _wfopen(log.c_str(), L"wb")) std::fclose(f);
+    _wfreopen(log.c_str(), L"a", stderr);
+    _wfreopen(log.c_str(), L"a", stdout);
 }
 
 void precise_timers() { timeBeginPeriod(1); }
@@ -545,16 +557,45 @@ int main(int argc, char** argv)
     launch_options opts;
     const char* elf = nullptr;
 
-    auto path_arg = [](const char* s) {
-        return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(s)));
+    auto utf8_path = [](const std::filesystem::path& p) {
+        const std::u8string s = p.u8string();
+        return std::string(s.begin(), s.end());
     };
-    for (int i = 1; i < argc; i++) {
-        const std::string_view a = argv[i];
+    std::vector<std::string> owned_args;
+#ifdef _WIN32
+    int wargc = 0;
+    if (LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc)) {
+        owned_args.reserve((size_t)wargc);
+        for (int i = 0; i < wargc; i++) owned_args.push_back(utf8_path(std::filesystem::path(wargv[i])));
+        LocalFree(wargv);
+    } else {
+        for (int i = 0; i < argc; i++) owned_args.emplace_back(argv[i]);
+    }
+#else
+    for (int i = 0; i < argc; i++) owned_args.emplace_back(argv[i]);
+#endif
+    auto path_arg = [](const std::string& s) {
+        return std::filesystem::path(std::u8string(s.begin(), s.end()));
+    };
+    for (size_t i = 1; i < owned_args.size(); i++) {
+        const std::string_view a = owned_args[i];
         auto take = [&](std::string_view flag, std::filesystem::path& out) -> bool {
-            if (a == flag && i + 1 < argc) { out = path_arg(argv[++i]); return true; }
+            if (a == flag && i + 1 < owned_args.size()) { out = path_arg(owned_args[++i]); return true; }
             if (a.size() > flag.size() + 1 && a.starts_with(flag) && a[flag.size()] == '=') {
-                out = path_arg(argv[i] + flag.size() + 1);
+                out = path_arg(owned_args[i].substr(flag.size() + 1));
                 return true;
+            }
+            return false;
+        };
+        auto take_dlc = [&](std::filesystem::path& out) -> bool {
+            if (take("--dlc", out) || take("--rap", out)) return true;
+            if (a.size() >= 7 && a.starts_with("--dlc") && a[5] >= '1' && a[5] <= '9') {
+                const size_t eq = a.find('=');
+                if (eq != std::string_view::npos) {
+                    if (eq + 1 < a.size()) { out = path_arg(owned_args[i].substr(eq + 1)); return true; }
+                    return false;
+                }
+                if (i + 1 < owned_args.size()) { out = path_arg(owned_args[++i]); return true; }
             }
             return false;
         };
@@ -563,15 +604,22 @@ int main(int argc, char** argv)
         else if (take("--data", data_dir)) {}
         else if (take("--game", opts.game)) {}
         else if (take("--update", opts.update)) {}
-        else if (take("--dlc", dlc_item)) { opts.dlcs.push_back(std::move(dlc_item)); }
-        else if (!a.starts_with("-") && !elf) elf = argv[i];
+        else if (take_dlc(dlc_item)) { if (!dlc_item.empty()) opts.dlcs.push_back(std::move(dlc_item)); }
+        else if (!a.starts_with("-") && !elf) elf = owned_args[i].c_str();
     }
 
     if (data_dir.empty()) {
+#ifdef _WIN32
+        if (const wchar_t* env_data = _wgetenv(L"RECOMPLAUNCHER_DATA"); env_data && *env_data)
+            data_dir = std::filesystem::path(env_data);
+        else
+            data_dir = exe;
+#else
         if (const char* env_data = std::getenv("RECOMPLAUNCHER_DATA"); env_data && *env_data)
             data_dir = path_arg(env_data);
         else
             data_dir = exe;
+#endif
     }
     {
         std::error_code data_ec;
@@ -611,7 +659,9 @@ int main(int argc, char** argv)
     std::error_code cache_ec;
     const std::filesystem::path cache_dir = data_dir / "cache";
     std::filesystem::create_directories(cache_dir, cache_ec);
-    rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title(), (cache_dir / "vk_pipelines.bin").string().c_str(), icon.string().c_str()));
+    const std::string cache_path = utf8_path(cache_dir / "vk_pipelines.bin");
+    const std::string icon_path = utf8_path(icon);
+    rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title(), cache_path.c_str(), icon_path.c_str()));
     use_button_prompts();
 
     ppu_recomp_register();

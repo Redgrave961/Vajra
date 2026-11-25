@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -319,25 +320,28 @@ std::filesystem::path g_settings_path;
 
 void load()
 {
-    FILE* f = std::fopen(g_settings_path.string().c_str(), "r");
+    std::ifstream f(g_settings_path);
     if (!f) return;
-    char line[128];
-    while (std::fgets(line, sizeof line, f)) {
-        line[std::strcspn(line, "\r\n")] = 0;
-        char* eq = std::strchr(line, '=');
-        if (!eq) continue;
-        *eq = 0;
+    for (std::string line; std::getline(f, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = line.substr(0, eq);
+        const std::string val = line.substr(eq + 1);
         for (uint32_t r = 0; r < k_rows; r++)
-            if (!std::strcmp(line, k_options[r].key)) g_saved[r] = eq + 1;
-        if (std::strncmp(line, k_bind_prefix, sizeof k_bind_prefix - 1)) continue;
+            if (key == k_options[r].key) g_saved[r] = val;
+        if (key.rfind(k_bind_prefix, 0) != 0) continue;
+        const std::string act = key.substr(sizeof k_bind_prefix - 1);
         for (int a = 0; a < PAD_ACTION_COUNT; a++) {
-            if (std::strcmp(line + sizeof k_bind_prefix - 1, k_action_keys[a])) continue;
-            char* at = eq + 1;
-            for (int s = 0; s < PAD_BINDING_SLOTS; s++, at += *at == ',')
-                pad_binding_set(a, s, (int)std::strtol(at, &at, 10));
+            if (act != k_action_keys[a]) continue;
+            const char* at = val.c_str();
+            for (int s = 0; s < PAD_BINDING_SLOTS; s++, at += *at == ',') {
+                char* end = nullptr;
+                pad_binding_set(a, s, (int)std::strtol(at, &end, 10));
+                at = end;
+            }
         }
     }
-    std::fclose(f);
 }
 
 std::optional<uint32_t> selected(uint32_t row, const Choices& list)
@@ -369,7 +373,7 @@ void sync(uint32_t row)
 
 void save()
 {
-    FILE* f = std::fopen(g_settings_path.string().c_str(), "w");
+    std::ofstream f(g_settings_path, std::ios::binary | std::ios::trunc);
     if (!f) return;
     for (uint32_t r = 0; r < k_rows; r++) {
         std::string token = g_saved[r];
@@ -377,14 +381,16 @@ void save()
             const Choices list = k_options[r].choices();
             if (const auto c = selected(r, list)) token = list[*c].token;
         }
-        if (!token.empty()) std::fprintf(f, "%s=%s\n", k_options[r].key, token.c_str());
+        if (!token.empty()) f << k_options[r].key << '=' << token << '\n';
     }
     for (int a = 0; a < PAD_ACTION_COUNT; a++) {
-        std::fprintf(f, "%s%s=", k_bind_prefix, k_action_keys[a]);
-        for (int s = 0; s < PAD_BINDING_SLOTS; s++) std::fprintf(f, s ? ",%d" : "%d", pad_binding(a, s));
-        std::fputc('\n', f);
+        f << k_bind_prefix << k_action_keys[a] << '=';
+        for (int s = 0; s < PAD_BINDING_SLOTS; s++) {
+            if (s) f << ',';
+            f << pad_binding(a, s);
+        }
+        f << '\n';
     }
-    std::fclose(f);
 }
 
 void set(uint32_t row, uint32_t index)
@@ -561,59 +567,60 @@ bool object_name_eq(uint32_t object, const char* want)
 }
 
 struct Member {
-    struct Entry {
-        std::atomic<uint32_t> owner{ 0 };
+    struct Resolved {
         uint32_t offset = 0;
         uint32_t detail = 0;
         bool found = false;
     };
-    static constexpr uint32_t k_cap = 8;
+    struct Entry {
+        std::atomic<uint32_t> owner{ 0 };
+        Resolved r{};
+    };
+    static constexpr uint32_t k_cap = 16;
 
     const char* name;
-    std::atomic<uint32_t> detail{ 0 };
     std::atomic<uint32_t> count{ 0 };
     Entry cache[k_cap]{};
     std::mutex lock{};
 
-    const Entry* bind(uint32_t cls)
+    Resolved bind(uint32_t cls)
     {
         const uint32_t n = count.load(std::memory_order_acquire);
         for (uint32_t i = 0; i < n; ++i)
-            if (cache[i].owner.load(std::memory_order_relaxed) == cls) return &cache[i];
+            if (cache[i].owner.load(std::memory_order_relaxed) == cls) return cache[i].r;
 
         std::lock_guard<std::mutex> guard(lock);
         const uint32_t n2 = count.load(std::memory_order_relaxed);
         for (uint32_t i = 0; i < n2; ++i)
-            if (cache[i].owner.load(std::memory_order_relaxed) == cls) return &cache[i];
+            if (cache[i].owner.load(std::memory_order_relaxed) == cls) return cache[i].r;
 
         uint32_t field = 0;
         for (uint32_t c = cls; c && !field; c = vm_read32(c + k_struct_super))
             for (uint32_t f = vm_read32(c + k_struct_children); f && !field; f = vm_read32(f + k_field_next))
                 if (object_name_eq(f, name)) field = f;
 
-        const uint32_t slot = n2 < k_cap ? n2 : (k_cap - 1);
-        Entry& e = cache[slot];
-        e.found = field != 0;
-        e.offset = field ? vm_read32(field + k_property_offset) : 0;
-        e.detail = field ? vm_read32(field + k_property_detail) : 0;
-        e.owner.store(cls, std::memory_order_relaxed);
-        if (n2 < k_cap) count.store(n2 + 1, std::memory_order_release);
-        return &e;
+        const Resolved res{ field ? vm_read32(field + k_property_offset) : 0, field ? vm_read32(field + k_property_detail) : 0, field != 0 };
+        if (n2 < k_cap) {
+            cache[n2].r = res;
+            cache[n2].owner.store(cls, std::memory_order_relaxed);
+            count.store(n2 + 1, std::memory_order_release);
+        }
+        return res;
     }
 
-    uint32_t at(uint32_t base, uint32_t cls)
+    uint32_t at(uint32_t base, uint32_t cls, uint32_t* out_detail = nullptr)
     {
-        const Entry* e = bind(cls);
-        detail.store(e->detail, std::memory_order_relaxed);
-        return e->found ? base + e->offset : 0;
+        const Resolved r = bind(cls);
+        if (out_detail) *out_detail = r.detail;
+        return r.found ? base + r.offset : 0;
     }
 
     uint32_t object(uint32_t object) { const uint32_t a = at(object, vm_read32(object + k_object_class)); return a ? vm_read32(a) : 0; }
     uint8_t byte(uint32_t object) { const uint32_t a = at(object, vm_read32(object + k_object_class)); return a ? vm_read8(a) : 0; }
     bool flag(uint32_t object)
     {
-        const Entry* e = bind(vm_read32(object + k_object_class));
-        return e->found && (vm_read32(object + e->offset) & e->detail);
+        const Resolved r = bind(vm_read32(object + k_object_class));
+        return r.found && (vm_read32(object + r.offset) & r.detail);
     }
 };
 
@@ -686,16 +693,17 @@ struct Elements {
 
 Elements elements(Member& array, uint32_t base, uint32_t owner)
 {
-    const uint32_t at = array.at(base, owner);
-    if (!at) return {};
-    const uint32_t inner = array.detail.load(std::memory_order_relaxed);
+    uint32_t inner = 0;
+    const uint32_t at = array.at(base, owner, &inner);
+    if (!at || !inner) return {};
     return { vm_read32(at), vm_read32(at + 4), vm_read32(inner + k_property_element), vm_read32(inner + k_property_detail) };
 }
 
 bool bit(Member& member, uint32_t base, uint32_t owner)
 {
-    const uint32_t at = member.at(base, owner);
-    return at && (vm_read32(at) & member.detail.load(std::memory_order_relaxed));
+    uint32_t mask = 0;
+    const uint32_t at = member.at(base, owner, &mask);
+    return at && (vm_read32(at) & mask);
 }
 
 uint32_t stick_bits(uint8_t command)
@@ -710,9 +718,10 @@ uint32_t stick_lit(uint32_t system)
     const Elements judges = elements(m_judge_info, system, vm_read32(system + k_object_class));
     for (uint32_t j = 0; j < judges.count; j++) {
         const uint32_t judge = judges.data + j * judges.stride;
-        const uint32_t request = m_request.at(judge, judges.type);
+        uint32_t req_type = 0;
+        const uint32_t request = m_request.at(judge, judges.type, &req_type);
         if (!request || !bit(m_enable_judge, judge, judges.type) || bit(m_paused, judge, judges.type)) continue;
-        const Elements buttons = elements(m_buttons, request, m_request.detail.load(std::memory_order_relaxed));
+        const Elements buttons = elements(m_buttons, request, req_type);
         const Elements inputs = elements(m_input_info, judge, judges.type);
         for (uint32_t b = 0; b < buttons.count && b < inputs.count; b++) {
             const uint32_t input = inputs.data + b * inputs.stride;
@@ -741,8 +750,9 @@ int face_layout()
 {
     const uint32_t save = live(g_save_param);
     if (!save) return 0;
-    const uint32_t system = m_system_param.at(save, vm_read32(save + k_object_class));
-    const uint32_t key = system ? m_key_config.at(system, m_system_param.detail.load(std::memory_order_relaxed)) : 0;
+    uint32_t sys_type = 0;
+    const uint32_t system = m_system_param.at(save, vm_read32(save + k_object_class), &sys_type);
+    const uint32_t key = system ? m_key_config.at(system, sys_type) : 0;
     const uint32_t type = key ? vm_read8(key) : 0;
     return type < k_key_config_types ? (int)type : 0;
 }
@@ -898,16 +908,16 @@ void pc_options_link(uint32_t function, const std::string& path)
 {
     for (size_t i = 0; i < std::size(k_hooks); i++)
         if (path == k_hooks[i].first) {
-            g_hooks[i].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_relaxed);
-            g_pc_options_hook_mask.fetch_or(hook_bit(function), std::memory_order_relaxed);
+            g_hooks[i].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_release);
+            g_pc_options_hook_mask.fetch_or(hook_bit(function), std::memory_order_release);
         }
 }
 
 uint32_t pc_options_call_slow(uint32_t self, uint32_t function)
 {
-    if (!function || !(g_pc_options_hook_mask.load(std::memory_order_relaxed) & hook_bit(function))) return 0;
+    if (!function || !(g_pc_options_hook_mask.load(std::memory_order_acquire) & hook_bit(function))) return 0;
     for (const std::atomic<uint64_t>& slot : g_hooks) {
-        const uint64_t hook = slot.load(std::memory_order_relaxed);
+        const uint64_t hook = slot.load(std::memory_order_acquire);
         if ((uint32_t)(hook >> 32) != function) continue;
         if ((uint32_t)hook == hook_judge_update || (uint32_t)hook == hook_judge_destroyed) {
             g_stick_lit.store((uint32_t)hook == hook_judge_update ? stick_lit(self) : 0, std::memory_order_relaxed);
@@ -1017,7 +1027,9 @@ void func_01472450(ppu_context* ctx)
     const uint32_t file = (uint32_t)ctx->gpr[3];
     if (!file || vm_read32(file) != k_memory_file_vtable || vm_read32(file + 0xC) < 8) return;
     const uint32_t size = vm_read32(file + 0xC);
-    const uint8_t* swf = vm_base + vm_read32(file + 8);
+    const uint32_t swf_ea = vm_read32(file + 8);
+    if (!swf_ea) return;
+    const uint8_t* swf = vm_base + swf_ea;
     for (Menu& menu : g_menus) {
         if (size < menu.size || le32(swf + 4) != menu.size || fnv1a(swf, menu.size) != menu.hash) continue;
         uint32_t patched = 0, patched_size = 0;

@@ -13,9 +13,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <memory>
 #include <mutex>
 #include <thread>
-#include <unordered_map>
 
 namespace {
 
@@ -99,9 +99,21 @@ struct bg_job {
     std::atomic<int> row{ -1 };
     std::atomic<int> phase{ 0 };
     std::atomic<float> progress{ 0 };
+    std::atomic<bool> cancel{ false };
     std::mutex lock;
     std::string error;
     std::filesystem::path result;
+};
+
+struct pick_state {
+    std::mutex lock;
+    bool alive = true;
+    std::vector<std::pair<std::filesystem::path, game_add_mode>> items;
+};
+
+struct pick_req {
+    std::shared_ptr<pick_state> state;
+    game_add_mode mode = game_add_mode::any;
 };
 
 // Distance to line segment (for 4x4 supersampled SDF icons)
@@ -148,9 +160,12 @@ public:
         cur_default = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_DEFAULT);
         cur_pointer = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
 
-        if (SDL_Surface* image = icon.empty() ? nullptr : SDL_LoadPNG(icon.string().c_str())) {
-            SDL_SetWindowIcon(window, image);
-            SDL_DestroySurface(image);
+        if (!icon.empty()) {
+            const std::u8string icon_u8 = icon.u8string();
+            if (SDL_Surface* image = SDL_LoadPNG(std::string(icon_u8.begin(), icon_u8.end()).c_str())) {
+                SDL_SetWindowIcon(window, image);
+                SDL_DestroySurface(image);
+            }
         }
 
         int aw = 0, ah = 0, comp = 0;
@@ -169,7 +184,7 @@ public:
         SDL_SetRenderVSync(renderer, 1);
         int pw = 0, ph = 0;
         SDL_GetCurrentRenderOutputSize(renderer, &pw, &ph);
-        s = (float)pw / k_w;
+        s = pw > 0 ? (float)pw / k_w : ds;
 
         bake(hero_title, black, 46);
         bake(hero_sub, semibold, 14.5f);
@@ -187,7 +202,14 @@ public:
 
     ~setup_ui()
     {
+        {
+            std::lock_guard<std::mutex> hold(picks->lock);
+            picks->alive = false;
+        }
+        job.cancel.store(true, std::memory_order_relaxed);
         if (job.worker.joinable()) job.worker.join();
+        for (SDL_Gamepad* g : gamepads) SDL_CloseGamepad(g);
+        gamepads.clear();
         if (cur_pointer) SDL_DestroyCursor(cur_pointer);
         if (cur_default) SDL_DestroyCursor(cur_default);
         if (art_tex) SDL_DestroyTexture(art_tex);
@@ -469,7 +491,7 @@ private:
 
         const char* names[] = { "Game", "Update 1.02", "DLC", "Licenses", "Firmware" };
         const char* hints[] = {
-            "BLES01227 disc folder or decrypted ISO",
+            "BLES01227 (EU) or BLUS30721 (US) disc folder or decrypted ISO",
             "Official 1.02 patch (automatic Sony download)",
             "Optional DLC .pkg packages",
             "Optional .rap keys for DLC",
@@ -519,6 +541,7 @@ private:
         std::vector<uint8_t> px((size_t)f.aw * f.ah * 4, 255);
         for (size_t i = 0; i < alpha.size(); i++) px[i * 4 + 3] = alpha[i];
         f.tex = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, f.aw, f.ah);
+        if (!f.tex) return;
         SDL_UpdateTexture(f.tex, nullptr, px.data(), f.aw * 4);
         SDL_SetTextureBlendMode(f.tex, SDL_BLENDMODE_BLEND);
         SDL_SetTextureScaleMode(f.tex, SDL_SCALEMODE_LINEAR);
@@ -644,7 +667,7 @@ private:
                             check.update.state == item_state::ok ? btn_style::secondary : btn_style::gold } });
         if (paths.dlcs.empty()) add_row_btns(2, { { "Add DLC", a_dlc_add, btn_style::secondary } });
         else add_row_btns(2, { { "Add DLC", a_dlc_add, btn_style::secondary }, { "Clear", a_dlc_clear, btn_style::secondary } });
-        if (check.licences.state == item_state::warn) add_row_btns(3, { { "Add .rap", a_rap_add, btn_style::gold } });
+        add_row_btns(3, { { "Add .rap", a_rap_add, check.licences.state == item_state::warn ? btn_style::gold : btn_style::secondary } });
         add_row_btns(4, { { check.firmware.state == item_state::ok ? "Reinstall" : "Download", a_download,
                             check.firmware.state == item_state::ok ? btn_style::secondary : btn_style::gold } });
 
@@ -694,8 +717,12 @@ private:
             return;
         }
         const bool failed = i == job.row.load() && job.phase == 3;
-        const std::string detail = failed ? job_error : (st.state == item_state::missing ? std::string(hint) : st.text);
-        const rgba c = failed || st.state == item_state::bad ? c_bad : st.state == item_state::warn ? c_warn : st.state == item_state::ok ? c_sub : c_dim;
+        const bool has_notice = (i == 2 && !dlc_notice.empty()) || (i == 3 && !rap_notice.empty());
+        const std::string detail = failed ? job_error
+                                 : i == 2 && !dlc_notice.empty() ? dlc_notice
+                                 : i == 3 && !rap_notice.empty() ? rap_notice
+                                 : (st.state == item_state::missing ? std::string(hint) : st.text);
+        const rgba c = failed || has_notice || st.state == item_state::bad ? c_bad : st.state == item_state::warn ? c_warn : st.state == item_state::ok ? c_sub : c_dim;
         text(body, fit(body, detail, width), r.x + 64.f, r.y + 41.f, c);
     }
 
@@ -705,7 +732,7 @@ private:
         const bool down = hot && pressed;
         const bool is_play = b.style == btn_style::play;
 
-        btn_anim& anim = anims[(int)b.id];
+        btn_anim& anim = anims[(size_t)b.id];
         const float rate = std::min(1.f, dt * 16.f);
         const float prev_h = anim.hover;
         anim.hover += ((hot ? 1.f : 0.f) - anim.hover) * rate;
@@ -828,8 +855,8 @@ private:
             dragging = false;
             break;
         case SDL_EVENT_DROP_FILE: {
-            std::lock_guard<std::mutex> hold(picks_lock);
-            picks.push_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(e.drop.data))));
+            std::lock_guard<std::mutex> hold(picks->lock);
+            picks->items.emplace_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(e.drop.data))), game_add_mode::any);
             break;
         }
         case SDL_EVENT_KEY_DOWN:
@@ -840,7 +867,16 @@ private:
             else if (e.key.key == SDLK_RETURN || e.key.key == SDLK_SPACE || e.key.key == SDLK_KP_ENTER) press_focus();
             break;
         case SDL_EVENT_GAMEPAD_ADDED:
-            SDL_OpenGamepad(e.gdevice.which);
+            if (SDL_Gamepad* g = SDL_OpenGamepad(e.gdevice.which)) gamepads.push_back(g);
+            break;
+        case SDL_EVENT_GAMEPAD_REMOVED:
+            for (auto it = gamepads.begin(); it != gamepads.end(); ++it) {
+                if (SDL_GetGamepadID(*it) == e.gdevice.which) {
+                    SDL_CloseGamepad(*it);
+                    gamepads.erase(it);
+                    break;
+                }
+            }
             break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
             kbd_nav = true;
@@ -873,27 +909,31 @@ private:
 
     static void on_pick(void* user, const char* const* list, int)
     {
-        auto* self = static_cast<setup_ui*>(user);
-        if (!list || !*list) return;
-        std::lock_guard<std::mutex> hold(self->picks_lock);
-        for (; *list; list++) self->picks.push_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(*list))));
+        std::unique_ptr<pick_req> req(static_cast<pick_req*>(user));
+        if (!req || !list || !*list) return;
+        std::lock_guard<std::mutex> hold(req->state->lock);
+        if (!req->state->alive) return;
+        for (; *list; list++)
+            req->state->items.emplace_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(*list))), req->mode);
     }
 
     void activate(action id)
     {
-        static const SDL_DialogFileFilter f_iso{ "PS3 ISO Image", "iso" };
-        static const SDL_DialogFileFilter f_dlc{ "PS3 DLC / License", "pkg;rap" };
-        static const SDL_DialogFileFilter f_rap{ "PS3 License (.rap)", "rap" };
+        static const SDL_DialogFileFilter f_iso[] = { { "PS3 ISO Image", "iso;ISO" }, { "All Files", "*" } };
+        static const SDL_DialogFileFilter f_dlc[] = { { "PS3 DLC / License", "pkg;PKG;rap;RAP" }, { "All Files", "*" } };
+        static const SDL_DialogFileFilter f_rap[] = { { "PS3 License (.rap)", "rap;RAP" }, { "All Files", "*" } };
         switch (id) {
-        case a_game_folder: SDL_ShowOpenFolderDialog(on_pick, this, window, nullptr, false); break;
-        case a_game_iso: SDL_ShowOpenFileDialog(on_pick, this, window, &f_iso, 1, nullptr, false); break;
+        case a_game_folder: SDL_ShowOpenFolderDialog(on_pick, new pick_req{ picks, game_add_mode::any }, window, nullptr, false); break;
+        case a_game_iso: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks, game_add_mode::any }, window, f_iso, 2, nullptr, false); break;
         case a_update_download: start_update_job(); break;
-        case a_dlc_add: SDL_ShowOpenFileDialog(on_pick, this, window, &f_dlc, 1, nullptr, true); break;
+        case a_dlc_add: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks, game_add_mode::dlc }, window, f_dlc, 2, nullptr, true); break;
         case a_dlc_clear:
             paths.dlcs.clear();
+            dlc_notice.clear();
+            rap_notice.clear();
             recheck();
             break;
-        case a_rap_add: SDL_ShowOpenFileDialog(on_pick, this, window, &f_rap, 1, nullptr, true); break;
+        case a_rap_add: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks, game_add_mode::rap }, window, f_rap, 2, nullptr, true); break;
         case a_download: start_job({}); break;
         case a_play: play = true; break;
         }
@@ -901,14 +941,22 @@ private:
 
     void apply_picks()
     {
-        std::vector<std::filesystem::path> items;
+        std::vector<std::pair<std::filesystem::path, game_add_mode>> items;
         {
-            std::lock_guard<std::mutex> hold(picks_lock);
-            items.swap(picks);
+            std::lock_guard<std::mutex> hold(picks->lock);
+            items.swap(picks->items);
         }
         if (items.empty()) return;
+        dlc_notice.clear();
+        rap_notice.clear();
         draw();
-        const std::filesystem::path pup = add_game_items(exe, paths, items);
+        std::filesystem::path pup;
+        for (const auto& [item, mode] : items) {
+            const game_add_result r = add_game_items(exe, paths, { item }, mode);
+            if (!r.pup.empty()) pup = r.pup;
+            if (!r.dlc_notice.empty()) dlc_notice = r.dlc_notice;
+            if (!r.rap_notice.empty()) rap_notice = r.rap_notice;
+        }
         if (!pup.empty() && job.phase != 1 && job.phase != 2) start_job(pup);
         recheck();
     }
@@ -922,13 +970,15 @@ private:
     void start_update_job()
     {
         if (job.worker.joinable()) job.worker.join();
-        const std::filesystem::path pkg = exe / "user" / "EP0102-BLES01227_00-PATCH02000000000-A0102-V0100-PE.pkg";
+        const std::string tid = check.title_id.empty() ? "BLES01227" : check.title_id;
+        const std::filesystem::path pkg = default_update_pkg(exe, tid);
         job.row = 1;
         job.progress = 0;
+        job.cancel = false;
         job.phase = 1;
-        job.worker = std::thread([this, pkg] {
+        job.worker = std::thread([this, pkg, tid] {
             std::string error;
-            const bool ok = update_download(pkg, job.progress, error);
+            const bool ok = update_download(pkg, job.progress, error, &job.cancel, tid);
             std::lock_guard<std::mutex> hold(job.lock);
             job.error = error;
             job.result = ok ? pkg : std::filesystem::path{};
@@ -945,14 +995,15 @@ private:
         if (download) pup = exe / "user" / "PS3UPDAT.PUP";
         job.row = 4;
         job.progress = 0;
+        job.cancel = false;
         job.phase = download ? 1 : 2;
         job.worker = std::thread([this, pup, flash, download] {
             std::string error;
-            bool ok = !download || firmware_download(pup, job.progress, error);
+            bool ok = !download || firmware_download(pup, job.progress, error, &job.cancel);
             if (ok) {
                 job.progress = 0;
                 job.phase = 2;
-                ok = firmware_extract(pup, flash, job.progress, error);
+                ok = firmware_extract(pup, flash, job.progress, error, &job.cancel);
             }
             if (download) {
                 std::error_code ec;
@@ -1012,11 +1063,11 @@ private:
     float drop_alpha = 0.f;
     int focus = 0;
     std::vector<button> buttons;
-    std::unordered_map<int, btn_anim> anims;
+    std::array<btn_anim, 8> anims{};
     float row_hover[5]{};
-    std::string job_error;
-    std::mutex picks_lock;
-    std::vector<std::filesystem::path> picks;
+    std::string job_error, dlc_notice, rap_notice;
+    std::shared_ptr<pick_state> picks = std::make_shared<pick_state>();
+    std::vector<SDL_Gamepad*> gamepads;
     std::array<ember, 26> embers{};
     std::chrono::steady_clock::time_point t0, last_t;
 };

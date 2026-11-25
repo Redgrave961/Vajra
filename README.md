@@ -9,7 +9,7 @@
 
 ---
 
-**Vajra** is a static recompilation of the PlayStation 3 version of *Asura's Wrath* (`BLES01227`, update `1.02`) to native x86-64 PC, powered by [ps3recomp](https://github.com/sp00nznet/ps3recomp). It brings the full game to Windows and Linux with native performance, modern display and audio support, full keyboard & mouse controls, and quality-of-life enhancements, all configurable directly from the in-game options menu.
+**Vajra** is a static recompilation of the PlayStation 3 version of *Asura's Wrath* (`BLES01227` EU and `BLUS30721` US, update `1.02`) to native x86-64 PC, powered by [ps3recomp](https://github.com/sp00nznet/ps3recomp). It brings the full game to Windows and Linux with native performance, modern display and audio support, full keyboard & mouse controls, and quality-of-life enhancements, all configurable directly from the in-game options menu.
 
 ## Features
 
@@ -19,12 +19,12 @@
 - **In-Game PC Options Menu:** Adjust resolution, display mode (Windowed, Borderless, Exclusive Fullscreen), frame rate cap, SMAA, post-processing (Motion Blur, Depth of Field, Bloom), keybindings, and mouse settings right inside the game's native menu.
 - **Full Keyboard & Mouse + Controller Support:** Automatic hot-switching between Keyboard & Mouse, PlayStation, Xbox, and Nintendo button prompts, full custom keybinds, mouse sensitivity/invert controls, controller rumble, motion sensors, and tailored KBM QTE prompts.
 - **Trophies & Rich Presence:** Local PS3 trophy support with in-game icons and PS3-style unlock notifications, Discord Rich Presence (showing your current Episode and Part), and Recomp Achievements integration.
-- **One-Click Setup:** Reads your `BLES01227` disc folder or decrypted ISO and optional DLC `.pkg`/`.rap` files directly, downloads the official `1.02` update and PS3 firmware from Sony automatically, and decrypts `EBOOT.BIN` on first launch (no RPCS3 required). Includes `recomplauncher.json` metadata for launcher integration.
+- **One-Click Setup:** Reads your `BLES01227` (EU) or `BLUS30721` (US) disc folder or decrypted ISO and optional DLC `.pkg`/`.rap` files directly, downloads the official `1.02` update and PS3 firmware from Sony automatically, and decrypts `EBOOT.BIN` on first launch (no RPCS3 required). Includes `recomplauncher.json` metadata for launcher integration.
 - **Windows & Linux:** Runs natively on Windows (`Vajra.exe`) and Linux (`Vajra-x86_64.AppImage`, Wayland & X11, including SteamOS / Steam Deck).
 
 ## Getting Started
 
-1. Obtain your own legally dumped copy of *Asura's Wrath* (`BLES01227` disc folder or decrypted `.iso`), plus any optional DLC `.pkg` + `.rap` files.
+1. Obtain your own legally dumped copy of *Asura's Wrath* (`BLES01227` EU or `BLUS30721` US disc folder or decrypted `.iso`), plus any optional DLC `.pkg` + `.rap` files.
 2. Download the latest release and launch `Vajra.exe` on Windows or `Vajra-x86_64.AppImage` on Linux.
 3. On first launch, drop or select your game folder/ISO and click **Download** for the official `1.02` update and PS3 firmware. Vajra handles decryption and setup automatically.
 
@@ -33,9 +33,9 @@
 When running standalone, Vajra stores saves, settings (`asura_settings.ini`), and caches (`cache/`) next to the executable (set `VAJRA_LOG=1` to write `asura.log`). You can also pass optional flags (used by RecompLauncher and custom shortcuts):
 
 - `--data <path>` (or `RECOMPLAUNCHER_DATA`): store all writable data (saves, settings, logs, caches, user files) in `<path>`.
-- `--game <path>`: path to your `BLES01227` disc folder or decrypted `.iso`.
+- `--game <path>`: path to your `BLES01227` (EU) or `BLUS30721` (US) disc folder or decrypted `.iso`.
 - `--update <path>`: optional path to a local `1.02` update `.pkg`.
-- `--dlc <path>`: optional DLC `.pkg` or `.rap` file (may be passed multiple times).
+- `--dlc <path>` / `--rap <path>`: optional DLC `.pkg` or `.rap` file (may be passed multiple times).
 - `--prepare`: run windowless setup (downloads the `1.02` update and PS3 firmware if missing and verifies files).
 
 ## Building from Source

@@ -13,6 +13,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
+#include <csignal>
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -25,7 +27,8 @@ namespace {
 
 constexpr const char* k_url = "http://dus01.ps3.update.playstation.net/update/ps3/image/us/2026_0318_a2b60b6ac1d2e49e230144345616927c/PS3UPDAT.PUP";
 constexpr uint64_t k_size = 206197916;
-constexpr const char* k_update_url = "http://b0.ww.np.dl.playstation.net/tppkg/np/BLES01227/BLES01227_T3/0c670c22fd332f45/EP0102-BLES01227_00-PATCH02000000000-A0102-V0100-PE.pkg";
+constexpr const char* k_update_url_eu = "http://b0.ww.np.dl.playstation.net/tppkg/np/BLES01227/BLES01227_T3/0c670c22fd332f45/EP0102-BLES01227_00-PATCH02000000000-A0102-V0100-PE.pkg";
+constexpr const char* k_update_url_us = "http://b0.ww.np.dl.playstation.net/tppkg/np/BLUS30721/BLUS30721_T3/9472a41e0f952e95/UP0102-BLUS30721_00-PATCH02000000000-A0102-V0100-PE.pkg";
 constexpr uint64_t k_update_size = 34731232;
 constexpr const char* k_files[] = { "sys/external/flashMP3.pic", "sys/external/flashATRAC.pic" };
 
@@ -69,7 +72,7 @@ PS3_AES_TARGET bool unpack(const std::vector<uint8_t>& s, std::vector<uint8_t>& 
     const uint8_t* sec = h.data() + 0x20 + 2 * 0x30;
     const uint64_t off = be64(sec), len = be64(sec + 8);
     const uint32_t enc = be32(sec + 0x20), key_idx = be32(sec + 0x24), iv_idx = be32(sec + 0x28), comp = be32(sec + 0x2C);
-    if (off > s.size() || len > s.size() - off || len > INT32_MAX || (enc == 3 && (key_idx >= keys || iv_idx >= keys))) return false;
+    if (off > s.size() || len > s.size() - off || len > (uint64_t)(INT32_MAX / 4) || (enc == 3 && (key_idx >= keys || iv_idx >= keys))) return false;
     std::vector<uint8_t> data(s.begin() + (ptrdiff_t)off, s.begin() + (ptrdiff_t)(off + len));
     if (enc == 3) {
         ps3_aes128_init(&key, h.data() + key_base + (uint64_t)key_idx * 16);
@@ -91,12 +94,14 @@ PS3_AES_TARGET bool unpack(const std::vector<uint8_t>& s, std::vector<uint8_t>& 
 
 bool firmware_installed(const std::filesystem::path& flash)
 {
+    std::error_code ec;
     for (const char* f : k_files)
-        if (!std::filesystem::is_regular_file(flash / f)) return false;
+        if (!std::filesystem::is_regular_file(flash / f, ec) || ec) return false;
     return true;
 }
 
-bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::path& flash, std::atomic<float>& progress, std::string& error)
+bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::path& flash, std::atomic<float>& progress, std::string& error,
+                      const std::atomic<bool>* cancel)
 {
     std::ifstream in(pup, std::ios::binary);
     uint8_t head[0x30];
@@ -105,9 +110,9 @@ bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::p
         return false;
     }
     uint64_t start = 0, length = 0;
-    for (uint64_t i = 0, n = be64(head + 0x18); i < n; i++) {
+    for (uint64_t i = 0, n = be64(head + 0x18); i < n && in; i++) {
         uint8_t e[0x20];
-        in.read(reinterpret_cast<char*>(e), sizeof e);
+        if (!in.read(reinterpret_cast<char*>(e), sizeof e)) break;
         if (be64(e) == 0x300) {
             start = be64(e + 8);
             length = be64(e + 0x10);
@@ -119,19 +124,35 @@ bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::p
     }
     size_t found = 0;
     in.seekg((std::streamoff)start);
+    std::error_code ec;
     for (uint64_t pos = 0; in && found < std::size(k_files) && pos + 512 <= length;) {
+        if (cancel && cancel->load(std::memory_order_relaxed)) {
+            error = "Cancelled";
+            return false;
+        }
         uint8_t hdr[512];
         tar_entry e;
         if (!in.read(reinterpret_cast<char*>(hdr), sizeof hdr) || !tar_header(hdr, e)) break;
         const uint64_t padded = (e.size + 511) & ~511ull;
+        if (e.size > length - pos - 512 || padded > length - pos - 512) {
+            error = "Damaged file";
+            return false;
+        }
         pos += 512 + padded;
         progress = (float)pos / (float)length;
         if (e.name.rfind("dev_flash_", 0) != 0) {
             in.seekg((std::streamoff)padded, std::ios::cur);
             continue;
         }
-        std::vector<uint8_t> pkg(e.size), tar;
-        in.read(reinterpret_cast<char*>(pkg.data()), (std::streamsize)e.size);
+        if (e.size > (256ull << 20)) {
+            error = "Damaged file";
+            return false;
+        }
+        std::vector<uint8_t> pkg((size_t)e.size), tar;
+        if (!in.read(reinterpret_cast<char*>(pkg.data()), (std::streamsize)e.size)) {
+            error = "Damaged file";
+            return false;
+        }
         in.seekg((std::streamoff)(padded - e.size), std::ios::cur);
         if (!unpack(pkg, tar)) {
             error = "Damaged file";
@@ -139,11 +160,11 @@ bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::p
         }
         for (size_t at = 0; at + 512 <= tar.size();) {
             tar_entry f;
-            if (!tar_header(tar.data() + at, f) || at + 512 + f.size > tar.size()) break;
+            if (!tar_header(tar.data() + at, f) || f.size > tar.size() - at - 512) break;
             for (const char* want : k_files)
                 if (f.name == std::string("dev_flash/") + want) {
                     const std::filesystem::path dst = flash / want;
-                    std::filesystem::create_directories(dst.parent_path());
+                    std::filesystem::create_directories(dst.parent_path(), ec);
                     std::ofstream out(dst, std::ios::binary);
                     out.write(reinterpret_cast<const char*>(tar.data() + at + 512), (std::streamsize)f.size);
                     if (!out) {
@@ -165,23 +186,35 @@ bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::p
 
 namespace {
 
-bool download_file(const char* url, uint64_t expected_size, const std::filesystem::path& dst, std::atomic<float>& progress, std::string& error)
+bool download_file(const char* url, uint64_t expected_size, const std::filesystem::path& dst, std::atomic<float>& progress, std::string& error,
+                   const std::atomic<bool>* cancel)
 {
     std::error_code ec;
     std::filesystem::create_directories(dst.parent_path(), ec);
     std::filesystem::remove(dst, ec);
+    bool cancelled = false;
 #ifdef _WIN32
     std::wstring cmd = L"curl.exe -fsSL --retry 3 -o \"" + dst.wstring() + L"\" " + std::filesystem::path(url).wstring();
-    STARTUPINFOW si = { sizeof si };
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         error = "curl not found";
         return false;
     }
-    while (WaitForSingleObject(pi.hProcess, 100) == WAIT_TIMEOUT)
-        progress = std::clamp((float)std::filesystem::file_size(dst, ec) / (float)expected_size, 0.f, 1.f);
+    while (WaitForSingleObject(pi.hProcess, 100) == WAIT_TIMEOUT) {
+        if (cancel && cancel->load(std::memory_order_relaxed)) {
+            TerminateProcess(pi.hProcess, 1);
+            WaitForSingleObject(pi.hProcess, 2000);
+            cancelled = true;
+            break;
+        }
+        ec.clear();
+        const auto sz = std::filesystem::file_size(dst, ec);
+        if (!ec) progress = std::clamp((float)sz / (float)expected_size, 0.f, 1.f);
+    }
     DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
+    if (!cancelled) GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 #else
@@ -193,15 +226,29 @@ bool download_file(const char* url, uint64_t expected_size, const std::filesyste
         return false;
     }
     int status = 0;
-    while (!waitpid(pid, &status, WNOHANG)) {
-        progress = std::clamp((float)std::filesystem::file_size(dst, ec) / (float)expected_size, 0.f, 1.f);
+    int code = 1;
+    for (;;) {
+        const pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r > 0) {
+            code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+            break;
+        }
+        if (r < 0 && errno != EINTR) break;
+        if (cancel && cancel->load(std::memory_order_relaxed)) {
+            kill(pid, SIGTERM);
+            waitpid(pid, &status, 0);
+            cancelled = true;
+            break;
+        }
+        ec.clear();
+        const auto sz = std::filesystem::file_size(dst, ec);
+        if (!ec) progress = std::clamp((float)sz / (float)expected_size, 0.f, 1.f);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 #endif
-    if (code) {
+    if (cancelled || code) {
         std::filesystem::remove(dst, ec);
-        error = "Download failed";
+        error = cancelled ? "Cancelled" : "Download failed";
         return false;
     }
     progress = 1.f;
@@ -210,12 +257,14 @@ bool download_file(const char* url, uint64_t expected_size, const std::filesyste
 
 }
 
-bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& progress, std::string& error)
+bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& progress, std::string& error, const std::atomic<bool>* cancel)
 {
-    return download_file(k_url, k_size, pup, progress, error);
+    return download_file(k_url, k_size, pup, progress, error, cancel);
 }
 
-bool update_download(const std::filesystem::path& pkg, std::atomic<float>& progress, std::string& error)
+bool update_download(const std::filesystem::path& pkg, std::atomic<float>& progress, std::string& error,
+                     const std::atomic<bool>* cancel, const std::string& title_id)
 {
-    return download_file(k_update_url, k_update_size, pkg, progress, error);
+    const char* url = title_id == "BLUS30721" ? k_update_url_us : k_update_url_eu;
+    return download_file(url, k_update_size, pkg, progress, error, cancel);
 }

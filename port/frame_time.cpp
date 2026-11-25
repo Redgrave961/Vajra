@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <cstring>
 #include <deque>
 #include <iterator>
 #include <mutex>
@@ -445,9 +444,10 @@ void lerp_op(void (*body)(ppu_context*), ppu_context* ctx, const char* signature
 
 void rotate(void (*body)(ppu_context*), ppu_context* ctx, bool per_tick)
 {
+    const bool prev = t_rotation_site;
     t_rotation_site = per_tick;
     run(body, ctx);
-    t_rotation_site = false;
+    t_rotation_site = prev;
 }
 
 void velocity_decay(void (*body)(ppu_context*), ppu_context* ctx, uint32_t factor_at)
@@ -469,6 +469,10 @@ void velocity_decay(void (*body)(ppu_context*), ppu_context* ctx, uint32_t facto
 
 float window_frame_time(uint32_t owner, uint32_t length, float dt)
 {
+    if (!length)
+        return dt;
+    if (t_frame_times.size() > 8192 && !t_frame_times.count(owner))
+        t_frame_times.clear();
     std::deque<float>& times = t_frame_times[owner];
     times.push_back(dt);
     while (times.size() > length)
@@ -788,9 +792,10 @@ void func_008D1048(ppu_context* ctx)
 
 void func_011368C4(ppu_context* ctx)
 {
+    const bool prev = t_timer_site;
     t_timer_site = lookup((uint32_t)ctx->gpr[4]);
     run(func_011368C4_lifted, ctx);
-    t_timer_site = false;
+    t_timer_site = prev;
 }
 
 void func_00498718(ppu_context* ctx)

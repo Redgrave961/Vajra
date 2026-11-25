@@ -97,11 +97,11 @@ public:
 #endif
     }
 
-    bool connect(const char* app_id)
+    bool connect(const char* app_id, const std::atomic<bool>& running)
     {
         if (connected()) return true;
 #ifdef _WIN32
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 10 && running.load(std::memory_order_relaxed); i++) {
             char name[64];
             std::snprintf(name, sizeof name, "\\\\.\\pipe\\discord-ipc-%d", i);
             HANDLE h = CreateFileA(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -112,24 +112,27 @@ public:
         }
 #else
         std::vector<std::string> dirs;
+        auto push_unique = [&](std::string d) {
+            if (!d.empty() && std::find(dirs.begin(), dirs.end(), d) == dirs.end()) dirs.push_back(std::move(d));
+        };
         auto add_dir = [&](const char* env) {
             if (const char* v = std::getenv(env); v && *v) {
-                dirs.emplace_back(v);
-                dirs.emplace_back(std::string(v) + "/app/com.discordapp.Discord");
-                dirs.emplace_back(std::string(v) + "/snap.discord");
+                push_unique(v);
+                push_unique(std::string(v) + "/app/com.discordapp.Discord");
+                push_unique(std::string(v) + "/snap.discord");
             }
         };
         add_dir("XDG_RUNTIME_DIR");
         add_dir("TMPDIR");
         add_dir("TMP");
         add_dir("TEMP");
-        dirs.emplace_back("/tmp");
+        push_unique("/tmp");
 
         for (const std::string& d : dirs) {
-            for (int i = 0; i < 10; i++) {
+            for (int i = 0; i < 10 && running.load(std::memory_order_relaxed); i++) {
                 std::string path = d + "/discord-ipc-" + std::to_string(i);
                 struct sockaddr_un sa {};
-                if (path.size() >= sizeof(sa.sun_path)) continue;
+                if (path.size() >= sizeof(sa.sun_path) || access(path.c_str(), F_OK) != 0) continue;
                 int s = socket(AF_UNIX, SOCK_STREAM, 0);
                 if (s < 0) continue;
                 sa.sun_family = AF_UNIX;
@@ -146,12 +149,12 @@ public:
 #endif
         if (!connected()) return false;
         const std::string hs = std::string("{\"v\":1,\"client_id\":\"") + app_id + "\"}";
-        if (!write_frame(0, hs)) {
+        if (!write_frame(0, hs, running)) {
             close();
             return false;
         }
         // Wait briefly for Discord's READY frame before sending SET_ACTIVITY
-        for (int tries = 0; tries < 25 && connected(); tries++) {
+        for (int tries = 0; tries < 25 && connected() && running.load(std::memory_order_relaxed); tries++) {
             if (drain_once() > 0) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
@@ -159,7 +162,7 @@ public:
         return connected();
     }
 
-    bool send_activity(const std::string& details, const std::string& state, int64_t start_ts, uint32_t seq)
+    bool send_activity(const std::string& details, const std::string& state, int64_t start_ts, uint32_t seq, const std::atomic<bool>& running)
     {
         if (!connected()) return false;
         drain();
@@ -175,7 +178,7 @@ public:
         payload += ",\"timestamps\":{\"start\":" + std::to_string(start_ts) + "}";
         payload += ",\"assets\":{\"large_image\":\"" + std::string(k_large_image) + "\",\"large_text\":\"" + std::string(k_large_text) + "\"}";
         payload += "}},\"nonce\":\"" + std::to_string(seq) + "\"}";
-        if (!write_frame(1, payload)) {
+        if (!write_frame(1, payload, running)) {
             close();
             return false;
         }
@@ -199,10 +202,11 @@ public:
     }
 
 private:
-    bool write_all(const void* data, size_t n)
+    bool write_all(const void* data, size_t n, const std::atomic<bool>& running)
     {
         const uint8_t* p = static_cast<const uint8_t*>(data);
 #ifdef _WIN32
+        (void)running;
         while (n > 0) {
             DWORD w = 0;
             if (!WriteFile(pipe, p, (DWORD)n, &w, nullptr) || w == 0) return false;
@@ -211,14 +215,17 @@ private:
         }
         return true;
 #else
+        int retries = 0;
         while (n > 0) {
             ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
             if (w > 0) {
                 p += w;
                 n -= (size_t)w;
+                retries = 0;
                 continue;
             }
             if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+                if (!running.load(std::memory_order_relaxed) || ++retries > 100) return false;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
@@ -228,10 +235,10 @@ private:
 #endif
     }
 
-    bool write_frame(uint32_t op, const std::string& json)
+    bool write_frame(uint32_t op, const std::string& json, const std::atomic<bool>& running)
     {
         uint32_t hdr[2] = { op, (uint32_t)json.size() };
-        return write_all(hdr, sizeof hdr) && write_all(json.data(), json.size());
+        return write_all(hdr, sizeof hdr, running) && write_all(json.data(), json.size(), running);
     }
 
     int drain_once()
@@ -278,7 +285,7 @@ private:
 std::mutex g_lock;
 std::condition_variable g_cv;
 std::thread g_worker;
-bool g_running = false;
+std::atomic<bool> g_running{ false };
 bool g_dirty = true;
 int64_t g_start_ts = 0;
 std::string g_details = "Starting Game";
@@ -306,10 +313,10 @@ void worker_loop()
     discord_ipc ipc;
     uint32_t seq = 1;
     std::unique_lock<std::mutex> lk(g_lock);
-    while (g_running) {
+    while (g_running.load(std::memory_order_relaxed)) {
         if (!ipc.connected()) {
             lk.unlock();
-            const bool ok = ipc.connect(k_discord_app_id);
+            const bool ok = ipc.connect(k_discord_app_id, g_running);
             lk.lock();
             if (ok) g_dirty = true;
         }
@@ -318,14 +325,15 @@ void worker_loop()
             const int64_t ts = g_start_ts;
             g_dirty = false;
             lk.unlock();
-            if (!ipc.send_activity(d, s, ts, seq++)) {
+            if (!ipc.send_activity(d, s, ts, seq++, g_running)) {
                 lk.lock();
                 g_dirty = true;
                 continue;
             }
             lk.lock();
         }
-        g_cv.wait_for(lk, std::chrono::seconds(5), [&] { return !g_running || (g_dirty && ipc.connected()); });
+        g_cv.wait_for(lk, std::chrono::seconds(ipc.connected() ? 5 : 15),
+                      [&] { return !g_running.load(std::memory_order_relaxed) || (g_dirty && ipc.connected()); });
     }
     ipc.close();
 }
@@ -335,12 +343,12 @@ void worker_loop()
 void presence_init()
 {
     std::lock_guard<std::mutex> lk(g_lock);
-    if (g_running) return;
+    if (g_running.load(std::memory_order_relaxed)) return;
     g_start_ts = (int64_t)std::time(nullptr);
     g_details = "Main Menu";
     g_state.clear();
     g_dirty = true;
-    g_running = true;
+    g_running.store(true, std::memory_order_release);
     update_rl_presence_locked();
     g_worker = std::thread(worker_loop);
 }
@@ -353,7 +361,7 @@ void presence_on_file_open(const char* guest_path)
     const size_t len = std::strlen(base);
     if (len < 8) return;
     if ((base[0] != 'B' && base[0] != 'b') || (base[1] != 'C' && base[1] != 'c') || base[2] != '-') return;
-    if (len < 4 || std::tolower((unsigned char)base[len - 4]) != '.' || std::tolower((unsigned char)base[len - 3]) != 'x' ||
+    if (std::tolower((unsigned char)base[len - 4]) != '.' || std::tolower((unsigned char)base[len - 3]) != 'x' ||
         std::tolower((unsigned char)base[len - 2]) != 'x' || std::tolower((unsigned char)base[len - 1]) != 'x')
         return;
 
@@ -400,8 +408,8 @@ void presence_shutdown()
 {
     {
         std::lock_guard<std::mutex> lk(g_lock);
-        if (!g_running) return;
-        g_running = false;
+        if (!g_running.load(std::memory_order_relaxed)) return;
+        g_running.store(false, std::memory_order_release);
         g_cv.notify_all();
     }
     if (g_worker.joinable()) g_worker.join();

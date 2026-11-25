@@ -13,7 +13,7 @@ uint32_t pc_options_call_slow(uint32_t self, uint32_t function);
 static inline uint32_t pc_options_call(uint32_t self, uint32_t function)
 {
     const uint64_t bit = 1ull << ((function * 0x9E3779B1u) >> 26);
-    if (__builtin_expect(!function || !(g_pc_options_hook_mask.load(std::memory_order_relaxed) & bit), 1)) return 0;
+    if (__builtin_expect(!function || !(g_pc_options_hook_mask.load(std::memory_order_acquire) & bit), 1)) return 0;
     return pc_options_call_slow(self, function);
 }
 void pc_options_returned(uint32_t hook, uint32_t result);

@@ -4,14 +4,18 @@ import sys
 
 src, out, name = sys.argv[1], sys.argv[2], sys.argv[3]
 os.makedirs(out, exist_ok=True)
-exp = json.load(open(os.path.join(src, f"{name}_exports.json")))
-imp = json.load(open(os.path.join(src, f"{name}_imports.json")))
-image = open(os.path.join(src, f"{name}_image.bin"), "rb").read()
+with open(os.path.join(src, f"{name}_exports.json"), encoding="utf-8") as f:
+    exp = json.load(f)
+with open(os.path.join(src, f"{name}_imports.json"), encoding="utf-8") as f:
+    imp = json.load(f)
+with open(os.path.join(src, f"{name}_image.bin"), "rb") as f:
+    image = f.read()
 base = int(exp["base"], 0)
 
 stubs = [{"library": lib, "nid": nid, "stub": slot}
          for lib, fns in imp.items() for nid, slot in fns.items()]
-json.dump(stubs, open(os.path.join(out, f"{name}_stubs.json"), "w"), indent=1)
+with open(os.path.join(out, f"{name}_stubs.json"), "w", encoding="utf-8") as f:
+    json.dump(stubs, f, indent=1)
 
 exports = sorted({int(nid, 0): int(opd, 0) - base
                   for fns in exp["exports"].values() for nid, opd in fns.items()}.items())

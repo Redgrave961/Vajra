@@ -4,6 +4,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <fontconfig/fontconfig.h>
@@ -42,6 +43,7 @@ bool read_font(font& f, const std::filesystem::path& file, int index)
         size_t off = 0;
         while (off < f.ttf.size()) {
             const ssize_t n = read(fd, f.ttf.data() + off, f.ttf.size() - off);
+            if (n < 0 && errno == EINTR) continue;
             if (n <= 0) break;
             off += (size_t)n;
         }
@@ -84,12 +86,13 @@ bool load_font(font& f, font_weight weight)
     const auto destroy = reinterpret_cast<decltype(&FcPatternDestroy)>(dlsym(fc, "FcPatternDestroy"));
     if (!init || !parse || !substitute || !defaults || !match || !get_string || !get_integer || !destroy) return false;
     static FcConfig* const config = init();
+    if (!config) return false;
     const char* query = weight == font_weight::black      ? "sans-serif:weight=210:variable=false"
                         : weight == font_weight::bold     ? "sans-serif:weight=200:variable=false"
                         : weight == font_weight::semibold ? "sans-serif:weight=180:variable=false"
                                                           : "sans-serif:weight=80:variable=false";
     FcPattern* pattern = parse(reinterpret_cast<const FcChar8*>(query));
-    if (!config || !pattern) return false;
+    if (!pattern) return false;
     substitute(config, pattern, FcMatchPattern);
     defaults(pattern);
     FcResult result;

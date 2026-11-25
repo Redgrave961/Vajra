@@ -1,8 +1,6 @@
 #include "guest.h"
 #include "rsx_core.h"
 
-#include <cstring>
-
 extern "C" uint64_t ppu_timebase_now(void);
 extern "C" void ppu_thread_note_block(uint64_t tid);
 
@@ -55,8 +53,6 @@ void func_00874EF0(ppu_context* ctx)
     if (done()) return;
     vm_write64(frame, sp);
     vm_write64(sp + 0x10, lr);
-    for (int r = 24; r < 32; r++) vm_write64(frame + 0x78 + 8 * (r - 24), ctx->gpr[r]);
-    vm_write64(frame + 0xB8, to_bits64(ctx->fpr[31]));
     const uint64_t start = timebase();
     const uint32_t label = vm_read32(rhi + 0x54), owner = vm_read32(k_rhi);
     ctx->gpr[3] = vm_read32(label);

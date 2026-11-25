@@ -12,6 +12,10 @@ build=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --jobs|--lto|--arch|--pgo|--elf|--build-dir)
+            [ $# -ge 2 ] || { echo "missing value for $1"; exit 2; } ;;
+    esac
+    case "$1" in
         --jobs) jobs="$2" ;;
         --lto) lto="$2" ;;
         --arch) arch="$2" ;;
