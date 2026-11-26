@@ -3,72 +3,31 @@
  *
  * Overrides:
  *   - func_00AFB230 (P40 PPU PhysX joint/constraint update dispatch)
+ *   - func_00B8CA04 / func_00B8CC88 (P40 PPU PhysX state read/write dispatch)
  *   - func_00B4A738 (P40 PPU PhysX kinematic target velocity solver)
  *   - func_00531F20 (P1 main USkeletalMeshComponent::ComposeSkeleton)
  *   - func_00392F08 (P1 main UWorld::MultiLineCheck wrapper)
+ *   - func_005CCB00 (P1 main USkeletalMeshComponent::UpdateBounds)
+ *   - func_00AD0C68 (P1 main NxScene::fetchResults)
+ *   - func_00B44FA8 / func_00B49908 / func_00C91AD8 / func_00C4BDFC / func_005C5010 (PhysX bounds & skeleton helpers)
  */
 #include "guest.h"
 
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <immintrin.h>
-#include <math.h>
-#include <stdint.h>
-
-extern "C" uint64_t ppu_timebase_now(void);
 
 namespace {
 
-static inline float rd_f32(uint32_t ea) {
-    return from_bits(vm_read32(ea));
-}
+inline float rd_f32(uint32_t ea) { return vm_read_f32(ea); }
+inline void wr_f32(uint32_t ea, float f) { vm_write_f32(ea, f); }
+inline uint32_t fast32(const ppu_mm& m, uint32_t a) { return vm_fast_read32(m, a); }
+inline void fast_w32(const ppu_mm& m, uint32_t a, uint32_t v) { vm_fast_write32(m, a, v); }
+inline float rd_f32_mm(const ppu_mm& m, uint32_t ea) { return vm_read_f32_mm(m, ea); }
+inline void wr_f32_mm(const ppu_mm& m, uint32_t ea, float f) { vm_write_f32_mm(m, ea, f); }
 
-static inline void wr_f32(uint32_t ea, float f) {
-    vm_write32(ea, to_bits(f));
-}
-
-static inline void call_vfn_toc(ppu_context* ctx, uint32_t obj_ea, uint32_t vtbl_off, uint32_t lr_val) {
-    uint32_t vtbl = vm_read32(obj_ea);
-    uint32_t opd  = vm_read32(vtbl + vtbl_off);
-    ctx->ctr    = vm_read32(opd);
-    ctx->gpr[2] = vm_read32(opd + 4);
-    ctx->lr     = lr_val;
-    guest_icall(ctx);
-    ctx->gpr[2] = 0x019AF8F8ULL;
-}
-
-static inline uint32_t fast32(const ppu_mm& m, uint32_t a) {
-    if (__builtin_expect(vm_mm_ok(&m, a, 4), 1)) {
-        uint32_t x;
-        std::memcpy(&x, m.vb + a, 4);
-        return __builtin_bswap32(x);
-    }
-    return vm_read32_mm(&m, a);
-}
-
-static inline uint8_t fast8(const ppu_mm& m, uint32_t a) {
-    if (__builtin_expect(vm_mm_ok(&m, a, 1), 1)) return m.vb[a];
-    return vm_read8_mm(&m, a);
-}
-
-static inline void fast_w32(const ppu_mm& m, uint32_t a, uint32_t v) {
-    if (__builtin_expect(plain_store(m, a, 4), 1)) {
-        const uint32_t be = __builtin_bswap32(v);
-        std::memcpy(m.vb + a, &be, 4);
-        vm_track_write(a, 4);
-        return;
-    }
-    vm_write32_mm(&m, a, v);
-}
-
-static inline float rd_f32_mm(const ppu_mm& m, uint32_t ea) {
-    return from_bits(fast32(m, ea));
-}
-
-static inline void wr_f32_mm(const ppu_mm& m, uint32_t ea, float f) {
-    fast_w32(m, ea, to_bits(f));
-}
-
-static inline void call_vfn_toc_mm(ppu_context* ctx, const ppu_mm& m, uint32_t obj_ea, uint32_t vtbl_off, uint32_t lr_val) {
+inline void call_vfn_toc_mm(ppu_context* ctx, const ppu_mm& m, uint32_t obj_ea, uint32_t vtbl_off, uint32_t lr_val) {
     uint32_t vtbl = fast32(m, obj_ea);
     uint32_t opd  = fast32(m, vtbl + vtbl_off);
     ctx->ctr    = fast32(m, opd);
@@ -78,7 +37,11 @@ static inline void call_vfn_toc_mm(ppu_context* ctx, const ppu_mm& m, uint32_t o
     ctx->gpr[2] = 0x019AF8F8ULL;
 }
 
-static inline void copy_bytes_mm(const ppu_mm& m, uint32_t dst, uint32_t src, uint32_t n) {
+inline void call_vfn_toc(ppu_context* ctx, uint32_t obj_ea, uint32_t vtbl_off, uint32_t lr_val) {
+    call_vfn_toc_mm(ctx, ppu_mm_take(), obj_ea, vtbl_off, lr_val);
+}
+
+inline void copy_bytes_mm(const ppu_mm& m, uint32_t dst, uint32_t src, uint32_t n) {
     if (__builtin_expect(vm_mm_ok(&m, src, n) && plain_store(m, dst, n), 1)) {
         std::memcpy(m.vb + dst, m.vb + src, n);
         vm_track_write(dst, n);
@@ -87,19 +50,19 @@ static inline void copy_bytes_mm(const ppu_mm& m, uint32_t dst, uint32_t src, ui
     }
 }
 
-static inline __m128i bswap16(__m128i v) {
+inline __m128i bswap16(__m128i v) {
     return _mm_shuffle_epi8(v, _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
 }
 
-static inline __m128i ld_vmx_rev(const ppu_mm& m, uint32_t ea) {
+inline __m128i ld_vmx_rev(const ppu_mm& m, uint32_t ea) {
     return bswap16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(m.vb + (ea & ~0xFu))));
 }
 
-static inline void st_vmx_rev_fast(const ppu_mm& m, uint32_t ea, __m128i v) {
+inline void st_vmx_rev_fast(const ppu_mm& m, uint32_t ea, __m128i v) {
     _mm_storeu_si128(reinterpret_cast<__m128i*>(m.vb + (ea & ~0xFu)), bswap16(v));
 }
 
-static inline void st_vmx_rev(const ppu_mm& m, uint32_t ea, __m128i v) {
+inline void st_vmx_rev(const ppu_mm& m, uint32_t ea, __m128i v) {
     ea &= ~0xFu;
     __m128i be = bswap16(v);
     if (__builtin_expect(plain_store(m, ea, 16), 1)) {
@@ -112,7 +75,7 @@ static inline void st_vmx_rev(const ppu_mm& m, uint32_t ea, __m128i v) {
     }
 }
 
-static inline void copy32_aligned(const ppu_mm& m, uint32_t dst_ea, uint32_t src_ea) {
+inline void copy32_aligned(const ppu_mm& m, uint32_t dst_ea, uint32_t src_ea) {
     dst_ea &= ~0xFu;
     src_ea &= ~0xFu;
     if (__builtin_expect(plain_store(m, dst_ea, 32), 1)) {
@@ -121,6 +84,16 @@ static inline void copy32_aligned(const ppu_mm& m, uint32_t dst_ea, uint32_t src
     } else {
         ppu_store_block(dst_ea, m.vb + src_ea, 32);
     }
+}
+
+inline uint32_t resolve_physx_obj(ppu_context* ctx, const ppu_mm& m, uint32_t r29, uint32_t lr_mgr, uint32_t lr_obj) {
+    ctx->lr = lr_mgr;
+    run(func_00B876DC, ctx);
+    const uint32_t mgr = (uint32_t)ctx->gpr[3];
+    ctx->gpr[3] = mgr;
+    ctx->gpr[4] = r29;
+    call_vfn_toc_mm(ctx, m, mgr, 0x38, lr_obj);
+    return (uint32_t)ctx->gpr[3];
 }
 
 static inline __m128i vmx_perm_mask_from_rev(__m128i idx_rev) {
@@ -236,19 +209,12 @@ void func_00AFB230(ppu_context* ctx) {
 
 void func_00B8CA04(ppu_context* ctx) {
     const ppu_mm m = ppu_mm_take();
-    const uint64_t sp = ctx->gpr[1], lr = ctx->lr;
+    const uint64_t lr = ctx->lr;
     const uint32_t r29 = (uint32_t)ctx->gpr[3];
     const uint32_t kind = (uint32_t)ctx->gpr[4];
     const uint32_t dst = (uint32_t)ctx->gpr[5];
-    vm_write64_mm(&m, sp - 0x90, sp);
-    ctx->gpr[1] = sp - 0x90;
-    ctx->lr = 0x00B8CA2C;
-    run(func_00B876DC, ctx);
-    const uint32_t mgr = (uint32_t)ctx->gpr[3];
-    ctx->gpr[3] = mgr;
-    ctx->gpr[4] = r29;
-    call_vfn_toc_mm(ctx, m, mgr, 0x38, 0x00B8CA58);
-    const uint32_t obj = (uint32_t)ctx->gpr[3];
+    GuestFrame frame(ctx, 0x90);
+    const uint32_t obj = resolve_physx_obj(ctx, m, r29, 0x00B8CA2C, 0x00B8CA58);
     switch (kind) {
     case 0:
         ctx->gpr[3] = obj;
@@ -289,25 +255,17 @@ void func_00B8CA04(ppu_context* ctx) {
     default:
         break;
     }
-    ctx->gpr[1] = sp;
     ctx->lr = lr;
 }
 
 void func_00B8CC88(ppu_context* ctx) {
     const ppu_mm m = ppu_mm_take();
-    const uint64_t sp = ctx->gpr[1], lr = ctx->lr;
+    const uint64_t lr = ctx->lr;
     const uint32_t r29 = (uint32_t)ctx->gpr[3];
     const uint32_t kind = (uint32_t)ctx->gpr[4];
     const uint32_t src = (uint32_t)ctx->gpr[5];
-    vm_write64_mm(&m, sp - 0x90, sp);
-    ctx->gpr[1] = sp - 0x90;
-    ctx->lr = 0x00B8CCB0;
-    run(func_00B876DC, ctx);
-    const uint32_t mgr = (uint32_t)ctx->gpr[3];
-    ctx->gpr[3] = mgr;
-    ctx->gpr[4] = r29;
-    call_vfn_toc_mm(ctx, m, mgr, 0x38, 0x00B8CCDC);
-    const uint32_t obj = (uint32_t)ctx->gpr[3];
+    GuestFrame frame(ctx, 0x90);
+    const uint32_t obj = resolve_physx_obj(ctx, m, r29, 0x00B8CCB0, 0x00B8CCDC);
     switch (kind) {
     case 0:
         ctx->gpr[3] = obj;
@@ -348,7 +306,6 @@ void func_00B8CC88(ppu_context* ctx) {
     default:
         break;
     }
-    ctx->gpr[1] = sp;
     ctx->lr = lr;
 }
 
@@ -606,12 +563,12 @@ void func_00531F20(ppu_context* ctx) {
         r29 = 1;
 
     uint32_t r3_flag = 0;
-    if (g_flag != 0 && ((r3a8 >> 25) & 1u) != 0 && r29 != 0)
+    if (g_flag != 0 && ((r3a8 >> 25) & 1u) != 0 && r29 == 0)
         r3_flag = 1;
 
     const uint32_t r28 = (r234 == 0) ? 1u : 0u;
     uint32_t r27 = 0;
-    if (r30 != 0 && (r3_flag == 0 || r384 == 0))
+    if (r30 != 0 && r3_flag == 0 && r384 == 0)
         r27 = 1;
 
     // Preload read-only VMX constants once outside the bone loop
@@ -1029,7 +986,9 @@ void func_005CCB00(ppu_context* ctx) {
  * P1 main: NxScene::fetchResults (replaces 26-op per-body pose/vel float
  * copies with 2 contiguous memcpys and eliminates 14 GPR stack spills).
  * ============================================================================ */
-static inline void copy_body_state(const ppu_mm& m, uint32_t body) {
+namespace {
+
+inline void copy_body_state(const ppu_mm& m, uint32_t body) {
     // +0x124..0x13F (28B: pos + quat) -> +0x1B8..0x1D3
     // +0xCC..0xE3  (24B: linVel + angVel) -> +0x19C..0x1B3
     if (__builtin_expect(plain_store(m, body + 0x19C, 0x38), 1)) {
@@ -1042,6 +1001,8 @@ static inline void copy_body_state(const ppu_mm& m, uint32_t body) {
     vm_write32_mm(&m, body + 0x140, vm_read32_mm(&m, body + 0x140) + 1u);
     vm_write8_mm(&m, body + 0x1B4, vm_read8_mm(&m, body + 0x54) ^ 1u);
 }
+
+} // namespace
 
 void func_00AD0C68(ppu_context* ctx) {
     const uint32_t scene  = (uint32_t)ctx->gpr[3];
@@ -1296,21 +1257,26 @@ static inline void quat_mul(float ax, float ay, float az, float aw,
     ow = aw * bw - ax * bx - ay * by - az * bz;
 }
 
-static inline void obb_to_aabb(float px, float py, float pz,
-                               float qx, float qy, float qz, float qw,
-                               float lcx, float lcy, float lcz,
-                               float lex, float ley, float lez,
-                               float out_c[3], float out_e[3]) {
+inline void quat_to_mat3(float qx, float qy, float qz, float qw, float r[9]) {
     const float x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
     const float xx = qx * x2, yy = qy * y2, zz = qz * z2;
     const float xy = qx * y2, xz = qx * z2, yz = qy * z2;
     const float wx = qw * x2, wy = qw * y2, wz = qw * z2;
-    const float r00 = 1.0f - (yy + zz), r10 = xy + wz, r20 = xz - wy;
-    const float r01 = xy - wz, r11 = 1.0f - (xx + zz), r21 = yz + wx;
-    const float r02 = xz + wy, r12 = yz - wx, r22 = 1.0f - (xx + yy);
-    out_e[0] = fabsf(r00) * lex + fabsf(r01) * ley + fabsf(r02) * lez;
-    out_e[1] = fabsf(r10) * lex + fabsf(r11) * ley + fabsf(r12) * lez;
-    out_e[2] = fabsf(r20) * lex + fabsf(r21) * ley + fabsf(r22) * lez;
+    r[0] = 1.0f - (yy + zz); r[1] = xy - wz;          r[2] = xz + wy;
+    r[3] = xy + wz;          r[4] = 1.0f - (xx + zz); r[5] = yz - wx;
+    r[6] = xz - wy;          r[7] = yz + wx;          r[8] = 1.0f - (xx + yy);
+}
+
+inline void obb_to_aabb(float px, float py, float pz,
+                        float qx, float qy, float qz, float qw,
+                        float lcx, float lcy, float lcz,
+                        float lex, float ley, float lez,
+                        float out_c[3], float out_e[3]) {
+    float r[9];
+    quat_to_mat3(qx, qy, qz, qw, r);
+    out_e[0] = fabsf(r[0]) * lex + fabsf(r[1]) * ley + fabsf(r[2]) * lez;
+    out_e[1] = fabsf(r[3]) * lex + fabsf(r[4]) * ley + fabsf(r[5]) * lez;
+    out_e[2] = fabsf(r[6]) * lex + fabsf(r[7]) * ley + fabsf(r[8]) * lez;
     if (lcx == 0.0f && lcy == 0.0f && lcz == 0.0f) {
         out_c[0] = px; out_c[1] = py; out_c[2] = pz;
     } else {
@@ -1385,14 +1351,8 @@ void func_00B44FA8(ppu_context* ctx) {
             const float lpx = rd_f32_mm(m, shape + 0x94), lpy = rd_f32_mm(m, shape + 0x98), lpz = rd_f32_mm(m, shape + 0x9C);
             float wx, wy, wz, ww;
             quat_mul(bx, by, bz, bw, lx, ly, lz, lw, wx, wy, wz, ww);
-            const float xx = wx * wx, yy = wy * wy, zz = wz * wz;
-            const float xy = wx * wy, xz = wx * wz, yz = wy * wz;
-            const float xw = wx * ww, yw = wy * ww, zw = wz * ww;
-            const float r[9] = {
-                1.0f - 2.0f * (yy + zz), 2.0f * (xy - zw),        2.0f * (xz + yw),
-                2.0f * (xy + zw),        1.0f - 2.0f * (zz + xx), 2.0f * (yz - xw),
-                2.0f * (xz - yw),        2.0f * (yz + xw),        1.0f - 2.0f * (yy + xx),
-            };
+            float r[9];
+            quat_to_mat3(wx, wy, wz, ww, r);
             float rx, ry, rz;
             rot_vec_by_quat(bx, by, bz, bw, lpx, lpy, lpz, rx, ry, rz);
             const float px = rx + rd_f32_mm(m, body + 0x124);

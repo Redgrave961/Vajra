@@ -1,29 +1,14 @@
 #include "guest.h"
+#include "assists.h"
 #include "pc_options.h"
+#include "ue3_reflect.h"
 
-#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
 #include <iterator>
-#include <vector>
-
-extern "C" const int32_t* ppu_exec_tab;
-extern "C" uint32_t ppu_exec_lo, ppu_exec_n;
 
 namespace {
-
-static inline void (*fast_host_fn(uint32_t code))(ppu_context*)
-{
-    const uint32_t d = code - ppu_exec_lo;
-    const uint32_t i = (d >> 2) | (d << 30);
-    if (__builtin_expect(i < ppu_exec_n, 1)) {
-        const int32_t off = ppu_exec_tab[i];
-        if (__builtin_expect(off != 0, 1))
-            return (void (*)(ppu_context*))((const char*)ps3_indirect_call + off);
-    }
-    return ps3_indirect_call;
-}
 
 constexpr uint32_t k_natives = 0x01A01824;
 constexpr uint32_t k_casts = 0x01A09828;
@@ -76,17 +61,43 @@ struct Vm {
     void w32(uint32_t a, uint32_t v) const { vm_write32_mm(mm(), a, v); }
     void w64(uint32_t a, uint64_t v) const { vm_write64_mm(mm(), a, v); }
 
+    uint8_t fr8(uint32_t a) const
+    {
+        if (__builtin_expect(vm_mm_ok(&m, a, 1), 1)) return m.vb[a];
+        return vm_read8_mm(mm(), a);
+    }
+    uint32_t fr32(uint32_t a) const { return vm_fast_read32(m, a); }
+    uint64_t fr64(uint32_t a) const { return vm_fast_read64(m, a); }
+    void fw32(uint32_t a, uint32_t v) const
+    {
+        if (__builtin_expect(plain_store(m, a, 4) && !ppu_slow_page[a >> 12], 1)) {
+            const uint32_t be = __builtin_bswap32(v);
+            memcpy(m.vb + a, &be, 4);
+            return;
+        }
+        vm_write32_mm(mm(), a, v);
+    }
+    void fw64(uint32_t a, uint64_t v) const
+    {
+        if (__builtin_expect(plain_store(m, a, 8) && !ppu_slow_page[a >> 12] && ((a & 4095u) <= 4088u), 1)) {
+            const uint64_t be = __builtin_bswap64(v);
+            memcpy(m.vb + a, &be, 8);
+            return;
+        }
+        vm_write64_mm(mm(), a, v);
+    }
+
     void frame(uint32_t sp, uint32_t size, uint64_t lr) const
     {
         (void)lr;
-        w64(sp - size, sp);
+        fw64(sp - size, sp);
     }
 
     uint32_t stack_alloc(uint32_t sp, uint32_t size) const
     {
-        const uint64_t chain = r64(sp);
+        const uint64_t chain = fr64(sp);
         sp -= (((size + 7) & ~7u) + 0x7F) & ~0xFu;
-        w64(sp, chain);
+        fw64(sp, chain);
         return sp;
     }
 
@@ -105,8 +116,13 @@ struct Vm {
     template <typename... A>
     uint32_t icall(uint32_t sp, uint64_t lr, uint32_t code, A... a)
     {
+        uint64_t* r = ctx->gpr + 3;
+        ((*r++ = (uint64_t)a), ...);
+        ctx->gpr[1] = sp;
+        ctx->lr = lr;
         ctx->ctr = code;
-        return call(sp, lr, fast_host_fn(code), a...);
+        guest_icall(ctx);
+        return (uint32_t)ctx->gpr[3];
     }
 
     template <typename... A>
@@ -120,7 +136,8 @@ struct Vm {
         if (!n) return;
         if (plain_store(m, dst, n)) {
             memset(m.vb + dst, 0, n);
-            vm_track_write(dst, n);
+            if (__builtin_expect(ppu_slow_page[dst >> 12] || ((dst ^ (dst + n - 1u)) >> 12), 0))
+                vm_track_write(dst, n);
         }
         else call(sp, lr, func_00F35E2C, dst, 0, n);
     }
@@ -198,57 +215,74 @@ uint32_t remote(Vm& v, uint32_t sp, uint64_t lr, uint32_t self, uint32_t functio
     return v.icall(sp, lr, code, self, function, a, b);
 }
 
-uint32_t find_probe(const Vm& v, uint32_t level, uint32_t index, uint64_t name)
-{
-    const uint8_t* vb = v.m.vb;
-    auto rd32 = [vb](uint32_t a) {
-        uint32_t x;
-        memcpy(&x, vb + a, 4);
-        return __builtin_bswap32(x);
-    };
-    const uint32_t size = rd32(level + 0xB8);
-    if (!size) return 0;
-    const uint32_t buckets = rd32(level + 0xB4);
-    const uint32_t table = buckets ? buckets : level + 0xB0;
-    const uint32_t elements = rd32(level + 0x80);
-    const uint64_t name_be = __builtin_bswap64(name);
-    for (uint32_t i = rd32(table + 4u * (index & (size - 1u))); (int32_t)i != -1;) {
-        const uint8_t* ep = vb + elements + 20u * i;
-        uint64_t k;
-        memcpy(&k, ep, 8);
-        if (k == name_be) {
-            uint32_t val;
-            memcpy(&val, ep + 8, 4);
-            return __builtin_bswap32(val);
-        }
-        uint32_t nxt;
-        memcpy(&nxt, ep + 12, 4);
-        i = __builtin_bswap32(nxt);
-    }
-    return 0;
-}
-
 uint32_t find_walk(const Vm& v, uint32_t level, uint32_t index, uint64_t name)
 {
-    const uint8_t* vb = v.m.vb;
-    for (; level;) {
-        if (const uint32_t found = find_probe(v, level, index, name)) return found;
-        uint32_t next_lvl;
-        memcpy(&next_lvl, vb + level + 0x40, 4);
-        level = __builtin_bswap32(next_lvl);
+    return ue3::find_function_walk(v.m.vb, level, index, __builtin_bswap64(name));
+}
+
+inline bool registered(const Vm& v, uint32_t obj) { return ue3::uobject_registered(v.m, obj); }
+
+struct FnCache {
+    uint32_t state, cls, fn, fn_outer, fn_cls, cls_outer, state_outer;
+    uint64_t name, cls_name, state_name;
+};
+thread_local FnCache g_fn_cache[4096];
+thread_local uint32_t g_fast_copy_vt[16];
+std::atomic<uint32_t> g_bool_class_cache{0};
+
+inline void copy_words_fast(const Vm& v, uint32_t dst, uint32_t src, int32_t count, uint32_t stride)
+{
+    if (count == 1) {
+        if (__builtin_expect(vm_mm_ok(&v.m, src, 4) && plain_store(v.m, dst, 4) && !ppu_slow_page[dst >> 12], 1)) {
+            memcpy(v.m.vb + dst, v.m.vb + src, 4);
+            return;
+        }
+        v.w32(dst, v.r32(src));
+        return;
     }
-    return 0;
+    if (count > 1) {
+        if (stride == 4u) {
+            const uint32_t bytes = (uint32_t)count * 4u;
+            if (__builtin_expect(vm_mm_ok(&v.m, src, bytes) && plain_store(v.m, dst, bytes), 1)) {
+                memmove(v.m.vb + dst, v.m.vb + src, bytes);
+                if (__builtin_expect(ppu_slow_page[dst >> 12] || ((dst ^ (dst + bytes - 1u)) >> 12), 0))
+                    vm_track_write(dst, bytes);
+                return;
+            }
+        }
+        for (int32_t i = 0; i < count; ++i) {
+            const uint32_t off = stride * (uint32_t)i;
+            v.w32(dst + off, v.r32(src + off));
+        }
+    }
 }
 
 uint32_t find_checked(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint64_t name, uint64_t global)
 {
     const uint32_t index = (uint32_t)(name >> 32);
+    const uint32_t frame = v.fr32(self + 0x14);
+    const uint32_t state = (frame && (int32_t)global == 0) ? v.fr32(frame + 0x28) : 0;
+    const uint32_t cls = v.fr32(self + 0x34);
+    const uint64_t cls_name = cls ? v.fr64(cls + 0x2C) : 0;
+    const uint32_t cls_outer = cls ? v.fr32(cls + 0x28) : 0;
+    const uint64_t state_name = state ? v.fr64(state + 0x2C) : 0;
+    const uint32_t state_outer = state ? v.fr32(state + 0x28) : 0;
+    const uint32_t slot_idx = ((cls >> 4) ^ (state >> 4) ^ ((index * 0x9E3779B1u) >> 20)) & 4095u;
+    FnCache& slot = g_fn_cache[slot_idx];
+    if (__builtin_expect(slot.cls == cls && slot.state == state && slot.name == name && slot.fn != 0 &&
+                         slot.cls_name == cls_name && slot.cls_outer == cls_outer &&
+                         slot.state_name == state_name && slot.state_outer == state_outer &&
+                         registered(v, slot.fn) && v.fr64(slot.fn + 0x2C) == name &&
+                         v.fr32(slot.fn + 0x28) == slot.fn_outer && v.fr32(slot.fn + 0x34) == slot.fn_cls, 1))
+        return slot.fn;
     uint32_t found = 0;
-    const uint32_t frame = v.r32(self + 0x14);
-    const uint32_t state = frame ? v.r32(frame + 0x28) : 0;
-    if (state && (int32_t)global == 0) found = find_walk(v, state, index, name);
-    if (!found) found = find_walk(v, v.r32(self + 0x34), index, name);
-    if (__builtin_expect(found != 0, 1)) return found;
+    if (state) found = find_walk(v, state, index, name);
+    if (!found) found = find_walk(v, cls, index, name);
+    if (__builtin_expect(found != 0, 1)) {
+        if (registered(v, found))
+            slot = { state, cls, found, v.fr32(found + 0x28), v.fr32(found + 0x34), cls_outer, state_outer, name, cls_name, state_name };
+        return found;
+    }
     const uint32_t f = sp0 - 0xB0;
     v.frame(sp0, 0xB0, lr0);
     v.w32(f + 0x38, (uint32_t)(name >> 32));
@@ -257,49 +291,41 @@ uint32_t find_checked(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint64_t
     return v.call(sp0, lr0, func_000D78A0_lifted, self, name, global);
 }
 
-void copy_value_fast(Vm& v, uint32_t sp, uint64_t lr, uint32_t prop, uint32_t result, uint32_t addr)
+template <bool Lazy>
+inline void copy_value_impl(Vm& v, uint32_t sp, uint64_t lr0, uint64_t lr, uint32_t prop, uint32_t result, uint32_t addr)
 {
-    const uint32_t fn = v.r32(v.r32(v.r32(prop) + 0x15C));
-    if (__builtin_expect(fn == 0x000E5548u, 1)) {
+    const uint32_t vt = v.r32(prop);
+    const uint32_t vs = (vt >> 4) & 15u;
+    bool fast = g_fast_copy_vt[vs] == vt;
+    uint32_t fn = 0;
+    if (!fast) {
+        fn = v.r32(v.r32(vt + 0x15C));
+        if (fn == 0x000E5548u) {
+            g_fast_copy_vt[vs] = vt;
+            fast = true;
+        }
+    }
+    if (__builtin_expect(fast, 1)) {
         const int32_t count = (int32_t)v.r32(prop + 0x40);
-        if (count == 1) {
-            v.w32(result, v.r32(addr));
-            return;
-        }
-        if (count > 1) {
-            const uint32_t stride = v.r32(prop + 0x44);
-            for (int32_t i = 0; i < count; ++i) {
-                const uint32_t off = stride * (uint32_t)i;
-                v.w32(result + off, v.r32(addr + off));
-            }
-            return;
-        }
+        copy_words_fast(v, result, addr, count, count > 1 ? v.r32(prop + 0x44) : 4u);
         return;
     }
-    v.icall(sp, lr, fn, prop, result, addr, 0, 0, 0);
+    if constexpr (Lazy) {
+        v.frame(sp, 0x70, lr0);
+        v.icall(sp - 0x70, lr, fn, prop, result, addr, 0, 0, 0);
+    } else {
+        v.icall(sp, lr, fn, prop, result, addr, 0, 0, 0);
+    }
+}
+
+void copy_value_fast(Vm& v, uint32_t sp, uint64_t lr, uint32_t prop, uint32_t result, uint32_t addr)
+{
+    copy_value_impl<false>(v, sp, 0, lr, prop, result, addr);
 }
 
 void copy_value_lazy(Vm& v, uint32_t sp0, uint64_t lr0, uint64_t lr, uint32_t prop, uint32_t result, uint32_t addr)
 {
-    const uint32_t fn = v.r32(v.r32(v.r32(prop) + 0x15C));
-    if (__builtin_expect(fn == 0x000E5548u, 1)) {
-        const int32_t count = (int32_t)v.r32(prop + 0x40);
-        if (count == 1) {
-            v.w32(result, v.r32(addr));
-            return;
-        }
-        if (count > 1) {
-            const uint32_t stride = v.r32(prop + 0x44);
-            for (int32_t i = 0; i < count; ++i) {
-                const uint32_t off = stride * (uint32_t)i;
-                v.w32(result + off, v.r32(addr + off));
-            }
-            return;
-        }
-        return;
-    }
-    v.frame(sp0, 0x70, lr0);
-    v.icall(sp0 - 0x70, lr, fn, prop, result, addr, 0, 0, 0);
+    copy_value_impl<true>(v, sp0, lr0, lr, prop, result, addr);
 }
 
 void call_native(Vm& v, uint32_t sp, uint64_t lr, uint32_t self, uint32_t function, uint32_t stack, uint32_t result)
@@ -312,13 +338,17 @@ void call_native(Vm& v, uint32_t sp, uint64_t lr, uint32_t self, uint32_t functi
 
 bool is_bool(Vm& v, uint32_t sp, uint32_t prop, uint64_t lr_class, uint64_t lr_init)
 {
-    uint32_t cls = v.r32(k_bool_class);
+    uint32_t cls = g_bool_class_cache.load(std::memory_order_relaxed);
     const uint32_t prop_class = v.r32(prop + 0x34);
-    if (!cls) {
-        const uint32_t made = v.call(sp, lr_class, func_000DFF70, k_core);
-        v.w32(k_bool_class, made);
-        v.call(sp, lr_init, func_000DFDA8, made);
+    if (__builtin_expect(!cls, 0)) {
         cls = v.r32(k_bool_class);
+        if (!cls) {
+            const uint32_t made = v.call(sp, lr_class, func_000DFF70, k_core);
+            v.w32(k_bool_class, made);
+            v.call(sp, lr_init, func_000DFDA8, made);
+            cls = v.r32(k_bool_class);
+        }
+        if (cls) g_bool_class_cache.store(cls, std::memory_order_relaxed);
     }
     return prop_class == cls;
 }
@@ -335,7 +365,7 @@ void link_out(Vm& v, uint32_t& last, uint32_t out)
 
 void call_script(Vm& v, uint32_t f, uint32_t self, uint32_t stack, uint32_t result, uint32_t function)
 {
-    const uint32_t size = v.r32(function + 0x48);
+    const uint32_t size = v.fr32(function + 0x48);
     uint32_t sp = f, frame = 0;
     if (size) {
         sp = v.stack_alloc(f, size);
@@ -343,7 +373,7 @@ void call_script(Vm& v, uint32_t f, uint32_t self, uint32_t stack, uint32_t resu
         v.zero(sp, 0x00040870, frame, size);
     }
     const uint32_t nf = f + 0x90;
-    const uint32_t code0 = v.r32(function + 0x4C);
+    const uint32_t code0 = v.fr32(function + 0x4C);
     if (__builtin_expect((nf >> 12) == ((nf + 39u) >> 12) && !ppu_slow_page[nf >> 12], 1)) {
         const uint32_t hdr[10] = {
             __builtin_bswap32(k_frame_vtable), __builtin_bswap32(1u), 0u, __builtin_bswap32(1u),
@@ -365,71 +395,98 @@ void call_script(Vm& v, uint32_t f, uint32_t self, uint32_t stack, uint32_t resu
         v.w32(f + 0xB4, 0);
     }
     uint32_t last = f + 0xB4;
-    uint32_t prop = v.r32(function + 0x44);
-    uint32_t code = v.r32(stack + 0x18);
-    if (v.r8(code) != 0x16) {
+    uint32_t prop = v.fr32(function + 0x44);
+    uint32_t code = v.fr32(stack + 0x18);
+    if (v.fr8(code) != 0x16) {
         do {
-            const uint32_t uc = v.r32(k_runtime_flags);
+            const uint32_t uc = v.fr32(k_runtime_flags);
+            if (__builtin_expect(!ppu_slow_page[k_prop_addr >> 12], 1)) {
+                const uint64_t zero8 = 0;
+                memcpy(v.m.vb + k_prop_addr, &zero8, 8);
+            } else {
+                v.w32(k_prop_addr, 0);
+                v.w32(k_prop_object, 0);
+            }
+            if (__builtin_expect((uc & 2u) != 0, 0)) v.fw32(k_runtime_flags, uc & ~2u);
+            const uint64_t pflags = v.fr64(prop + 0x48);
+            uint32_t addr;
+            if (pflags & 0x100) {
+                next(v, sp, 0x00040958, v.fr32(stack + 0x14), stack, 0);
+                sp = v.stack_alloc(sp, 0x10);
+                addr = v.fr32(k_prop_addr);
+                if (!addr) addr = v.fr32(prop + 0x54) + frame;
+                v.fw32(sp + 0x74, addr);
+                v.fw32(sp + 0x70, prop);
+                link_out(v, last, sp + 0x70);
+                if (const uint32_t obj = v.fr32(k_prop_object))
+                    if (const uint32_t gp = v.fr32(k_property))
+                        if ((v.fr64(gp + 0x48) & 0x20) && !(pflags & 2)) v.vcall(sp, 0x00040C4C, obj, 0xC4, gp);
+            } else {
+                code = v.fr32(stack + 0x18);
+                const uint32_t locals = v.fr32(f + 0xAC);
+                v.fw32(stack + 0x18, code + 1);
+                addr = locals + v.fr32(prop + 0x54);
+                step(v, sp, 0x00040B44, v.fr32(stack + 0x14), stack, addr, v.fr8(code));
+                if (prop) {
+                    const uint32_t bcls = g_bool_class_cache.load(std::memory_order_relaxed);
+                    if (__builtin_expect(bcls != 0, 1)) {
+                        if (v.fr32(addr) && v.fr32(prop + 0x34) == bcls) v.fw32(addr, 0x80000000u);
+                    } else if (is_bool(v, sp, prop, 0x00040C24, 0x00040C30) && v.fr32(addr)) {
+                        v.fw32(addr, 0x80000000u);
+                    }
+                }
+            }
+            if (pflags & 0x10) {
+                if (prop && (v.fr32(k_runtime_flags) & 2) && (v.fr32(v.fr32(prop + 0x34) + 0xC0) & 0x100000))
+                    v.call(sp, 0x00040A50, func_000EAEEC, prop, addr);
+                const uint32_t ncode = v.fr32(f + 0xA8);
+                v.fw32(f + 0xA8, ncode + 1);
+                step(v, sp, 0x00040AA0, self, nf, addr, v.fr8(ncode));
+                if (prop) {
+                    const uint32_t bcls = g_bool_class_cache.load(std::memory_order_relaxed);
+                    if (__builtin_expect(bcls != 0, 1)) {
+                        if (v.fr32(addr) && v.fr32(prop + 0x34) == bcls) v.fw32(addr, 0x80000000u);
+                    } else if (is_bool(v, sp, prop, 0x00040C08, 0x00040C14) && v.fr32(addr)) {
+                        v.fw32(addr, 0x80000000u);
+                    }
+                }
+            }
+            code = v.fr32(stack + 0x18);
+            prop = v.fr32(prop + 0x3C);
+        } while (v.fr8(code) != 0x16);
+    }
+    v.fw32(stack + 0x18, code + 1);
+    while (prop) {
+        const uint64_t pflags = v.fr64(prop + 0x48);
+        if (!(pflags & 0x10)) break;
+        uint32_t next_sp = sp;
+        if (__builtin_expect(!ppu_slow_page[k_prop_addr >> 12], 1)) {
+            const uint64_t zero8 = 0;
+            memcpy(v.m.vb + k_prop_addr, &zero8, 8);
+        } else {
             v.w32(k_prop_addr, 0);
             v.w32(k_prop_object, 0);
-            if (__builtin_expect((uc & 2u) != 0, 0)) v.w32(k_runtime_flags, uc & ~2u);
-            uint32_t addr;
-            if (v.r64(prop + 0x48) & 0x100) {
-                next(v, sp, 0x00040958, v.r32(stack + 0x14), stack, 0);
-                sp = v.stack_alloc(sp, 0x10);
-                addr = v.r32(k_prop_addr);
-                if (!addr) addr = v.r32(prop + 0x54) + frame;
-                v.w32(sp + 0x74, addr);
-                v.w32(sp + 0x70, prop);
-                link_out(v, last, sp + 0x70);
-                if (const uint32_t obj = v.r32(k_prop_object))
-                    if (const uint32_t gp = v.r32(k_property))
-                        if ((v.r64(gp + 0x48) & 0x20) && !(v.r64(prop + 0x48) & 2)) v.vcall(sp, 0x00040C4C, obj, 0xC4, gp);
-            } else {
-                code = v.r32(stack + 0x18);
-                const uint32_t locals = v.r32(f + 0xAC);
-                v.w32(stack + 0x18, code + 1);
-                addr = locals + v.r32(prop + 0x54);
-                step(v, sp, 0x00040B44, v.r32(stack + 0x14), stack, addr, v.r8(code));
-                if (prop && is_bool(v, sp, prop, 0x00040C24, 0x00040C30) && v.r32(addr)) v.w32(addr, 0x80000000u);
-            }
-            if (v.r64(prop + 0x48) & 0x10) {
-                if (prop && (v.r32(k_runtime_flags) & 2) && (v.r32(v.r32(prop + 0x34) + 0xC0) & 0x100000))
-                    v.call(sp, 0x00040A50, func_000EAEEC, prop, addr);
-                const uint32_t ncode = v.r32(f + 0xA8);
-                v.w32(f + 0xA8, ncode + 1);
-                step(v, sp, 0x00040AA0, self, nf, addr, v.r8(ncode));
-                if (prop && is_bool(v, sp, prop, 0x00040C08, 0x00040C14) && v.r32(addr)) v.w32(addr, 0x80000000u);
-            }
-            code = v.r32(stack + 0x18);
-            prop = v.r32(prop + 0x3C);
-        } while (v.r8(code) != 0x16);
-    }
-    v.w32(stack + 0x18, code + 1);
-    while (prop && (v.r64(prop + 0x48) & 0x10)) {
-        uint32_t next_sp = sp;
-        v.w32(k_prop_addr, 0);
-        v.w32(k_prop_object, 0);
-        if (v.r64(prop + 0x48) & 0x100) {
+        }
+        if (pflags & 0x100) {
             next_sp = v.stack_alloc(sp, 0x10);
-            v.w32(next_sp + 0x70, prop);
-            v.w32(next_sp + 0x74, frame + v.r32(prop + 0x54));
+            v.fw32(next_sp + 0x70, prop);
+            v.fw32(next_sp + 0x74, frame + v.fr32(prop + 0x54));
             link_out(v, last, next_sp + 0x70);
         }
-        const uint32_t ncode = v.r32(f + 0xA8);
-        const uint32_t addr = frame + v.r32(prop + 0x54);
-        v.w32(f + 0xA8, ncode + 1);
-        step(v, next_sp, 0x00040DD8, self, nf, addr, v.r8(ncode));
-        prop = v.r32(prop + 0x3C);
+        const uint32_t ncode = v.fr32(f + 0xA8);
+        const uint32_t addr = frame + v.fr32(prop + 0x54);
+        v.fw32(f + 0xA8, ncode + 1);
+        step(v, next_sp, 0x00040DD8, self, nf, addr, v.fr8(ncode));
+        prop = v.fr32(prop + 0x3C);
         sp = next_sp;
     }
-    for (uint32_t p = v.r32(function + 0x84); p; p = v.r32(p + 0x3C))
-        if (v.r32(v.r32(p + 0x34) + 0xC0) & 0x100000) v.call(sp, 0x00040CF8, func_000EAEEC, p, v.r32(f + 0xAC) + v.r32(p + 0x54));
+    for (uint32_t p = v.fr32(function + 0x84); p; p = v.fr32(p + 0x3C))
+        if (v.fr32(v.fr32(p + 0x34) + 0xC0) & 0x100000) v.call(sp, 0x00040CF8, func_000EAEEC, p, v.fr32(f + 0xAC) + v.fr32(p + 0x54));
     process_internal(v, sp, 0x00040E2C, self, nf, result);
-    if (result && camera_assist_blocked(function)) v.w32(result, 0);
-    for (uint32_t p = v.r32(function + 0x64); p; p = v.r32(p + 0x5C)) {
-        const uint64_t flags = v.r64(p + 0x48);
-        if (!(flags & 0x100) || (flags & 0x10)) v.vcall(sp, 0x00040E8C, p, 0x168, v.r32(f + 0xAC) + v.r32(p + 0x54));
+    if (result && camera_assist_blocked(function)) v.fw32(result, 0);
+    for (uint32_t p = v.fr32(function + 0x64); p; p = v.fr32(p + 0x5C)) {
+        const uint64_t flags = v.fr64(p + 0x48);
+        if (!(flags & 0x100) || (flags & 0x10)) v.vcall(sp, 0x00040E8C, p, 0x168, v.fr32(f + 0xAC) + v.fr32(p + 0x54));
     }
 }
 
@@ -483,17 +540,22 @@ void process_internal(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t
         const uint64_t flags = v.r64(self + 8);
         if (!((flags & 2) && single)) {
             if (single) v.w64(self + 8, flags | 2);
-            const uint32_t obj = v.r32(stack + 0x14);
-            uint32_t code = v.r32(stack + 0x18);
-            uint8_t op = v.r8(code);
-            while (op != 4) {
-                v.w32(stack + 0x18, code + 1);
-                step(v, f, 0x000403D0, obj, stack, f + 0x78, op);
-                code = v.r32(stack + 0x18);
-                op = v.r8(code);
+            const uint32_t locals = v.r32(stack + 0x1C);
+            const uint32_t assist = assists_pre(self, node, locals, result);
+            if (__builtin_expect((assist & ASSIST_ACT_SKIP) == 0, 1)) {
+                const uint32_t obj = v.fr32(stack + 0x14);
+                uint32_t code = v.fr32(stack + 0x18);
+                uint8_t op = v.fr8(code);
+                while (op != 4) {
+                    v.fw32(stack + 0x18, code + 1);
+                    step(v, f, 0x000403D0, obj, stack, f + 0x78, op);
+                    code = v.fr32(stack + 0x18);
+                    op = v.fr8(code);
+                }
+                v.fw32(stack + 0x18, code + 2);
+                step(v, f, 0x00040458, obj, stack, result, v.fr8(code + 1));
+                assists_post(assist, self, node, locals, result);
             }
-            v.w32(stack + 0x18, code + 2);
-            step(v, f, 0x00040458, obj, stack, result, v.r8(code + 1));
             if (single) v.w64(self + 8, v.r64(self + 8) & ~2ull);
             return;
         }
@@ -509,9 +571,9 @@ void named_call(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack
 {
     (void)lr0;
     const uint32_t f = sp0 - 0x90;
-    const uint32_t code = v.r32(stack + 0x18);
-    const uint64_t name = v.r64(code);
-    v.w32(stack + 0x18, code + 8);
+    const uint32_t code = v.fr32(stack + 0x18);
+    const uint64_t name = v.fr64(code);
+    v.fw32(stack + 0x18, code + 8);
     call_function(v, f, lr_call, self, stack, result, find_checked(v, f, lr_find, self, name, global));
 }
 
@@ -528,18 +590,18 @@ void global_function(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t 
 void final_function(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, uint32_t result)
 {
     (void)lr0;
-    const uint32_t code = v.r32(stack + 0x18);
-    const uint32_t function = (uint32_t)v.r64(code);
-    v.w32(stack + 0x18, code + 8);
+    const uint32_t code = v.fr32(stack + 0x18);
+    const uint32_t function = (uint32_t)v.fr64(code);
+    v.fw32(stack + 0x18, code + 8);
     call_function(v, sp0 - 0x70, 0x00047AB4, self, stack, result, function);
 }
 
 void variable(Vm& v, uint32_t sp0, uint64_t lr0, uint64_t lr, uint32_t stack, uint32_t result, uint32_t base, uint32_t object)
 {
-    const uint32_t code = v.r32(stack + 0x18);
-    const uint32_t prop = (uint32_t)v.r64(code);
-    v.w32(stack + 0x18, code + 8);
-    const uint32_t addr = base + v.r32(prop + 0x54);
+    const uint32_t code = v.fr32(stack + 0x18);
+    const uint32_t prop = (uint32_t)v.fr64(code);
+    v.fw32(stack + 0x18, code + 8);
+    const uint32_t addr = base + v.fr32(prop + 0x54);
     if (__builtin_expect(!ppu_slow_page[k_property >> 12], 1)) {
         const uint32_t p_be = __builtin_bswap32(prop);
         const uint32_t a_be = __builtin_bswap32(addr);
@@ -558,7 +620,7 @@ void variable(Vm& v, uint32_t sp0, uint64_t lr0, uint64_t lr, uint32_t stack, ui
 
 void local_variable(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack, uint32_t result)
 {
-    variable(v, sp0, lr0, 0x0004147C, stack, result, v.r32(stack + 0x1C), 0);
+    variable(v, sp0, lr0, 0x0004147C, stack, result, v.fr32(stack + 0x1C), 0);
 }
 
 void instance_variable(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, uint32_t result)
@@ -1441,20 +1503,22 @@ void return_nothing(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t, uint32_t stack,
     v.zero(f, 0x00045F18, result, v.r32(prop + 0x40) * v.r32(prop + 0x44));
 }
 
+void fstring_assign(Vm& v, uint32_t f, uint32_t dst, uint32_t src_data, uint32_t len, uint64_t lr_alloc, uint64_t lr_copy)
+{
+    uint32_t to = v.r32(dst), n = len;
+    v.w32(dst + 8, len);
+    v.w32(dst + 4, len);
+    if (to | len) {
+        to = v.call(f, lr_alloc, func_0002AE4C, to, len << 1, 8);
+        n = v.r32(dst + 4);
+        v.w32(dst, to);
+    }
+    if (n) v.call(f, lr_copy, func_00F297C8, to, len ? src_data : k_empty_text, n << 1);
+}
+
 void assign_text(Vm& v, uint32_t f, uint32_t result, uint32_t data, uint32_t len, uint64_t lr_alloc, uint64_t lr_copy, uint64_t lr_free)
 {
-    if (result != f + 0x70) {
-        uint32_t dst = v.r32(result);
-        v.w32(result + 8, len);
-        v.w32(result + 4, len);
-        uint32_t n = len;
-        if (dst | len) {
-            dst = v.call(f, lr_alloc, func_0002AE4C, dst, len << 1, 8);
-            n = v.r32(result + 4);
-            v.w32(result, dst);
-        }
-        if (n) v.call(f, lr_copy, func_00F297C8, dst, len ? data : k_empty_text, n << 1);
-    }
+    if (result != f + 0x70) fstring_assign(v, f, result, data, len, lr_alloc, lr_copy);
     if (data) v.call(f, lr_free, func_0002ADF0, data);
 }
 
@@ -2031,11 +2095,7 @@ void dyn_count_error(Vm& v, uint32_t f, uint32_t stack, uint32_t array, uint32_t
                      uint64_t lr_free)
 {
     dyn_log(v, f, stack, array, at, lr, message);
-    if (const uint32_t data = v.r32(at)) {
-        v.w32(at + 4, 0);
-        v.w32(at + 8, 0);
-        v.call(f, lr_free, func_0002ADF0, data);
-    }
+    drop(v, f, at, lr_free);
 }
 
 void dyn_add(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, uint32_t result)
@@ -2281,9 +2341,7 @@ uint32_t array_inner(Vm& v)
 
 void array_missing(Vm& v, uint32_t stack, uint32_t result)
 {
-    const uint32_t code = v.r32(stack + 0x18);
-    v.w32(stack + 0x18, code + v.r16(code) + 2);
-    v.w32(result, ~0u);
+    dyn_skip(v, stack, v.r32(stack + 0x18), result);
 }
 
 void bool_fix(Vm& v, uint32_t prop, uint32_t at)
@@ -2442,11 +2500,7 @@ void sort_error(Vm& v, uint32_t f, uint32_t stack)
     else literal(v, f, f + 0xAC, k_null_owner_text, 0x00045728, 0x00045758, 0x0004577C);
     v.call(f, 0x000457B0, func_000AA46C, stack, 0x301, k_sort_bad_delegate, name, text(v, f + 0xAC));
     release(v, f, f + 0xAC, 0x000457CC);
-    if (const uint32_t data = v.r32(f + 0xA0)) {
-        v.w32(f + 0xA4, 0);
-        v.w32(f + 0xA8, 0);
-        v.call(f, 0x000457E8, func_0002ADF0, data);
-    }
+    drop(v, f, f + 0xA0, 0x000457E8);
 }
 
 void dyn_sort(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32_t stack, uint32_t result)
@@ -2715,17 +2769,7 @@ void str_assign(Vm& v, uint32_t f, uint32_t dst, uint32_t src, uint64_t lr_alloc
 void str_take(Vm& v, uint32_t f, uint32_t dst, uint32_t slot, uint32_t data, uint32_t size, uint64_t lr_alloc, uint64_t lr_copy,
               uint64_t lr_free)
 {
-    if (dst != slot) {
-        uint32_t to = v.r32(dst), n = size;
-        v.w32(dst + 8, size);
-        v.w32(dst + 4, size);
-        if (to | size) {
-            to = v.call(f, lr_alloc, func_0002AE4C, to, size << 1, 8);
-            n = v.r32(dst + 4);
-            v.w32(dst, to);
-        }
-        if (n) v.call(f, lr_copy, func_00F297C8, to, size ? data : k_empty_text, n << 1);
-    }
+    if (dst != slot) fstring_assign(v, f, dst, data, size, lr_alloc, lr_copy);
     if (data) v.call(f, lr_free, func_0002ADF0, data);
 }
 
@@ -3617,18 +3661,7 @@ void delegate_to_string(Vm& v, uint32_t sp0, uint64_t lr0, uint32_t self, uint32
     release(v, f, f + 0x94, 0x00053D60);
     if (path.data) v.call(f, 0x00053D78, func_0002ADF0, path.data);
     release(v, f, f + 0x88, 0x00053D94);
-    if (result != f + 0x70) {
-        uint32_t data = v.r32(result), len = full.num;
-        v.w32(result + 8, full.num);
-        v.w32(result + 4, full.num);
-        if (data | full.num) {
-            data = v.call(f, 0x00053DD0, func_0002AE4C, data, full.num << 1, 8);
-            len = v.r32(result + 4);
-            v.w32(result, data);
-        }
-        if (len) v.call(f, 0x00053E04, func_00F297C8, data, full.num ? full.data : k_empty_text, len << 1);
-    }
-    if (full.data) v.call(f, 0x00053E14, func_0002ADF0, full.data);
+    assign_text(v, f, result, full.data, full.num, 0x00053DD0, 0x00053E04, 0x00053E14);
 }
 
 constexpr Exec InterfaceToObject = convert<0x80, 0x70, 8, 0x00053974, copy_word>;
@@ -4672,7 +4705,7 @@ const Native k_table[] = {
     {0x00054E34, short_circuit<0x00054EB8, 0x00054F74, true>},
     {0x00054820, bool_compare<0x000548A4, 0x00054910, true>},
     {0x0005499C, bool_compare<0x00054A20, 0x00054A8C, false>},
-    {0x00058990, binary<0x00058A14, 0x00058A70, fmul_bits>},
+    {0x00058990, sited<frame_float_multiply, binary<0x00058A14, 0x00058A70, fmul_bits>>},
     {0x00058E3C, binary<0x00058EC0, 0x00058F1C, fadd_bits>},
     {0x00058F84, binary<0x00059008, 0x00059064, fsub_bits>},
     {0x00058780, unary<0x00058800, fneg>},
@@ -5005,7 +5038,7 @@ void func_00054B1C(ppu_context* ctx) { exec_entry<short_circuit<0x00054BA0, 0x00
 void func_00054E34(ppu_context* ctx) { exec_entry<short_circuit<0x00054EB8, 0x00054F74, true>>(ctx); }
 void func_00054820(ppu_context* ctx) { exec_entry<bool_compare<0x000548A4, 0x00054910, true>>(ctx); }
 void func_0005499C(ppu_context* ctx) { exec_entry<bool_compare<0x00054A20, 0x00054A8C, false>>(ctx); }
-void func_00058990(ppu_context* ctx) { exec_entry<binary<0x00058A14, 0x00058A70, fmul_bits>>(ctx); }
+void func_00058990(ppu_context* ctx) { exec_entry<sited<frame_float_multiply, binary<0x00058A14, 0x00058A70, fmul_bits>>>(ctx); }
 void func_00058E3C(ppu_context* ctx) { exec_entry<binary<0x00058EC0, 0x00058F1C, fadd_bits>>(ctx); }
 void func_00058F84(ppu_context* ctx) { exec_entry<binary<0x00059008, 0x00059064, fsub_bits>>(ctx); }
 void func_00058780(ppu_context* ctx) { exec_entry<unary<0x00058800, fneg>>(ctx); }

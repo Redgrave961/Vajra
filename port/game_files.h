@@ -33,6 +33,7 @@ struct launch_options {
     std::filesystem::path update;
     std::vector<std::filesystem::path> dlcs;
     bool prepare = false;
+    bool has_dlc_flags = false;
 };
 
 struct game_add_result {
@@ -48,5 +49,16 @@ game_add_result add_game_items(const std::filesystem::path& exe, game_paths& pat
 game_check check_game_paths(const std::filesystem::path& exe, const game_paths& paths);
 std::filesystem::path firmware_dir(const std::filesystem::path& exe, const game_paths& paths);
 std::filesystem::path default_update_pkg(const std::filesystem::path& exe, const std::string& title_id);
+inline std::string utf8_from_path(const std::filesystem::path& p, bool generic = false)
+{
+    const std::u8string s = generic ? p.generic_u8string() : p.u8string();
+    return std::string(s.begin(), s.end());
+}
+
+inline std::filesystem::path path_from_utf8(const std::string& s)
+{
+    return std::filesystem::path(std::u8string(s.begin(), s.end()));
+}
+
 int prepare_game_files(const std::filesystem::path& exe, const launch_options& opts);
 bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out, const launch_options& opts = {});

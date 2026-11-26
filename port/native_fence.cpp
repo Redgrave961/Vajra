@@ -1,9 +1,6 @@
 #include "guest.h"
 #include "rsx_core.h"
 
-extern "C" uint64_t ppu_timebase_now(void);
-extern "C" void ppu_thread_note_block(uint64_t tid);
-
 namespace {
 
 constexpr uint32_t k_rhi = 0x019CF6B0;
@@ -20,14 +17,6 @@ bool pending(uint64_t target, uint64_t done)
     const uint64_t d = target - done;
     const bool wrap = (int64_t)((int64_t)d < 0 ? 0 - d : d) > k_wrap;
     return (int64_t)target > (int64_t)done || (wrap && (int64_t)target < (int64_t)done);
-}
-
-uint64_t timebase()
-{
-    uint64_t t;
-    do t = ppu_timebase_now();
-    while (!(uint32_t)t);
-    return t;
 }
 
 void call(ppu_context* ctx, uint64_t sp, uint32_t lr, void (*fn)(ppu_context*))
@@ -53,7 +42,7 @@ void func_00874EF0(ppu_context* ctx)
     if (done()) return;
     vm_write64(frame, sp);
     vm_write64(sp + 0x10, lr);
-    const uint64_t start = timebase();
+    const uint64_t start = vm_timebase_nonzero();
     const uint32_t label = vm_read32(rhi + 0x54), owner = vm_read32(k_rhi);
     ctx->gpr[3] = vm_read32(label);
     ctx->gpr[4] = label;
@@ -73,7 +62,7 @@ void func_00874EF0(ppu_context* ctx)
         ppu_thread_note_block(ctx->thread_id);
         rsx_core_wait_label(vm_read32(rhi + 0x54), seen);
     } while (!done());
-    vm_write32(k_stall_ticks, vm_read32(k_stall_ticks) + (uint32_t)(timebase() - start));
+    vm_write32(k_stall_ticks, vm_read32(k_stall_ticks) + (uint32_t)(vm_timebase_nonzero() - start));
     ctx->gpr[1] = sp;
     ctx->lr = lr;
 }

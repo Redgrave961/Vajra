@@ -1,3 +1,4 @@
+#include "assists.h"
 #include "button_prompts.h"
 #include "game_files.h"
 #include "guest.h"
@@ -10,7 +11,6 @@
 #include "../ps3recomp/libs/network/sceNpTrophy.h"
 #include "../ps3recomp/libs/system/cellSaveData.h"
 
-#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +22,7 @@
 #include <thread>
 
 #ifdef _WIN32
+#include <atomic>
 #include <windows.h>
 #include <shellapi.h>
 #include <timeapi.h>
@@ -79,22 +80,10 @@ void guest_caller(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t 
     ppu_guest_call(opd, a0, a1, a2, a3, a4, a5, a6, a7);
 }
 
-char g_root[1024];
-
-void set_vfs_root(const char* eboot)
+void set_vfs_root()
 {
     const char* env = std::getenv("PS3_VFS_ROOT");
-    if (env && *env) {
-        ppu_vfs_root = env;
-        return;
-    }
-    std::snprintf(g_root, sizeof g_root, "%s", eboot);
-    for (char* p = g_root; *p; p++)
-        if (*p == '\\') *p = '/';
-    for (int i = 0; i < 3; i++)
-        if (char* s = std::strrchr(g_root, '/')) *s = 0;
-    if (!g_root[0]) std::strcpy(g_root, ".");
-    ppu_vfs_root = g_root;
+    ppu_vfs_root = (env && *env) ? env : ".";
 }
 
 #ifdef _WIN32
@@ -520,6 +509,7 @@ void init_recomp_achievements()
 {
     rl_ach_set_info("vajra", VAJRA_VERSION);
     rl_ach_init("ps3", nullptr, nullptr);
+    assists_sync_casual();
     ps3_trophy_set_callbacks(on_trophy_register, on_trophy_unlock, is_trophy_quiet, on_trophy_frame);
     cellSaveData_set_load_callback(on_save_loaded);
 }
@@ -532,7 +522,7 @@ void use_game_files(const game_files& files)
     default_env("PS3_GAMEDATA_ROOT", files.user);
     default_env("PS3_DEV_FLASH", files.flash);
     default_env("PS3_VERBOSE", "0");
-    default_env("PS3_ARGV", "-POOLSIZE=320");
+    default_env("PS3_ARGV", "-POOLSIZE=288");
 }
 
 }
@@ -557,16 +547,12 @@ int main(int argc, char** argv)
     launch_options opts;
     const char* elf = nullptr;
 
-    auto utf8_path = [](const std::filesystem::path& p) {
-        const std::u8string s = p.u8string();
-        return std::string(s.begin(), s.end());
-    };
     std::vector<std::string> owned_args;
 #ifdef _WIN32
     int wargc = 0;
     if (LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc)) {
         owned_args.reserve((size_t)wargc);
-        for (int i = 0; i < wargc; i++) owned_args.push_back(utf8_path(std::filesystem::path(wargv[i])));
+        for (int i = 0; i < wargc; i++) owned_args.push_back(utf8_from_path(std::filesystem::path(wargv[i])));
         LocalFree(wargv);
     } else {
         for (int i = 0; i < argc; i++) owned_args.emplace_back(argv[i]);
@@ -574,28 +560,23 @@ int main(int argc, char** argv)
 #else
     for (int i = 0; i < argc; i++) owned_args.emplace_back(argv[i]);
 #endif
-    auto path_arg = [](const std::string& s) {
-        return std::filesystem::path(std::u8string(s.begin(), s.end()));
-    };
     for (size_t i = 1; i < owned_args.size(); i++) {
         const std::string_view a = owned_args[i];
-        auto take = [&](std::string_view flag, std::filesystem::path& out) -> bool {
-            if (a == flag && i + 1 < owned_args.size()) { out = path_arg(owned_args[++i]); return true; }
-            if (a.size() > flag.size() + 1 && a.starts_with(flag) && a[flag.size()] == '=') {
-                out = path_arg(owned_args[i].substr(flag.size() + 1));
+        auto take = [&](std::string_view flag, std::filesystem::path& out, bool allow_empty = false) -> bool {
+            if (a == flag && i + 1 < owned_args.size()) { out = path_from_utf8(owned_args[++i]); return true; }
+            if (a.size() >= flag.size() + 1 && a.starts_with(flag) && a[flag.size()] == '=') {
+                if (!allow_empty && a.size() == flag.size() + 1) return false;
+                if (a.size() > flag.size() + 1) out = path_from_utf8(owned_args[i].substr(flag.size() + 1));
                 return true;
             }
             return false;
         };
         auto take_dlc = [&](std::filesystem::path& out) -> bool {
-            if (take("--dlc", out) || take("--rap", out)) return true;
-            if (a.size() >= 7 && a.starts_with("--dlc") && a[5] >= '1' && a[5] <= '9') {
-                const size_t eq = a.find('=');
-                if (eq != std::string_view::npos) {
-                    if (eq + 1 < a.size()) { out = path_arg(owned_args[i].substr(eq + 1)); return true; }
-                    return false;
-                }
-                if (i + 1 < owned_args.size()) { out = path_arg(owned_args[++i]); return true; }
+            if (take("--rap", out)) return true;
+            if (take("--dlc", out, true)) { opts.has_dlc_flags = true; return true; }
+            if (a.size() >= 6 && a.starts_with("--dlc") && a[5] >= '1' && a[5] <= '9') {
+                const std::string_view numbered = a.substr(0, 6);
+                if (take(numbered, out, true)) { opts.has_dlc_flags = true; return true; }
             }
             return false;
         };
@@ -616,7 +597,7 @@ int main(int argc, char** argv)
             data_dir = exe;
 #else
         if (const char* env_data = std::getenv("RECOMPLAUNCHER_DATA"); env_data && *env_data)
-            data_dir = path_arg(env_data);
+            data_dir = path_from_utf8(env_data);
         else
             data_dir = exe;
 #endif
@@ -654,13 +635,13 @@ int main(int argc, char** argv)
         std::printf("cannot load %s\n", elf ? elf : "the update's EBOOT");
         return 1;
     }
-    set_vfs_root(elf ? elf : "");
+    set_vfs_root();
     cellGame_init_boot(ppu_vfs_root);
     std::error_code cache_ec;
     const std::filesystem::path cache_dir = data_dir / "cache";
     std::filesystem::create_directories(cache_dir, cache_ec);
-    const std::string cache_path = utf8_path(cache_dir / "vk_pipelines.bin");
-    const std::string icon_path = utf8_path(icon);
+    const std::string cache_path = utf8_from_path(cache_dir / "vk_pipelines.bin");
+    const std::string icon_path = utf8_from_path(icon);
     rsx_core_set_renderer(rsx_vk_renderer(cellGame_get_title(), cache_path.c_str(), icon_path.c_str()));
     use_button_prompts();
 

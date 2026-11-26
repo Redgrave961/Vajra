@@ -1,7 +1,10 @@
+#include "assists.h"
 #include "guest.h"
 #include "pc_options.h"
+#include "ue3_reflect.h"
 #include "vk/rsx_vk.h"
 #include "../ps3recomp/libs/input/pad_bindings.h"
+#include "../ps3recomp/libs/system/cellSysutil.h"
 
 #include <algorithm>
 #include <atomic>
@@ -15,9 +18,18 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
+
+using ue3::Elements;
+using ue3::Member;
+using ue3::elements;
+using ue3::hook_bit;
+using ue3::k_object_class;
+using ue3::k_struct_super;
+using ue3::object_name_eq;
 
 #include "option_menu_tags.inc"
 
@@ -30,16 +42,21 @@ constexpr uint32_t k_proxy_blur[] = { 0x14, 0x18, 0x1C };
 constexpr uint32_t k_proxy_bloom_scale = 0x38;
 constexpr uint32_t k_proxy_motion_blur = 0x110;
 constexpr uint32_t k_sys_settings = 0x01A56AB4;
+constexpr uint32_t k_sys_shadow_filter_quality_bias = k_sys_settings + 0x384;
 constexpr uint32_t k_sys_min_shadow_res = k_sys_settings + 0x388;
+constexpr uint32_t k_sys_min_preshadow_res = k_sys_settings + 0x38C;
 constexpr uint32_t k_sys_max_shadow_res = k_sys_settings + 0x390;
 constexpr uint32_t k_sys_max_dom_shadow_res = k_sys_settings + 0x394;
 constexpr uint32_t k_sys_shadow_texels_per_pixel = k_sys_settings + 0x398;
+constexpr uint32_t k_sys_preshadow_res_factor = k_sys_settings + 0x39C;
 constexpr uint32_t k_sys_shadow_filter_radius = k_sys_settings + 0x3B8;
 constexpr uint32_t k_sys_shadow_depth_bias = k_sys_settings + 0x3BC;
+constexpr uint32_t k_sys_shadow_fade_res = k_sys_settings + 0x3E4;
+constexpr uint32_t k_sys_preshadow_fade_res = k_sys_settings + 0x3E8;
 constexpr uint32_t k_rhi_max_shadow_x = 0x019C2F6C;
 constexpr uint32_t k_rhi_max_shadow_y = 0x019C2F70;
 constexpr uint32_t k_rhi_max_dom_shadow = 0x019C2F74;
-constexpr uint32_t k_shadow_res = 1024;
+constexpr uint32_t k_shadow_res = 4096;
 constexpr uint32_t k_sys_tex_lod_base = 0x01A56B58;
 constexpr uint32_t k_sys_tex_lod_count = 28;
 constexpr uint32_t k_sys_tex_lod_stride = 24;
@@ -52,15 +69,6 @@ constexpr uint32_t k_bulk_data = 0x24;
 constexpr uint32_t k_bulk_separate_file = 0x01;
 constexpr uint32_t k_bulk_unused = 0x20;
 constexpr uint32_t k_use_vsync = 0x01A56E04;
-constexpr uint32_t k_gnames = 0x01A0B014;
-constexpr uint32_t k_object_name = 0x2C;
-constexpr uint32_t k_object_class = 0x34;
-constexpr uint32_t k_field_next = 0x3C;
-constexpr uint32_t k_struct_super = 0x40;
-constexpr uint32_t k_struct_children = 0x44;
-constexpr uint32_t k_property_element = 0x44;
-constexpr uint32_t k_property_offset = 0x54;
-constexpr uint32_t k_property_detail = 0x64;
 constexpr uint32_t k_key_config_types = 3;
 constexpr uint8_t k_dialog_idle = 3;
 constexpr uint8_t k_dialog_passive = 3;
@@ -104,11 +112,37 @@ const Choices k_switch = {
     { "on", "", 1 },
     { "off", "", 0 },
 };
+const Choices k_damage_mult = {
+    { "1x", "1x", 1 },
+    { "2x", "2x", 2 },
+    { "4x", "4x", 4 },
+    { "8x", "8x", 8 },
+    { "16x", "16x", 16 },
+};
+const Choices k_qte_timer = {
+    { "off", "Off", 100 },
+    { "1.5x", "1.5x", 150 },
+    { "2x", "2x", 200 },
+    { "3x", "3x", 300 },
+};
+const Choices k_language = {
+    { "auto", "System Default", 0xFFFFFFFFu },
+    { "en", "English", CELL_SYSUTIL_LANG_ENGLISH_US },
+    { "ja", "Japanese", CELL_SYSUTIL_LANG_JAPANESE },
+    { "fr", "French", CELL_SYSUTIL_LANG_FRENCH },
+    { "es", "Spanish", CELL_SYSUTIL_LANG_SPANISH },
+    { "de", "German", CELL_SYSUTIL_LANG_GERMAN },
+    { "it", "Italian", CELL_SYSUTIL_LANG_ITALIAN },
+};
 
 constexpr uint32_t k_max_scale = 8;
 
 std::vector<rsx_vk_mode> g_modes;
+Choices g_res_choices;
+Choices g_fps_choices;
 bool g_modes_valid = false;
+bool g_res_choices_valid = false;
+bool g_fps_choices_valid = false;
 
 const std::vector<rsx_vk_mode>& display_modes()
 {
@@ -119,6 +153,8 @@ const std::vector<rsx_vk_mode>& display_modes()
             if (rsx_vk_display_modes(g_modes.data(), n) == n) break;
         }
         g_modes_valid = !g_modes.empty();
+        g_res_choices_valid = false;
+        g_fps_choices_valid = false;
     }
     return g_modes;
 }
@@ -139,55 +175,71 @@ std::optional<uint32_t> parse_frame_rate(const std::string& token)
     return hz ? std::optional<uint32_t>(hz) : std::nullopt;
 }
 
-Choices display_choices() { return k_display; }
-Choices switch_choices() { return k_switch; }
+const Choices& display_choices() { return k_display; }
+const Choices& switch_choices() { return k_switch; }
+const Choices& damage_mult_choices() { return k_damage_mult; }
+const Choices& qte_timer_choices() { return k_qte_timer; }
+const Choices& language_choices() { return k_language; }
 
 constexpr uint32_t k_sensitivity_steps = 20;
 
-Choices sensitivity_choices()
+const Choices& sensitivity_choices()
 {
-    Choices list;
-    for (uint32_t n = 1; n <= k_sensitivity_steps; n++) list.push_back({ std::to_string(n), std::to_string(n), n });
+    static const Choices list = [] {
+        Choices out;
+        out.reserve(k_sensitivity_steps);
+        for (uint32_t n = 1; n <= k_sensitivity_steps; n++) out.push_back({ std::to_string(n), std::to_string(n), n });
+        return out;
+    }();
     return list;
 }
 
-Choices resolution_choices()
+const Choices& resolution_choices()
 {
     const std::vector<rsx_vk_mode>& modes = display_modes();
-    if (modes.empty()) return {};
-    const rsx_vk_mode native = *std::max_element(modes.begin(), modes.end(), [](const rsx_vk_mode& a, const rsx_vk_mode& b) {
-        return (uint64_t)a.width * a.height < (uint64_t)b.width * b.height;
-    });
-    std::vector<uint32_t> heights(std::begin(k_resolution_heights), std::end(k_resolution_heights));
-    if (parse_resolution(std::to_string(native.width) + "x" + std::to_string(native.height))) heights.push_back(native.height);
-    std::sort(heights.begin(), heights.end());
-    heights.erase(std::unique(heights.begin(), heights.end()), heights.end());
-    const auto distance = [&](uint32_t h) { return h > native.height ? h - native.height : native.height - h; };
-    const uint32_t preferred = *std::min_element(heights.begin(), heights.end(), [&](uint32_t a, uint32_t b) { return distance(a) < distance(b); });
-    Choices list;
-    for (const uint32_t h : heights) {
-        const std::string w = std::to_string(h * 16 / 9);
-        list.push_back({ w + "x" + std::to_string(h), w + " x " + std::to_string(h), h, h == preferred });
+    if (!g_res_choices_valid) {
+        g_res_choices.clear();
+        if (!modes.empty()) {
+            const rsx_vk_mode native = *std::max_element(modes.begin(), modes.end(), [](const rsx_vk_mode& a, const rsx_vk_mode& b) {
+                return (uint64_t)a.width * a.height < (uint64_t)b.width * b.height;
+            });
+            std::vector<uint32_t> heights(std::begin(k_resolution_heights), std::end(k_resolution_heights));
+            if (parse_resolution(std::to_string(native.width) + "x" + std::to_string(native.height))) heights.push_back(native.height);
+            std::sort(heights.begin(), heights.end());
+            heights.erase(std::unique(heights.begin(), heights.end()), heights.end());
+            const auto distance = [&](uint32_t h) { return h > native.height ? h - native.height : native.height - h; };
+            const uint32_t preferred = *std::min_element(heights.begin(), heights.end(), [&](uint32_t a, uint32_t b) { return distance(a) < distance(b); });
+            g_res_choices.reserve(heights.size());
+            for (const uint32_t h : heights) {
+                const std::string w = std::to_string(h * 16 / 9);
+                g_res_choices.push_back({ w + "x" + std::to_string(h), w + " x " + std::to_string(h), h, h == preferred });
+            }
+        }
+        g_res_choices_valid = g_modes_valid;
     }
-    return list;
+    return g_res_choices;
 }
 
-Choices frame_rate_choices()
+const Choices& frame_rate_choices()
 {
     const std::vector<rsx_vk_mode>& modes = display_modes();
-    if (modes.empty()) return {};
-    std::vector<uint32_t> rates;
-    for (const rsx_vk_mode& m : modes)
-        if (const uint32_t hz = (uint32_t)std::lround(m.refresh); hz && hz != 30) rates.push_back(hz);
-    std::sort(rates.begin(), rates.end());
-    rates.erase(std::unique(rates.begin(), rates.end()), rates.end());
-    Choices list{ { "30", "30", 30 } };
-    for (const uint32_t hz : rates) list.push_back({ std::to_string(hz), std::to_string(hz), hz });
-    list.push_back({ "unlimited", "Unlimited", 0 });
-    return list;
+    if (!g_fps_choices_valid) {
+        g_fps_choices.clear();
+        if (!modes.empty()) {
+            std::vector<uint32_t> rates;
+            for (const rsx_vk_mode& m : modes)
+                if (const uint32_t hz = (uint32_t)std::lround(m.refresh); hz && hz != 30) rates.push_back(hz);
+            std::sort(rates.begin(), rates.end());
+            rates.erase(std::unique(rates.begin(), rates.end()), rates.end());
+            g_fps_choices.reserve(rates.size() + 2);
+            g_fps_choices.push_back({ "30", "30", 30 });
+            for (const uint32_t hz : rates) g_fps_choices.push_back({ std::to_string(hz), std::to_string(hz), hz });
+            g_fps_choices.push_back({ "unlimited", "Unlimited", 0 });
+        }
+        g_fps_choices_valid = g_modes_valid;
+    }
+    return g_fps_choices;
 }
-
-enum : uint32_t { row_display = 0, row_frame_rate = 2, row_mouse = 7 };
 
 bool g_settings_parsed;
 std::atomic<bool> g_motion_blur{ true };
@@ -208,20 +260,32 @@ void apply_frame_rate(uint32_t value)
 void apply_motion_blur(uint32_t value) { g_motion_blur.store(value != 0, std::memory_order_relaxed); }
 void apply_depth_of_field(uint32_t value) { g_depth_of_field.store(value != 0, std::memory_order_relaxed); }
 void apply_bloom(uint32_t value) { g_bloom.store(value != 0, std::memory_order_relaxed); }
+void apply_language(uint32_t value) { ps3_sysutil_set_language((int32_t)value); }
 void apply_sensitivity(uint32_t value) { g_mouse_units.store(value * k_mouse_units_per_step, std::memory_order_relaxed); }
 void apply_invert_mouse(uint32_t value) { g_invert_mouse.store(value != 0, std::memory_order_relaxed); }
+void apply_god_mode(uint32_t value) { assists_set_flag(ASSIST_GOD_MODE, value != 0); }
+void apply_inf_burst(uint32_t value) { assists_set_flag(ASSIST_INF_BURST, value != 0); }
+void apply_inf_unlimited(uint32_t value) { assists_set_flag(ASSIST_INF_UNLIMITED, value != 0); }
+void apply_one_hit_kill(uint32_t value) { assists_set_flag(ASSIST_ONE_HIT_KILL, value != 0); }
+void apply_damage_mult(uint32_t value) { assists_set_damage_mult(value); }
+void apply_auto_qte(uint32_t value) { assists_set_flag(ASSIST_AUTO_QTE, value != 0); }
+void apply_hold_mash(uint32_t value) { assists_set_flag(ASSIST_HOLD_MASH, value != 0); }
+void apply_qte_timer(uint32_t value) { assists_set_qte_timer_pct(value); }
+void apply_unlock_episodes(uint32_t value) { assists_set_flag(ASSIST_UNLOCK_EPISODES, value != 0); }
+void apply_unlock_gauges(uint32_t value) { assists_set_flag(ASSIST_UNLOCK_GAUGES, value != 0); }
+void apply_unlock_extras(uint32_t value) { assists_set_flag(ASSIST_UNLOCK_EXTRAS, value != 0); }
 
 struct Option {
     const char* key;
     const char* title;
     const char* help;
-    Choices (*choices)();
+    const Choices& (*choices)();
     const char* initial;
     std::optional<uint32_t> (*parse)(const std::string& token);
     void (*apply)(uint32_t value);
 };
 
-const Option k_options[] = {
+constexpr Option k_options[] = {
     { "display", "Display Mode", "Windowed, borderless window, or exclusive fullscreen at the display's native mode.", display_choices, "borderless", nullptr, apply_display },
     { "resolution", "Resolution", "Internal rendering resolution.", resolution_choices, nullptr, parse_resolution, apply_resolution },
     { "frame_rate", "Frame Rate", "Frame rate limit. 30 uses the console's original pacing.", frame_rate_choices, "unlimited", parse_frame_rate, apply_frame_rate },
@@ -229,9 +293,37 @@ const Option k_options[] = {
     { "motion_blur", "Motion Blur", "Blur from camera and object motion.", switch_choices, "on", nullptr, apply_motion_blur },
     { "depth_of_field", "Depth of Field", "Blur outside the camera's focus, mainly in cutscenes.", switch_choices, "on", nullptr, apply_depth_of_field },
     { "bloom", "Bloom", "Glow around bright lights.", switch_choices, "on", nullptr, apply_bloom },
+    { "language", "Language", "Text and menu language. Takes effect after restarting the game.", language_choices, "auto", nullptr, apply_language },
+    { "god_mode", "God Mode", "Invincibility and full health.", switch_choices, "off", nullptr, apply_god_mode },
+    { "inf_burst", "Infinite Burst", "Any Burst gauge gain fills the gauge completely. Spending it works normally, so scripted Burst scenes play as intended.", switch_choices, "off", nullptr, apply_inf_burst },
+    { "inf_unlimited", "Infinite Unlimited", "Any Unlimited gauge gain fills the gauge completely, and Unlimited mode is not force-ended.", switch_choices, "off", nullptr, apply_inf_unlimited },
+    { "one_hit_kill", "One-Hit Kills", "Defeat enemies in a single hit.", switch_choices, "off", nullptr, apply_one_hit_kill },
+    { "damage_mult", "Damage Multiplier", "Multiply damage dealt to enemies.", damage_mult_choices, "1x", nullptr, apply_damage_mult },
+    { "auto_qte", "Automatic Perfect QTEs", "Instantly complete button, stick, and mash QTEs, and hit timed Synchronic Impacts with Excellent timing.", switch_choices, "off", nullptr, apply_auto_qte },
+    { "hold_mash", "Hold Instead of Mash", "Hold the prompted button instead of rapidly mashing.", switch_choices, "off", nullptr, apply_hold_mash },
+    { "ext_qte_timer", "Extended QTE Timers", "Slow QTE countdowns and widen Synchronic timing windows.", qte_timer_choices, "off", nullptr, apply_qte_timer },
+    { "unlock_episodes", "Unlock All Episodes", "Access all episodes without modifying your save file.", switch_choices, "off", nullptr, apply_unlock_episodes },
+    { "unlock_gauges", "Unlock All Gauges", "Access all gauges without modifying your save file.", switch_choices, "off", nullptr, apply_unlock_gauges },
+    { "unlock_extras", "Unlock All Extras", "Access all Art, CG, Movies, and Interludes without modifying your save.", switch_choices, "off", nullptr, apply_unlock_extras },
     { "mouse_sensitivity", "Sensitivity", "Mouse: How fast the camera turns with the mouse.", sensitivity_choices, "10", nullptr, apply_sensitivity },
     { "invert_mouse_y", "Invert Y", "Mouse: Moving the mouse forward looks down.", switch_choices, "off", nullptr, apply_invert_mouse },
 };
+
+constexpr uint32_t option_row(std::string_view key)
+{
+    for (uint32_t i = 0; i < (uint32_t)std::size(k_options); ++i)
+        if (key == k_options[i].key) return i;
+    return (uint32_t)std::size(k_options);
+}
+
+constexpr uint32_t row_display = option_row("display");
+constexpr uint32_t row_frame_rate = option_row("frame_rate");
+constexpr uint32_t row_language = option_row("language");
+constexpr uint32_t row_cheats = option_row("god_mode");
+constexpr uint32_t row_mouse = option_row("mouse_sensitivity");
+static_assert(row_display < std::size(k_options) && row_frame_rate < std::size(k_options) &&
+              row_language < std::size(k_options) && row_cheats < std::size(k_options) &&
+              row_mouse < std::size(k_options));
 
 const char* const k_action_keys[PAD_ACTION_COUNT] = {
     "cross", "circle", "square", "triangle", "l1", "r1", "l2", "r2", "l3", "r3", "start", "select",
@@ -294,15 +386,16 @@ struct Page {
 };
 
 const Page k_pages[] = {
-    { "Graphics", "Display, resolution, frame rate and image effects.", 0, row_mouse },
+    { "Graphics", "Display, resolution, frame rate and image effects.", 0, row_language },
     { "Keyboard & Mouse", "Key and mouse button bindings, mouse sensitivity and inversion.", row_mouse, k_all_rows },
+    { "Cheats", "Gameplay assists, QTE accessibility, and non-destructive unlocks.", row_cheats, row_mouse },
+    { "Language", "Text and menu language. Takes effect the next time the game starts.", row_language, row_cheats },
 };
 
 std::atomic<int> g_capture{ -1 };
 uint32_t g_slot[std::size(k_bindings)];
 int g_swap_row = -1;
 std::string g_swap_text;
-constexpr uint64_t hook_bit(uint32_t fn) { return 1ull << ((fn * 0x9E3779B1u) >> 26); }
 
 std::atomic<uint64_t> g_hooks[std::size(k_hooks)];
 std::atomic<uint64_t> g_save_param{ 0 };
@@ -322,12 +415,14 @@ void load()
 {
     std::ifstream f(g_settings_path);
     if (!f) return;
+    bool legacy_perfect_qte = false;
     for (std::string line; std::getline(f, line);) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         const size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
         const std::string key = line.substr(0, eq);
         const std::string val = line.substr(eq + 1);
+        if (key == "perfect_qte" && val == "on") legacy_perfect_qte = true;
         for (uint32_t r = 0; r < k_rows; r++)
             if (key == k_options[r].key) g_saved[r] = val;
         if (key.rfind(k_bind_prefix, 0) != 0) continue;
@@ -341,6 +436,10 @@ void load()
                 at = end;
             }
         }
+    }
+    if (legacy_perfect_qte) {
+        for (uint32_t r = 0; r < k_rows; r++)
+            if (!std::strcmp(k_options[r].key, "auto_qte") && g_saved[r].empty()) g_saved[r] = "on";
     }
 }
 
@@ -357,7 +456,7 @@ std::optional<uint32_t> selected(uint32_t row, const Choices& list)
 
 std::optional<uint32_t> value(uint32_t row)
 {
-    const Choices list = k_options[row].choices();
+    const Choices& list = k_options[row].choices();
     if (const auto c = selected(row, list)) return list[*c].value;
     if (k_options[row].parse) return k_options[row].parse(g_saved[row]);
     return std::nullopt;
@@ -378,7 +477,7 @@ void save()
     for (uint32_t r = 0; r < k_rows; r++) {
         std::string token = g_saved[r];
         if (token.empty()) {
-            const Choices list = k_options[r].choices();
+            const Choices& list = k_options[r].choices();
             if (const auto c = selected(r, list)) token = list[*c].token;
         }
         if (!token.empty()) f << k_options[r].key << '=' << token << '\n';
@@ -401,7 +500,7 @@ void set(uint32_t row, uint32_t index)
     }
     std::lock_guard<std::mutex> hold(g_settings_lock);
     if (row >= k_rows) return;
-    const Choices list = k_options[row].choices();
+    const Choices& list = k_options[row].choices();
     if (index >= list.size() || selected(row, list) == index) return;
     g_saved[row] = list[index].token;
     sync(row);
@@ -499,6 +598,8 @@ void display_modes_changed()
 {
     std::lock_guard<std::mutex> hold(g_settings_lock);
     g_modes_valid = false;
+    g_res_choices_valid = false;
+    g_fps_choices_valid = false;
     for (uint32_t r = 0; r < k_rows; r++) sync(r);
 }
 
@@ -506,7 +607,7 @@ uint32_t count(uint32_t row)
 {
     if (row >= k_rows) return binding_row(row) ? PAD_BINDING_SLOTS : 1;
     std::lock_guard<std::mutex> hold(g_settings_lock);
-    const Choices list = k_options[row].choices();
+    const Choices& list = k_options[row].choices();
     return list.empty() || list[0].label.empty() ? 0 : (uint32_t)list.size();
 }
 
@@ -515,7 +616,7 @@ std::string label(uint32_t row, uint32_t index)
     if (row == k_reset_row) return "Reset";
     if (row >= k_rows) return binding_label(row, index);
     std::lock_guard<std::mutex> hold(g_settings_lock);
-    const Choices list = k_options[row].choices();
+    const Choices& list = k_options[row].choices();
     return index < list.size() ? list[index].label : std::string();
 }
 
@@ -553,76 +654,6 @@ void reply_number(ppu_context* ctx, double v)
 {
     reply(ctx, to_bits64(v), nullptr);
 }
-
-bool object_name_eq(uint32_t object, const char* want)
-{
-    if (vm_read32(object + k_object_name + 4)) return false;
-    const uint32_t entry = vm_read32(vm_read32(k_gnames) + vm_read32(object + k_object_name) * 4);
-    if (vm_read32(entry) & 1) return false;
-    for (uint32_t at = entry + 8;; ++at, ++want) {
-        const char c = (char)vm_read8(at);
-        if (c != *want) return false;
-        if (!c) return true;
-    }
-}
-
-struct Member {
-    struct Resolved {
-        uint32_t offset = 0;
-        uint32_t detail = 0;
-        bool found = false;
-    };
-    struct Entry {
-        std::atomic<uint32_t> owner{ 0 };
-        Resolved r{};
-    };
-    static constexpr uint32_t k_cap = 16;
-
-    const char* name;
-    std::atomic<uint32_t> count{ 0 };
-    Entry cache[k_cap]{};
-    std::mutex lock{};
-
-    Resolved bind(uint32_t cls)
-    {
-        const uint32_t n = count.load(std::memory_order_acquire);
-        for (uint32_t i = 0; i < n; ++i)
-            if (cache[i].owner.load(std::memory_order_relaxed) == cls) return cache[i].r;
-
-        std::lock_guard<std::mutex> guard(lock);
-        const uint32_t n2 = count.load(std::memory_order_relaxed);
-        for (uint32_t i = 0; i < n2; ++i)
-            if (cache[i].owner.load(std::memory_order_relaxed) == cls) return cache[i].r;
-
-        uint32_t field = 0;
-        for (uint32_t c = cls; c && !field; c = vm_read32(c + k_struct_super))
-            for (uint32_t f = vm_read32(c + k_struct_children); f && !field; f = vm_read32(f + k_field_next))
-                if (object_name_eq(f, name)) field = f;
-
-        const Resolved res{ field ? vm_read32(field + k_property_offset) : 0, field ? vm_read32(field + k_property_detail) : 0, field != 0 };
-        if (n2 < k_cap) {
-            cache[n2].r = res;
-            cache[n2].owner.store(cls, std::memory_order_relaxed);
-            count.store(n2 + 1, std::memory_order_release);
-        }
-        return res;
-    }
-
-    uint32_t at(uint32_t base, uint32_t cls, uint32_t* out_detail = nullptr)
-    {
-        const Resolved r = bind(cls);
-        if (out_detail) *out_detail = r.detail;
-        return r.found ? base + r.offset : 0;
-    }
-
-    uint32_t object(uint32_t object) { const uint32_t a = at(object, vm_read32(object + k_object_class)); return a ? vm_read32(a) : 0; }
-    uint8_t byte(uint32_t object) { const uint32_t a = at(object, vm_read32(object + k_object_class)); return a ? vm_read8(a) : 0; }
-    bool flag(uint32_t object)
-    {
-        const Resolved r = bind(vm_read32(object + k_object_class));
-        return r.found && (vm_read32(object + r.offset) & r.detail);
-    }
-};
 
 Member m_current_scene{ "CurrentScene" }, m_pause_menu{ "PauseMenu" }, m_common{ "Common" }, m_movie_open{ "bMovieIsOpen" },
     m_dialog_state{ "DialogState" }, m_dialog_type{ "dialogType" }, m_system_param{ "SystemParam" }, m_key_config{ "KeyConfigType" },
@@ -672,38 +703,19 @@ bool push_button_event(uint32_t event)
 
 bool waits_for_start(uint32_t hud)
 {
-    const uint32_t player = hud ? m_player_owner.object(hud) : 0;
-    const uint32_t pawn = player ? m_player_pawn.object(player) : 0;
+    const uint32_t player = hud ? m_player_owner.obj(hud) : 0;
+    const uint32_t pawn = player ? m_player_pawn.obj(player) : 0;
     const uint32_t events = pawn ? m_generated_events.at(pawn, vm_read32(pawn + k_object_class)) : 0;
     for (uint32_t i = 0, n = events ? vm_read32(events + 4) : 0; i < n; i++) {
         const uint32_t event = vm_read32(vm_read32(events) + i * 4);
         if (!event || !push_button_event(event) || !m_enabled.flag(event)) continue;
-        const uint32_t limit = m_max_trigger_count.object(event);
-        if (limit && m_trigger_count.object(event) >= limit) continue;
+        const uint32_t limit = m_max_trigger_count.obj(event);
+        if (limit && m_trigger_count.obj(event) >= limit) continue;
         const uint32_t buttons = m_input_buttons.at(event, vm_read32(event + k_object_class));
         for (uint32_t b = 0, count = buttons ? vm_read32(buttons + 4) : 0; b < count; b++)
             if (vm_read8(vm_read32(buttons) + b) == k_start_button) return true;
     }
     return false;
-}
-
-struct Elements {
-    uint32_t data = 0, count = 0, stride = 0, type = 0;
-};
-
-Elements elements(Member& array, uint32_t base, uint32_t owner)
-{
-    uint32_t inner = 0;
-    const uint32_t at = array.at(base, owner, &inner);
-    if (!at || !inner) return {};
-    return { vm_read32(at), vm_read32(at + 4), vm_read32(inner + k_property_element), vm_read32(inner + k_property_detail) };
-}
-
-bool bit(Member& member, uint32_t base, uint32_t owner)
-{
-    uint32_t mask = 0;
-    const uint32_t at = member.at(base, owner, &mask);
-    return at && (vm_read32(at) & mask);
 }
 
 uint32_t stick_bits(uint8_t command)
@@ -720,15 +732,15 @@ uint32_t stick_lit(uint32_t system)
         const uint32_t judge = judges.data + j * judges.stride;
         uint32_t req_type = 0;
         const uint32_t request = m_request.at(judge, judges.type, &req_type);
-        if (!request || !bit(m_enable_judge, judge, judges.type) || bit(m_paused, judge, judges.type)) continue;
+        if (!request || !m_enable_judge.sflag(judge, judges.type) || m_paused.sflag(judge, judges.type)) continue;
         const Elements buttons = elements(m_buttons, request, req_type);
         const Elements inputs = elements(m_input_info, judge, judges.type);
         for (uint32_t b = 0; b < buttons.count && b < inputs.count; b++) {
             const uint32_t input = inputs.data + b * inputs.stride;
-            if (bit(m_succeeded, input, inputs.type)) continue;
+            if (m_succeeded.sflag(input, inputs.type)) continue;
             const uint8_t command = vm_read8(buttons.data + b * buttons.stride);
             if (command == k_start_command) lit |= k_start_judged;
-            else if (bit(m_shown, input, inputs.type)) lit |= stick_bits(command);
+            else if (m_shown.sflag(input, inputs.type)) lit |= stick_bits(command);
         }
     }
     return lit;
@@ -759,18 +771,24 @@ int face_layout()
 
 int ui_context()
 {
+    static std::atomic<uint64_t> cached{ 0 };
+    const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const uint64_t prev = cached.load(std::memory_order_relaxed);
+    if (prev && now - (prev >> 8) < 8u) return (int)(prev & 0xFFu);
+
+    int res = 0;
     const uint32_t scenes = live(g_scene_manager);
-    if (!scenes) return 0;
-    if (m_current_scene.object(scenes)) return PAD_CONTEXT_UI;
-    const uint32_t pause = m_pause_menu.object(scenes);
-    if (pause && m_movie_open.flag(pause)) return PAD_CONTEXT_UI;
-    const uint32_t title = m_title_menu.object(scenes);
-    if (title && m_movie_open.flag(title) && m_enable_input.flag(title)) return PAD_CONTEXT_UI;
-    const uint32_t common = m_common.object(scenes);
-    if (common && m_dialog_state.byte(common) != k_dialog_idle && m_dialog_type.byte(common) != k_dialog_passive) return PAD_CONTEXT_UI;
-    const uint32_t prompt = live(g_prompt);
-    if (prompt && m_movie_open.flag(prompt)) return PAD_CONTEXT_UI;
-    return (g_stick_lit.load(std::memory_order_relaxed) & k_start_judged) || waits_for_start(live(g_hud)) ? PAD_CONTEXT_START : 0;
+    if (scenes) {
+        if (m_current_scene.obj(scenes)) res = PAD_CONTEXT_UI;
+        else if (const uint32_t pause = m_pause_menu.obj(scenes); pause && m_movie_open.flag(pause)) res = PAD_CONTEXT_UI;
+        else if (const uint32_t title = m_title_menu.obj(scenes); title && m_movie_open.flag(title) && m_enable_input.flag(title)) res = PAD_CONTEXT_UI;
+        else if (const uint32_t common = m_common.obj(scenes); common && m_dialog_state.byte(common) != k_dialog_idle && m_dialog_type.byte(common) != k_dialog_passive) res = PAD_CONTEXT_UI;
+        else if (const uint32_t prompt = live(g_prompt); prompt && m_movie_open.flag(prompt)) res = PAD_CONTEXT_UI;
+        else if ((g_stick_lit.load(std::memory_order_relaxed) & k_start_judged) || waits_for_start(live(g_hud))) res = PAD_CONTEXT_START;
+    }
+    cached.store((now << 8) | (uint64_t)(res & 0xFF), std::memory_order_relaxed);
+    return res;
 }
 
 uint32_t movie_player(ppu_context* ctx)
@@ -915,7 +933,6 @@ void pc_options_link(uint32_t function, const std::string& path)
 
 uint32_t pc_options_call_slow(uint32_t self, uint32_t function)
 {
-    if (!function || !(g_pc_options_hook_mask.load(std::memory_order_acquire) & hook_bit(function))) return 0;
     for (const std::atomic<uint64_t>& slot : g_hooks) {
         const uint64_t hook = slot.load(std::memory_order_acquire);
         if ((uint32_t)(hook >> 32) != function) continue;
@@ -923,7 +940,7 @@ uint32_t pc_options_call_slow(uint32_t self, uint32_t function)
             g_stick_lit.store((uint32_t)hook == hook_judge_update ? stick_lit(self) : 0, std::memory_order_relaxed);
             return 0;
         }
-        if ((uint32_t)hook == hook_scene_manager && m_player_owner.object(self)) remember(g_hud, self);
+        if ((uint32_t)hook == hook_scene_manager && m_player_owner.obj(self)) remember(g_hud, self);
         if ((uint32_t)hook != hook_stick_rotation) return (uint32_t)hook;
         const uint8_t command = m_command.byte(self);
         if (m_judging.flag(self) && command >= k_left_rotation_first && command <= k_left_rotation_last) {
@@ -1008,12 +1025,17 @@ void func_001F8100(ppu_context* ctx)
         const uint32_t bias_ea = k_sys_tex_lod_base + g * k_sys_tex_lod_stride + 8u;
         if ((int32_t)vm_read32(bias_ea) > 0) vm_write32(bias_ea, 0u);
     }
+    vm_write32(k_sys_shadow_filter_quality_bias, 1u);
     vm_write32(k_sys_min_shadow_res, 128u);
+    vm_write32(k_sys_min_preshadow_res, 32u);
     vm_write32(k_sys_max_shadow_res, k_shadow_res);
     vm_write32(k_sys_max_dom_shadow_res, k_shadow_res);
-    vm_write32(k_sys_shadow_texels_per_pixel, to_bits(2.0f));
-    vm_write32(k_sys_shadow_filter_radius, to_bits(4.0f));
-    vm_write32(k_sys_shadow_depth_bias, to_bits(0.024f));
+    vm_write32(k_sys_shadow_texels_per_pixel, to_bits(8.0f));
+    vm_write32(k_sys_preshadow_res_factor, to_bits(1.0f));
+    vm_write32(k_sys_shadow_filter_radius, to_bits(2.0f));
+    vm_write32(k_sys_shadow_depth_bias, to_bits(0.012f));
+    vm_write32(k_sys_shadow_fade_res, 256u);
+    vm_write32(k_sys_preshadow_fade_res, 64u);
 }
 
 void func_014749B8(ppu_context* ctx)

@@ -9,6 +9,8 @@ namespace {
 constexpr uint32_t k_tag = 0x019C2E9C;
 constexpr uint32_t k_zero = 0x001CBBD0;
 constexpr uint32_t k_root_bounds = 0x01A61F10;
+constexpr uint32_t k_pos_flt_max = 0x019CBF90;
+constexpr uint32_t k_neg_flt_max = 0x019CBFA0;
 constexpr uint32_t k_result_size = 0x4C;
 constexpr uint32_t k_chunk_request = 0x54;
 
@@ -26,14 +28,127 @@ alignas(16) constexpr float k_signs[8][4] = {{-1, -1, -1, 0}, {-1, -1, 1, 0}, {-
 
 float fmadds(float t, float acc) { return (float)std::fma((double)t, (double)t, (double)acc); }
 
-__m128 vmaddfp(__m128 a, __m128 c, __m128 b)
+inline __m128i bswap32_mask()
 {
-    return _mm_fmadd_ps(a, c, b);
+    return _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
 }
 
-struct Search {
+inline bool octree_slab_hit(__m128 center, __m128 ext, __m128 q_start_lo, __m128 q_start_hi, __m128 q_inv, float max_t)
+{
+    const __m128 bmin = _mm_sub_ps(_mm_sub_ps(center, ext), q_start_hi);
+    const __m128 bmax = _mm_sub_ps(_mm_add_ps(center, ext), q_start_lo);
+    const __m128 t1 = _mm_mul_ps(bmin, q_inv);
+    const __m128 t2 = _mm_mul_ps(bmax, q_inv);
+    const __m128 lo_t = _mm_blend_ps(_mm_min_ps(t1, t2), _mm_setzero_ps(), 8);
+    const __m128 hi_t = _mm_blend_ps(_mm_max_ps(t1, t2), _mm_set1_ps(max_t), 8);
+    const __m128 m0 = _mm_max_ps(lo_t, _mm_shuffle_ps(lo_t, lo_t, _MM_SHUFFLE(1, 0, 3, 2)));
+    const __m128 hmax = _mm_max_ps(m0, _mm_shuffle_ps(m0, m0, _MM_SHUFFLE(2, 3, 0, 1)));
+    const __m128 n0 = _mm_min_ps(hi_t, _mm_shuffle_ps(hi_t, hi_t, _MM_SHUFFLE(1, 0, 3, 2)));
+    const __m128 hmin = _mm_min_ps(n0, _mm_shuffle_ps(n0, n0, _MM_SHUFFLE(2, 3, 0, 1)));
+    return (_mm_movemask_ps(_mm_cmpge_ss(hmin, hmax)) & 1) != 0;
+}
+
+struct OctreeBase {
     ppu_mm m;
     ppu_context* ctx;
+
+    uint32_t r32(uint32_t a) const { return vm_read32_mm(&m, a); }
+    uint64_t r64(uint32_t a) const { return vm_read64_mm(&m, a); }
+    uint32_t fast32(uint32_t a) const { return vm_fast_read32(m, a); }
+    uint64_t fast64(uint32_t a) const { return vm_fast_read64(m, a); }
+    uint8_t fast8(uint32_t a) const { return __builtin_expect(vm_mm_ok(&m, a, 1), 1) ? m.vb[a] : vm_read8_mm(&m, a); }
+    void w32(uint32_t a, uint32_t value) { vm_write32_mm(&m, a, value); }
+    void fast_w32(uint32_t a, uint32_t value) { vm_fast_write32(m, a, value); }
+
+    __m128 vec4(uint32_t a) const
+    {
+        if (__builtin_expect(vm_mm_ok(&m, a, 16), 1))
+            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
+        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), (int)r32(a + 12)));
+    }
+
+    __m128i vec4i(uint32_t a) const
+    {
+        if (__builtin_expect(vm_mm_ok(&m, a, 16), 1))
+            return _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask());
+        return _mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), (int)r32(a + 12));
+    }
+
+    __m128 vec3(uint32_t a) const
+    {
+        if (__builtin_expect(vm_mm_ok(&m, a, 16), 1))
+            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
+        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), 0));
+    }
+
+    uint32_t peek(uint32_t a) const
+    {
+        uint32_t x = 0;
+        if (vm_mm_ok(&m, a, 4)) std::memcpy(&x, m.vb + a, 4);
+        return __builtin_bswap32(x);
+    }
+
+    void touch(uint32_t a) const { _mm_prefetch((const char*)m.vb + a, _MM_HINT_T0); }
+
+    bool claim_prim_tag(uint32_t prim, uint32_t tag, uint32_t tag_be)
+    {
+        const uint32_t tag_ea = prim + 0x58u;
+        if (__builtin_expect(vm_mm_ok(&m, tag_ea, 4), 1)) {
+            uint32_t cur_be;
+            std::memcpy(&cur_be, m.vb + tag_ea, 4);
+            if (cur_be == tag_be) return false;
+            if (__builtin_expect(plain_store(m, tag_ea, 4), 1)) {
+                std::memcpy(m.vb + tag_ea, &tag_be, 4);
+                if (__builtin_expect(ppu_slow_page[tag_ea >> 12], 0)) vm_track_write(tag_ea, 4);
+            } else {
+                vm_write32_mm(&m, tag_ea, tag);
+            }
+            return true;
+        }
+        if (fast32(tag_ea) == tag) return false;
+        fast_w32(tag_ea, tag);
+        return true;
+    }
+
+    void load_prim_bounds(uint32_t prim, __m128& center, __m128& ext) const
+    {
+        if (__builtin_expect(vm_mm_ok(&m, prim + 0x5C, 28), 1)) {
+            const __m128i sh = bswap32_mask();
+            center = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x5C)), sh));
+            ext = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x68)), sh));
+        } else {
+            center = vec3(prim + 0x5C);
+            ext = vec3(prim + 0x68);
+        }
+    }
+
+    void init_check_result(uint32_t hit_ea, uint32_t time_bits)
+    {
+        if (__builtin_expect(plain_store(m, hit_ea, k_result_size), 1)) {
+            uint32_t init[k_result_size / 4] = {};
+            if (time_bits) init[8] = __builtin_bswap32(time_bits);
+            init[9] = ~0u;
+            init[17] = ~0u;
+            std::memcpy(m.vb + hit_ea, init, k_result_size);
+            vm_track_write(hit_ea, k_result_size);
+        } else {
+            for (uint32_t off = 0; off < k_result_size; off += 4)
+                w32(hit_ea + off, off == 0x20 ? time_bits : (off == 0x24 || off == 0x44) ? 0xFFFFFFFFu : 0u);
+        }
+    }
+
+    void copy_check_result(uint32_t dst, uint32_t src)
+    {
+        if (__builtin_expect(vm_mm_ok(&m, src, k_result_size) && plain_store(m, dst, k_result_size), 1)) {
+            std::memcpy(m.vb + dst, m.vb + src, k_result_size);
+            vm_track_write(dst, k_result_size);
+        } else {
+            for (uint32_t off = 0; off < k_result_size; off += 4) w32(dst + off, r32(src + off));
+        }
+    }
+};
+
+struct Search : OctreeBase {
     const Variant& v;
     uint32_t octree;
     uint32_t call_sp;
@@ -43,54 +158,6 @@ struct Search {
     __m128 lo{}, hi{}, center{}, half_scale{};
     float center_r2 = 0;
     bool called = false;
-
-    uint32_t r32(uint32_t a) const { return vm_read32_mm(&m, a); }
-    uint64_t r64(uint32_t a) const { return vm_read64_mm(&m, a); }
-    uint32_t fast32(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 4), 1)) {
-            uint32_t x;
-            memcpy(&x, m.vb + a, 4);
-            return __builtin_bswap32(x);
-        }
-        return vm_read32_mm(&m, a);
-    }
-    uint64_t fast64(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 8), 1)) {
-            uint64_t x;
-            memcpy(&x, m.vb + a, 8);
-            return __builtin_bswap64(x);
-        }
-        return vm_read64_mm(&m, a);
-    }
-    void w32(uint32_t a, uint32_t value) { vm_write32_mm(&m, a, value); }
-    void fast_w32(uint32_t a, uint32_t value)
-    {
-        if (__builtin_expect(plain_store(m, a, 4), 1)) {
-            const uint32_t be = __builtin_bswap32(value);
-            memcpy(m.vb + a, &be, 4);
-            vm_track_write(a, 4);
-            return;
-        }
-        vm_write32_mm(&m, a, value);
-    }
-
-    __m128 vec3(uint32_t a) const
-    {
-        if (vm_mm_ok(&m, a, 16))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12)));
-        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), 0));
-    }
-
-    uint32_t peek(uint32_t a) const
-    {
-        uint32_t x = 0;
-        if (vm_mm_ok(&m, a, 4)) memcpy(&x, m.vb + a, 4);
-        return __builtin_bswap32(x);
-    }
-
-    void touch(uint32_t a) const { _mm_prefetch((const char*)m.vb + a, _MM_HINT_T0); }
 
     void reload()
     {
@@ -245,11 +312,11 @@ struct Search {
             if (min_ngt & 2) sel |= (max_gt & 4 ? 0x02u : 0) | (min_ngt & 4 ? 0x01u : 0);
         }
         if (!sel) return;
-        const __m128 half = vmaddfp(_mm_shuffle_ps(b, b, 0xFF), half_scale, _mm_set1_ps(-0.0f));
+        const __m128 half = _mm_fmadd_ps(_mm_shuffle_ps(b, b, 0xFF), half_scale, _mm_set1_ps(-0.0f));
         while (sel) {
             const uint32_t h = 31u - (uint32_t)__builtin_clz(sel);
             sel ^= 1u << h;
-            node(kids + 16u * h, _mm_blend_ps(vmaddfp(_mm_load_ps(k_signs[h]), half, b), half, 8));
+            node(kids + 16u * h, _mm_blend_ps(_mm_fmadd_ps(_mm_load_ps(k_signs[h]), half, b), half, 8));
             if (called) kids = r32(n + 0xC);
         }
     }
@@ -282,7 +349,7 @@ void search(ppu_context* ctx)
         vm_write32_mm(&m, octree + 0x60, qr2);
         vm_write32_mm(&m, octree + 0x28, qz);
     }
-    Search s{m, ctx, by_box ? k_box : k_center, octree, (uint32_t)sp - 0x1E0u,
+    Search s{{m, ctx}, by_box ? k_box : k_center, octree, (uint32_t)sp - 0x1E0u,
              _mm_setr_ps(from_bits(qx), from_bits(qy), from_bits(qz), 0.0f), from_bits(qr2)};
     s.reload();
     s.node(vm_read32_mm(&m, octree + 4),
@@ -302,78 +369,17 @@ void func_0044C160(ppu_context* ctx)
 
 namespace {
 
-struct LineSearch {
-    ppu_mm m;
-    ppu_context* ctx;
+struct LineSearch : OctreeBase {
     uint32_t query;
     uint32_t call_sp;
-    uint32_t tag = 0, stack = 0, ignore = 0, flags = 0;
+    uint32_t tag = 0, tag_be = 0, stack = 0, ignore = 0, flags = 0;
     __m128 lo{}, hi{}, q_start{}, q_inv{}, q_ext{}, q_start_lo{}, q_start_hi{};
     bool called = false;
-
-    uint32_t r32(uint32_t a) const { return vm_read32_mm(&m, a); }
-    uint64_t r64(uint32_t a) const { return vm_read64_mm(&m, a); }
-    uint32_t fast32(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 4), 1)) {
-            uint32_t x;
-            memcpy(&x, m.vb + a, 4);
-            return __builtin_bswap32(x);
-        }
-        return vm_read32_mm(&m, a);
-    }
-    uint64_t fast64(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 8), 1)) {
-            uint64_t x;
-            memcpy(&x, m.vb + a, 8);
-            return __builtin_bswap64(x);
-        }
-        return vm_read64_mm(&m, a);
-    }
-    void w32(uint32_t a, uint32_t value) { vm_write32_mm(&m, a, value); }
-    void fast_w32(uint32_t a, uint32_t value)
-    {
-        if (__builtin_expect(plain_store(m, a, 4), 1)) {
-            const uint32_t be = __builtin_bswap32(value);
-            memcpy(m.vb + a, &be, 4);
-            vm_track_write(a, 4);
-            return;
-        }
-        vm_write32_mm(&m, a, value);
-    }
-
-    static inline __m128i bswap32_mask()
-    {
-        return _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
-    }
-
-    __m128 vec4(uint32_t a) const
-    {
-        if (vm_mm_ok(&m, a, 16))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
-        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), (int)r32(a + 12)));
-    }
-
-    __m128 vec3(uint32_t a) const
-    {
-        if (vm_mm_ok(&m, a, 16))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
-        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), 0));
-    }
-
-    uint32_t peek(uint32_t a) const
-    {
-        uint32_t x = 0;
-        if (vm_mm_ok(&m, a, 4)) memcpy(&x, m.vb + a, 4);
-        return __builtin_bswap32(x);
-    }
-
-    void touch(uint32_t a) const { _mm_prefetch((const char*)m.vb + a, _MM_HINT_T0); }
 
     void reload()
     {
         tag = r32(k_tag);
+        tag_be = __builtin_bswap32(tag);
         stack = r32(query + 0x10);
         ignore = r32(query + 0x3C);
         flags = r32(query + 0x2C);
@@ -399,17 +405,7 @@ struct LineSearch {
 
     inline bool slab_hit(__m128 center, __m128 ext) const
     {
-        const __m128 bmin = _mm_sub_ps(_mm_sub_ps(center, ext), q_start_hi);
-        const __m128 bmax = _mm_sub_ps(_mm_add_ps(center, ext), q_start_lo);
-        const __m128 t1 = _mm_mul_ps(bmin, q_inv);
-        const __m128 t2 = _mm_mul_ps(bmax, q_inv);
-        const __m128 lo_t = _mm_blend_ps(_mm_min_ps(t1, t2), _mm_setzero_ps(), 8);
-        const __m128 hi_t = _mm_blend_ps(_mm_max_ps(t1, t2), _mm_set1_ps(1.0f), 8);
-        const __m128 m0 = _mm_max_ps(lo_t, _mm_shuffle_ps(lo_t, lo_t, _MM_SHUFFLE(1, 0, 3, 2)));
-        const __m128 hmax = _mm_max_ps(m0, _mm_shuffle_ps(m0, m0, _MM_SHUFFLE(2, 3, 0, 1)));
-        const __m128 n0 = _mm_min_ps(hi_t, _mm_shuffle_ps(hi_t, hi_t, _MM_SHUFFLE(1, 0, 3, 2)));
-        const __m128 hmin = _mm_min_ps(n0, _mm_shuffle_ps(n0, n0, _MM_SHUFFLE(2, 3, 0, 1)));
-        return (_mm_movemask_ps(_mm_cmpge_ss(hmin, hmax)) & 1) != 0;
+        return octree_slab_hit(center, ext, q_start_lo, q_start_hi, q_inv, 1.0f);
     }
 
     uint32_t allocate(uint32_t s)
@@ -425,19 +421,11 @@ struct LineSearch {
 
     bool test_prim(uint32_t prim)
     {
-        if (fast32(prim + 0x58) == tag) return false;
-        fast_w32(prim + 0x58, tag);
+        if (!claim_prim_tag(prim, tag, tag_be)) return false;
         const uint32_t actor = fast32(prim + 0x4C);
         if (!actor || actor == ignore) return false;
         __m128 p_center, p_ext;
-        if (__builtin_expect(vm_mm_ok(&m, prim + 0x5C, 28), 1)) {
-            const __m128i sh = bswap32_mask();
-            p_center = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x5C)), sh));
-            p_ext = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x68)), sh));
-        } else {
-            p_center = vec3(prim + 0x5C);
-            p_ext = vec3(prim + 0x68);
-        }
+        load_prim_bounds(prim, p_center, p_ext);
         if (!slab_hit(p_center, p_ext)) return false;
         if ((fast32(prim + 0x12C) & 0x44000000u) != 0x44000000u) return false;
         if ((fast32(actor + 0xB0) & 0x00000010u) == 0) return false;
@@ -454,16 +442,7 @@ struct LineSearch {
         if ((int32_t)ctx->gpr[3] == 0) return false;
 
         const uint32_t hit_ea = call_sp + 0xA0;
-        if (vm_mm_st_ok(&m, hit_ea, k_result_size)) {
-            uint32_t init[k_result_size / 4] = {};
-            init[9] = ~0u;
-            init[17] = ~0u;
-            memcpy(m.vb + hit_ea, init, k_result_size);
-            vm_track_write(hit_ea, k_result_size);
-        } else {
-            for (uint32_t off = 0; off < k_result_size; off += 4)
-                w32(hit_ea + off, (off == 0x24 || off == 0x44) ? 0xFFFFFFFFu : 0u);
-        }
+        init_check_result(hit_ea, 0u);
         ctx->gpr[3] = prim;
         ctx->gpr[4] = hit_ea;
         ctx->gpr[5] = query + 0x7C;
@@ -477,14 +456,7 @@ struct LineSearch {
         const uint32_t s = stack;
         const uint32_t res = allocate(s);
         w32(s, res + k_result_size);
-        if (res) {
-            if (vm_mm_ok(&m, hit_ea, k_result_size) && vm_mm_st_ok(&m, res, k_result_size)) {
-                memcpy(m.vb + res, m.vb + hit_ea, k_result_size);
-                vm_track_write(res, k_result_size);
-            } else {
-                for (uint32_t off = 0; off < k_result_size; off += 4) w32(res + off, r32(hit_ea + off));
-            }
-        }
+        if (res) copy_check_result(res, hit_ea);
         w32(res, r32(query + 0xC));
         w32(query + 0xC, res);
         return (flags & 0x200u) != 0;
@@ -569,7 +541,7 @@ void func_00445B7C(ppu_context* ctx)
     const uint64_t sp = ctx->gpr[1], lr = ctx->lr;
     vm_write64_mm(&m, sp + 0x10, lr);
     vm_write64_mm(&m, sp - 0x150, sp);
-    LineSearch s{m, ctx, query, (uint32_t)sp - 0x150u};
+    LineSearch s{{m, ctx}, query, (uint32_t)sp - 0x150u};
     s.reload();
     s.node(root, s.vec4(bounds_ea));
     ctx->gpr[1] = sp;
@@ -578,83 +550,22 @@ void func_00445B7C(ppu_context* ctx)
 
 namespace {
 
-struct SingleLineSearch {
-    ppu_mm m;
-    ppu_context* ctx;
+struct SingleLineSearch : OctreeBase {
     uint32_t query;
     uint64_t sp;
     uint64_t lr;
     uint32_t call_sp;
-    uint32_t tag = 0, stack = 0, ignore = 0, flags = 0, mirror = 0, world = 0;
+    uint32_t tag = 0, tag_be = 0, stack = 0, ignore = 0, flags = 0, mirror = 0, world = 0;
     __m128 q_start{}, q_inv{}, q_ext{}, q_start_lo{}, q_start_hi{};
     __m128i zero_mask{};
     __m128 ray_origin{};
     bool framed = false;
     bool called = false;
 
-    uint32_t r32(uint32_t a) const { return vm_read32_mm(&m, a); }
-    uint64_t r64(uint32_t a) const { return vm_read64_mm(&m, a); }
-    uint32_t fast32(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 4), 1)) {
-            uint32_t x;
-            memcpy(&x, m.vb + a, 4);
-            return __builtin_bswap32(x);
-        }
-        return vm_read32_mm(&m, a);
-    }
-    uint64_t fast64(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 8), 1)) {
-            uint64_t x;
-            memcpy(&x, m.vb + a, 8);
-            return __builtin_bswap64(x);
-        }
-        return vm_read64_mm(&m, a);
-    }
-    void w32(uint32_t a, uint32_t value) { vm_write32_mm(&m, a, value); }
-    void fast_w32(uint32_t a, uint32_t value)
-    {
-        if (__builtin_expect(plain_store(m, a, 4), 1)) {
-            const uint32_t be = __builtin_bswap32(value);
-            memcpy(m.vb + a, &be, 4);
-            vm_track_write(a, 4);
-            return;
-        }
-        vm_write32_mm(&m, a, value);
-    }
-
-    static inline __m128i bswap32_mask()
-    {
-        return _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
-    }
-
-    __m128 vec4(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 16), 1))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
-        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), (int)r32(a + 12)));
-    }
-
-    __m128i vec4i(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 16), 1))
-            return _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask());
-        return _mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), (int)r32(a + 12));
-    }
-
-    __m128 vec3(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 16), 1))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
-        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), 0));
-    }
-
-    void touch(uint32_t a) const { _mm_prefetch((const char*)m.vb + a, _MM_HINT_T0); }
-
     void reload()
     {
         tag = fast32(k_tag);
+        tag_be = __builtin_bswap32(tag);
         stack = fast32(query + 0x10);
         ignore = fast32(query + 0x3C);
         flags = fast32(query + 0x2C);
@@ -691,17 +602,7 @@ struct SingleLineSearch {
 
     inline bool slab_hit(__m128 center, __m128 ext, float best_t) const
     {
-        const __m128 bmin = _mm_sub_ps(_mm_sub_ps(center, ext), q_start_hi);
-        const __m128 bmax = _mm_sub_ps(_mm_add_ps(center, ext), q_start_lo);
-        const __m128 t1 = _mm_mul_ps(bmin, q_inv);
-        const __m128 t2 = _mm_mul_ps(bmax, q_inv);
-        const __m128 lo_t = _mm_blend_ps(_mm_min_ps(t1, t2), _mm_setzero_ps(), 8);
-        const __m128 hi_t = _mm_blend_ps(_mm_max_ps(t1, t2), _mm_set1_ps(best_t), 8);
-        const __m128 m0 = _mm_max_ps(lo_t, _mm_shuffle_ps(lo_t, lo_t, _MM_SHUFFLE(1, 0, 3, 2)));
-        const __m128 hmax = _mm_max_ps(m0, _mm_shuffle_ps(m0, m0, _MM_SHUFFLE(2, 3, 0, 1)));
-        const __m128 n0 = _mm_min_ps(hi_t, _mm_shuffle_ps(hi_t, hi_t, _MM_SHUFFLE(1, 0, 3, 2)));
-        const __m128 hmin = _mm_min_ps(n0, _mm_shuffle_ps(n0, n0, _MM_SHUFFLE(2, 3, 0, 1)));
-        return (_mm_movemask_ps(_mm_cmpge_ss(hmin, hmax)) & 1) != 0;
+        return octree_slab_hit(center, ext, q_start_lo, q_start_hi, q_inv, best_t);
     }
 
     uint32_t allocate(uint32_t s)
@@ -717,8 +618,7 @@ struct SingleLineSearch {
 
     bool test_prim(uint32_t prim, float& best_t)
     {
-        if (fast32(prim + 0x58) == tag) return false;
-        fast_w32(prim + 0x58, tag);
+        if (!claim_prim_tag(prim, tag, tag_be)) return false;
         const uint32_t actor = fast32(prim + 0x4C);
         if (!actor || actor == ignore) return false;
         if (__builtin_expect((flags & 0x100u) != 0, 0)) {
@@ -735,14 +635,7 @@ struct SingleLineSearch {
             if ((fast32(actor + 0xB0) & 0x00000010u) == 0) return false;
         }
         __m128 p_center, p_ext;
-        if (__builtin_expect(vm_mm_ok(&m, prim + 0x5C, 28), 1)) {
-            const __m128i sh = bswap32_mask();
-            p_center = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x5C)), sh));
-            p_ext = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x68)), sh));
-        } else {
-            p_center = vec3(prim + 0x5C);
-            p_ext = vec3(prim + 0x68);
-        }
+        load_prim_bounds(prim, p_center, p_ext);
         if (!slab_hit(p_center, p_ext, best_t)) return false;
         for (uint32_t a = ignore; a; a = fast32(a + 0x98))
             if (a == actor) return false;
@@ -758,16 +651,7 @@ struct SingleLineSearch {
 
         ensure_frame();
         const uint32_t hit_ea = call_sp + 0xC0;
-        if (__builtin_expect(plain_store(m, hit_ea, k_result_size), 1)) {
-            uint32_t init[k_result_size / 4] = {};
-            init[9] = ~0u;
-            init[17] = ~0u;
-            memcpy(m.vb + hit_ea, init, k_result_size);
-            vm_track_write(hit_ea, k_result_size);
-        } else {
-            for (uint32_t off = 0; off < k_result_size; off += 4)
-                w32(hit_ea + off, (off == 0x24 || off == 0x44) ? 0xFFFFFFFFu : 0u);
-        }
+        init_check_result(hit_ea, 0u);
         ctx->gpr[3] = prim;
         ctx->gpr[4] = hit_ea;
         ctx->gpr[5] = query + 0x7C;
@@ -781,14 +665,7 @@ struct SingleLineSearch {
         const uint32_t s = stack;
         const uint32_t res = allocate(s);
         fast_w32(s, res + k_result_size);
-        if (res) {
-            if (__builtin_expect(vm_mm_ok(&m, hit_ea, k_result_size) && plain_store(m, res, k_result_size), 1)) {
-                memcpy(m.vb + res, m.vb + hit_ea, k_result_size);
-                vm_track_write(res, k_result_size);
-            } else {
-                for (uint32_t off = 0; off < k_result_size; off += 4) w32(res + off, r32(hit_ea + off));
-            }
-        }
+        if (res) copy_check_result(res, hit_ea);
         fast_w32(res, fast32(query + 0xC));
         fast_w32(query + 0xC, res);
         const uint32_t prev_best = fast32(query + 0xD4);
@@ -826,7 +703,7 @@ struct SingleLineSearch {
             touch(kids);
             const __m128 tm_norm = _mm_mul_ps(_mm_add_ps(t0, t1), _mm_set1_ps(0.5f));
             const __m128 gt = _mm_cmpgt_ps(b, ray_origin);
-            const __m128 tm_zero = _mm_blendv_ps(vec4(0x019DBFA0), vec4(0x019DBF90), gt);
+            const __m128 tm_zero = _mm_blendv_ps(vec4(k_neg_flt_max), vec4(k_pos_flt_max), gt);
             tm = _mm_blendv_ps(tm_norm, tm_zero, _mm_castsi128_ps(zero_mask));
             alignas(16) float t0a[4], tma[4];
             _mm_store_ps(t0a, t0);
@@ -905,7 +782,7 @@ void func_004462E4(ppu_context* ctx)
     const uint32_t root = (uint32_t)ctx->gpr[3], query = (uint32_t)ctx->gpr[4];
     const uint32_t t_ea = (uint32_t)ctx->gpr[5], bounds_ea = (uint32_t)ctx->gpr[6];
     const uint64_t sp = ctx->gpr[1], lr = ctx->lr;
-    SingleLineSearch s{m, ctx, query, sp, lr, (uint32_t)sp - 0x170u};
+    SingleLineSearch s{{m, ctx}, query, sp, lr, (uint32_t)sp - 0x170u};
     s.reload();
     const __m128 t0 = s.vec4(t_ea);
     const __m128 t1 = s.vec4(t_ea + 0x20u);
@@ -919,9 +796,7 @@ void func_004462E4(ppu_context* ctx)
 
 namespace {
 
-struct OverlapSearch {
-    ppu_mm m;
-    ppu_context* ctx;
+struct OverlapSearch : OctreeBase {
     uint32_t query;
     uint64_t sp;
     uint64_t lr;
@@ -930,70 +805,6 @@ struct OverlapSearch {
     __m128 lo{}, hi{};
     bool framed = false;
     bool called = false;
-
-    uint32_t r32(uint32_t a) const { return vm_read32_mm(&m, a); }
-    uint64_t r64(uint32_t a) const { return vm_read64_mm(&m, a); }
-    uint32_t fast32(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 4), 1)) {
-            uint32_t x;
-            std::memcpy(&x, m.vb + a, 4);
-            return __builtin_bswap32(x);
-        }
-        return vm_read32_mm(&m, a);
-    }
-    uint64_t fast64(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 8), 1)) {
-            uint64_t x;
-            std::memcpy(&x, m.vb + a, 8);
-            return __builtin_bswap64(x);
-        }
-        return vm_read64_mm(&m, a);
-    }
-    uint8_t fast8(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 1), 1)) return m.vb[a];
-        return vm_read8_mm(&m, a);
-    }
-    void w32(uint32_t a, uint32_t value) { vm_write32_mm(&m, a, value); }
-    void fast_w32(uint32_t a, uint32_t value)
-    {
-        if (__builtin_expect(plain_store(m, a, 4), 1)) {
-            const uint32_t be = __builtin_bswap32(value);
-            memcpy(m.vb + a, &be, 4);
-            vm_track_write(a, 4);
-            return;
-        }
-        vm_write32_mm(&m, a, value);
-    }
-
-    static inline __m128i bswap32_mask()
-    {
-        return _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
-    }
-
-    __m128 vec4(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 16), 1))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
-        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), (int)r32(a + 12)));
-    }
-
-    __m128 vec3(uint32_t a) const
-    {
-        if (__builtin_expect(vm_mm_ok(&m, a, 16), 1))
-            return _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + a)), bswap32_mask()));
-        return _mm_castsi128_ps(_mm_setr_epi32((int)r32(a), (int)r32(a + 4), (int)r32(a + 8), 0));
-    }
-
-    uint32_t peek(uint32_t a) const
-    {
-        uint32_t x = 0;
-        if (vm_mm_ok(&m, a, 4)) std::memcpy(&x, m.vb + a, 4);
-        return __builtin_bswap32(x);
-    }
-    void touch(uint32_t a) const { _mm_prefetch((const char*)m.vb + a, _MM_HINT_T0); }
 
     void reload()
     {
@@ -1043,14 +854,7 @@ struct OverlapSearch {
         if (!actor || fast32(prim + 0x58) == tag || fast32(actor + 0x18C) == tag) return;
         w32(prim + 0x58, tag);
         __m128 p_center, p_ext;
-        if (__builtin_expect(vm_mm_ok(&m, prim + 0x5C, 28), 1)) {
-            const __m128i sh = bswap32_mask();
-            p_center = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x5C)), sh));
-            p_ext = _mm_castsi128_ps(_mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(m.vb + prim + 0x68)), sh));
-        } else {
-            p_center = vec3(prim + 0x5C);
-            p_ext = vec3(prim + 0x68);
-        }
+        load_prim_bounds(prim, p_center, p_ext);
         const __m128 p_lo = _mm_sub_ps(p_center, p_ext);
         const __m128 p_hi = _mm_add_ps(p_center, p_ext);
         const int sep = (_mm_movemask_ps(_mm_cmpgt_ps(p_lo, hi)) | _mm_movemask_ps(_mm_cmpgt_ps(lo, p_hi))) & 7;
@@ -1072,17 +876,7 @@ struct OverlapSearch {
         if (fast8(ignore + 0x90) == 7 && ((fast32(actor + 0xAC) >> 24) & 1u) != 0) return;
 
         const uint32_t hit_ea = call_sp + 0xA0;
-        if (vm_mm_st_ok(&m, hit_ea, k_result_size)) {
-            uint32_t init[k_result_size / 4] = {};
-            init[8] = __builtin_bswap32(0x3F800000u); // Time = 1.0f at +0x20
-            init[9] = ~0u;
-            init[17] = ~0u;
-            std::memcpy(m.vb + hit_ea, init, k_result_size);
-            vm_track_write(hit_ea, k_result_size);
-        } else {
-            for (uint32_t off = 0; off < k_result_size; off += 4)
-                w32(hit_ea + off, off == 0x20 ? 0x3F800000u : (off == 0x24 || off == 0x44) ? 0xFFFFFFFFu : 0u);
-        }
+        init_check_result(hit_ea, 0x3F800000u);
 
         ctx->gpr[3] = ignore;
         ctx->gpr[4] = actor;
@@ -1097,14 +891,7 @@ struct OverlapSearch {
         const uint32_t s = stack;
         const uint32_t res = allocate(s);
         w32(s, res + k_result_size);
-        if (res) {
-            if (vm_mm_ok(&m, hit_ea, k_result_size) && vm_mm_st_ok(&m, res, k_result_size)) {
-                std::memcpy(m.vb + res, m.vb + hit_ea, k_result_size);
-                vm_track_write(res, k_result_size);
-            } else {
-                for (uint32_t off = 0; off < k_result_size; off += 4) w32(res + off, r32(hit_ea + off));
-            }
-        }
+        if (res) copy_check_result(res, hit_ea);
         w32(res, r32(query + 0xC));
         w32(query + 0xC, res);
         w32(actor + 0x18C, tag);
@@ -1169,7 +956,7 @@ void func_00446A38(ppu_context* ctx)
     const ppu_mm m = ppu_mm_take();
     const uint32_t root = (uint32_t)ctx->gpr[3], query = (uint32_t)ctx->gpr[4], bounds_ea = (uint32_t)ctx->gpr[5];
     const uint64_t sp = ctx->gpr[1], lr = ctx->lr;
-    OverlapSearch s{m, ctx, query, sp, lr, (uint32_t)sp - 0x150u};
+    OverlapSearch s{{m, ctx}, query, sp, lr, (uint32_t)sp - 0x150u};
     s.reload();
     s.node(root, s.vec4(bounds_ea));
     ctx->gpr[1] = sp;

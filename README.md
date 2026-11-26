@@ -7,6 +7,10 @@
   Windows &amp; Linux · Vulkan
 </p>
 
+<p align="center">
+  <a href="https://recomplauncher.com/game/vajra"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+</p>
+
 ---
 
 **Vajra** is a static recompilation of the PlayStation 3 version of *Asura's Wrath* (`BLES01227` EU and `BLUS30721` US, update `1.02`) to native x86-64 PC, powered by [ps3recomp](https://github.com/sp00nznet/ps3recomp). It brings the full game to Windows and Linux with native performance, modern display and audio support, full keyboard & mouse controls, and quality-of-life enhancements, all configurable directly from the in-game options menu.
@@ -16,10 +20,10 @@
 - **High Framerate Support:** Play beyond the original 30 FPS cap with smooth, display-matched frame rate limits or completely uncapped framerates.
 - **High-Resolution Rendering & Anti-Aliasing:** Scale past the original 720p up to 1080p, 1440p, 4K, and 8K with properly scaled shadows and effects, 16x anisotropic filtering, SMAA 1x Ultra, and linear-space supersampling downscaling.
 - **Native 5.1 & 7.1 Surround Sound:** Automatic stereo, 5.1, and 7.1 LPCM output matching your OS speaker layout on Windows (WASAPI) and Linux (SDL3).
-- **In-Game PC Options Menu:** Adjust resolution, display mode (Windowed, Borderless, Exclusive Fullscreen), frame rate cap, SMAA, post-processing (Motion Blur, Depth of Field, Bloom), keybindings, and mouse settings right inside the game's native menu.
+- **In-Game PC Options & Cheats Menu:** Adjust resolution, display mode (Windowed, Borderless, Exclusive Fullscreen), frame rate cap, SMAA, post-processing (Motion Blur, Depth of Field, Bloom), keybindings, mouse settings, text language, and optional Cheats / QTE assists right inside the game's native menu.
 - **Full Keyboard & Mouse + Controller Support:** Automatic hot-switching between Keyboard & Mouse, PlayStation, Xbox, and Nintendo button prompts, full custom keybinds, mouse sensitivity/invert controls, controller rumble, motion sensors, and tailored KBM QTE prompts.
 - **Trophies & Rich Presence:** Local PS3 trophy support with in-game icons and PS3-style unlock notifications, Discord Rich Presence (showing your current Episode and Part), and Recomp Achievements integration.
-- **One-Click Setup:** Reads your `BLES01227` (EU) or `BLUS30721` (US) disc folder or decrypted ISO and optional DLC `.pkg`/`.rap` files directly, downloads the official `1.02` update and PS3 firmware from Sony automatically, and decrypts `EBOOT.BIN` on first launch (no RPCS3 required). Includes `recomplauncher.json` metadata for launcher integration.
+- **One-Click Setup:** Reads your `BLES01227` (EU) or `BLUS30721` (US) disc folder or decrypted ISO and optional EU or US DLC `.pkg` (+ matching `.rap`) files directly, downloads the matching official `1.02` update and PS3 firmware from Sony automatically, and decrypts `EBOOT.BIN` on first launch (no RPCS3 required). Includes `recomplauncher.json` metadata for full RecompLauncher integration.
 - **Windows & Linux:** Runs natively on Windows (`Vajra.exe`) and Linux (`Vajra-x86_64.AppImage`, Wayland & X11, including SteamOS / Steam Deck).
 
 ## Getting Started

@@ -1,14 +1,12 @@
 #include "guest.h"
 #include "ps3_sync.h"
 
-extern "C" void ppu_thread_note_block(uint64_t tid);
-
 namespace {
 
 constexpr uint32_t k_write = 0x8;
 constexpr uint32_t k_writing = 0xC;
 constexpr uint32_t k_read = 0x10;
-constexpr uint64_t k_idle_sleep_us = 30;
+constexpr uint64_t k_idle_sleep_us = 2000;
 
 volatile uint32_t* host_word(uint32_t ea)
 {
@@ -41,7 +39,7 @@ void func_00027BC8(ppu_context* ctx)
     ctx->gpr[4] = read;
     ctx->gpr[3] = written;
     if (read != written) return;
-    for (unsigned spin = 0; spin < 512u; spin++) {
+    for (unsigned spin = 0; spin < 64u; spin++) {
         ps3_pause();
         seen = *write;
         written = __builtin_bswap32(seen);

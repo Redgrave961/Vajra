@@ -34,11 +34,7 @@ const char* eboot_sha256_for(const std::string& tid)
     return "";
 }
 
-std::string utf8(const std::filesystem::path& p, bool generic = false)
-{
-    const std::u8string s = generic ? p.generic_u8string() : p.u8string();
-    return std::string(s.begin(), s.end());
-}
+std::string utf8(const std::filesystem::path& p, bool generic = false) { return utf8_from_path(p, generic); }
 
 std::string trim(const std::string& s)
 {
@@ -147,7 +143,7 @@ std::string sfo_string(const std::filesystem::path& path, const char* key)
     return {};
 }
 
-std::filesystem::path path_of(const std::string& value) { return std::filesystem::path(std::u8string(value.begin(), value.end())); }
+std::filesystem::path path_of(const std::string& value) { return path_from_utf8(value); }
 
 game_paths read_paths(const std::filesystem::path& exe)
 {
@@ -202,12 +198,16 @@ std::filesystem::path strip_trailing_sep(std::filesystem::path p)
     return p;
 }
 
+std::string upper_ascii(std::string s)
+{
+    for (char& c : s) c = (char)std::toupper((unsigned char)c);
+    return s;
+}
+
 std::filesystem::path normalize_game_dir(std::filesystem::path p)
 {
     p = strip_trailing_sep(std::move(p));
-    std::string fn = utf8(p.filename());
-    for (char& c : fn) c = (char)std::toupper((unsigned char)c);
-    if (fn == "PS3_GAME") p = p.parent_path();
+    if (upper_ascii(utf8(p.filename())) == "PS3_GAME") p = p.parent_path();
     std::error_code ec;
     if (std::filesystem::is_directory(p, ec) && !is_game_folder(p)) {
         for (auto it = std::filesystem::directory_iterator(p, std::filesystem::directory_options::skip_permission_denied, ec);
@@ -218,35 +218,44 @@ std::filesystem::path normalize_game_dir(std::filesystem::path p)
     return p;
 }
 
-bool is_our_iso(const std::filesystem::path& exe, const std::filesystem::path& iso)
+std::string detect_game_title(const std::filesystem::path& exe, const std::filesystem::path& game, bool* out_encrypted = nullptr)
 {
-    const std::filesystem::path probe = exe / "user" / "check" / "probe";
-    ps3_vfs_unmount_all();
-    const bool ok = !ps3_vfs_mount_iso(utf8(probe, true).c_str(), utf8(iso).c_str()) &&
-                    is_supported_title(sfo_string(probe / "PS3_GAME" / "PARAM.SFO", "TITLE_ID"));
-    ps3_vfs_unmount_all();
-    return ok;
-}
-
-std::string detect_game_title(const std::filesystem::path& exe, const std::filesystem::path& game)
-{
+    if (out_encrypted) *out_encrypted = false;
     if (game.empty()) return {};
     std::error_code ec;
-    if (std::filesystem::is_directory(game, ec) && !ec)
-        return sfo_string(game / "PS3_GAME" / "PARAM.SFO", "TITLE_ID");
+    if (std::filesystem::is_directory(game, ec) && !ec) {
+        const std::string tid = sfo_string(game / "PS3_GAME" / "PARAM.SFO", "TITLE_ID");
+        if (out_encrypted && !tid.empty() && !starts_with(game / "PS3_GAME" / "USRDIR" / "EBOOT.BIN", "SCE", 4))
+            *out_encrypted = true;
+        return tid;
+    }
     const std::filesystem::path probe = exe / "user" / "check" / "probe_tid";
     ps3_vfs_unmount_all();
     std::string tid;
-    if (!ps3_vfs_mount_iso(utf8(probe, true).c_str(), utf8(game).c_str()))
+    if (!ps3_vfs_mount_iso(utf8(probe, true).c_str(), utf8(game).c_str())) {
         tid = sfo_string(probe / "PS3_GAME" / "PARAM.SFO", "TITLE_ID");
+        if (out_encrypted && !tid.empty() && !starts_with(probe / "PS3_GAME" / "USRDIR" / "EBOOT.BIN", "SCE", 4))
+            *out_encrypted = true;
+    }
     ps3_vfs_unmount_all();
     return tid;
 }
 
-std::string upper_ascii(std::string s)
+bool is_our_iso(const std::filesystem::path& exe, const std::filesystem::path& iso)
 {
-    for (char& c : s) c = (char)std::toupper((unsigned char)c);
-    return s;
+    return is_supported_title(detect_game_title(exe, iso));
+}
+
+bool write_rap_file(const std::filesystem::path& exdata, const std::string& filename, const uint8_t rap[16])
+{
+    std::error_code ec;
+    std::filesystem::create_directories(exdata, ec);
+    const std::filesystem::path dst = exdata / path_of(filename);
+    if (std::filesystem::exists(dst, ec))
+        std::filesystem::permissions(dst, std::filesystem::perms::owner_write, std::filesystem::perm_options::add, ec);
+    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(rap), 16);
+    return (bool)out;
 }
 
 std::string pkg_title_id(const char cid[37])
@@ -362,20 +371,13 @@ void sort_file(const std::filesystem::path& exe, game_paths& paths, const std::f
             res.rap_notice = "Invalid .rap (expected 16 bytes or 32 hex chars): " + utf8(file.filename());
             return;
         }
-        const std::filesystem::path exdata = exdata_dir(exe);
-        std::filesystem::create_directories(exdata, ec);
-        const std::string embedded_cid = extract_content_id(utf8(file.stem()));
-        const std::string tag = hex(sha256(rap.data(), rap.size())).substr(0, 16);
         const std::string stem = utf8(file.stem());
-        const std::string target_name = !embedded_cid.empty() ? (embedded_cid + ".rap")
-                                                              : ((stem.empty() ? std::string("rap") : stem) + "_" + tag + ".rap");
-        const std::filesystem::path dst = exdata / path_of(target_name);
-        if (std::filesystem::exists(dst, ec)) {
-            std::filesystem::permissions(dst, std::filesystem::perms::owner_write, std::filesystem::perm_options::add, ec);
-        }
-        std::ofstream out(dst, std::ios::binary | std::ios::trunc);
-        out.write(reinterpret_cast<const char*>(rap.data()), (std::streamsize)rap.size());
-        if (!out) res.rap_notice = "Failed to save .rap: " + utf8(file.filename());
+        const std::string embedded_cid = extract_content_id(stem);
+        const std::string target_name = !embedded_cid.empty()
+                                            ? (embedded_cid + ".rap")
+                                            : ((stem.empty() ? std::string("rap") : stem) + "_" + hex(sha256(rap.data(), rap.size())).substr(0, 16) + ".rap");
+        if (!write_rap_file(exdata_dir(exe), target_name, rap.data()))
+            res.rap_notice = "Failed to save .rap: " + utf8(file.filename());
     } else if (ext == ".pup") {
         res.pup = file;
     }
@@ -448,13 +450,8 @@ void auto_import_nearby_raps(const std::filesystem::path& exe, const game_paths&
             uint8_t rap[16];
             char found_cid[49] = {};
             if (npdrm_find_rap_in_dir(f, utf8(cand_dir, true).c_str(), rap, found_cid)) {
-                std::filesystem::create_directories(exdata, ec);
                 const std::string out_cid = found_cid[0] ? std::string(found_cid) : cid;
-                const std::filesystem::path dst = exdata / path_of(out_cid + ".rap");
-                if (std::filesystem::exists(dst, ec))
-                    std::filesystem::permissions(dst, std::filesystem::perms::owner_write, std::filesystem::perm_options::add, ec);
-                std::ofstream out(dst, std::ios::binary | std::ios::trunc);
-                out.write(reinterpret_cast<const char*>(rap), 16);
+                write_rap_file(exdata, out_cid + ".rap", rap);
                 unlocked = true;
             }
         }
@@ -494,6 +491,40 @@ mounted mount(const std::filesystem::path& exe, const game_paths& p, const std::
         }
     }
 
+    std::string target_dlc_tid = game_tid;
+    if (target_dlc_tid.empty() && !p.update.empty()) {
+        char ucid[37] = {};
+        int has_eboot = 0;
+        if (!ps3_vfs_pkg_info(utf8(p.update).c_str(), ucid, &has_eboot)) {
+            const std::string utid = pkg_title_id(ucid);
+            if (is_supported_title(utid)) target_dlc_tid = utid;
+        }
+    }
+
+    pkg_edat_check edat_check{ exdata_str, {}, {} };
+    c.dlc = { item_state::ok, p.dlcs.empty() ? "None" : std::to_string(p.dlcs.size()) + " package" + (p.dlcs.size() == 1 ? "" : "s") };
+    for (const auto& d : p.dlcs) {
+        char cid[37] = {};
+        const char* mount_tid = target_dlc_tid.empty() ? nullptr : target_dlc_tid.c_str();
+        if (ps3_vfs_mount_pkg_as(game_dir.c_str(), mount_tid, utf8(d).c_str(), cid)) {
+            c.dlc = { item_state::bad, "Unreadable: " + utf8(d.filename()) };
+            continue;
+        }
+        const std::string tid = pkg_title_id(cid);
+        if (!is_supported_title(tid)) {
+            c.dlc = { item_state::bad, "Wrong game (" + (tid.empty() ? std::string("unknown") : tid) + ", needs BLES01227 or BLUS30721): " + utf8(d.filename()) };
+            continue;
+        }
+        ps3_vfs_enum_last_mount(check_pkg_entry, &edat_check);
+    }
+    auto_import_nearby_raps(exe, p, edat_check);
+    std::string locked;
+    for (const std::string& mcid : edat_check.missing)
+        locked += (locked.empty() ? "" : ", ") + short_id(mcid);
+    if (p.dlcs.empty()) c.licences = { item_state::ok, "Not needed" };
+    else if (locked.empty()) c.licences = { item_state::ok, "All unlocked" };
+    else c.licences = { item_state::warn, "Missing: " + locked };
+
     if (p.update.empty()) c.update = { item_state::missing, "Not set" };
     else {
         char cid[37] = {};
@@ -517,30 +548,6 @@ mounted mount(const std::filesystem::path& exe, const game_paths& p, const std::
                              : item_status{ item_state::bad, "Version " + found + ", needs " + k_update_version };
         }
     }
-
-    pkg_edat_check edat_check{ exdata_str, {}, {} };
-    c.dlc = { item_state::ok, p.dlcs.empty() ? "None" : std::to_string(p.dlcs.size()) + " package" + (p.dlcs.size() == 1 ? "" : "s") };
-    const std::string expected_dlc_tid = !game_tid.empty() ? game_tid : c.title_id;
-    for (const auto& d : p.dlcs) {
-        char cid[37] = {};
-        if (ps3_vfs_mount_pkg(game_dir.c_str(), utf8(d).c_str(), cid)) {
-            c.dlc = { item_state::bad, "Unreadable: " + utf8(d.filename()) };
-            continue;
-        }
-        const std::string tid = pkg_title_id(cid);
-        if (!is_supported_title(tid) || (!expected_dlc_tid.empty() && tid != expected_dlc_tid)) {
-            c.dlc = { item_state::bad, "Wrong region (" + tid + (expected_dlc_tid.empty() ? "" : ", needs " + expected_dlc_tid) + "): " + utf8(d.filename()) };
-            continue;
-        }
-        ps3_vfs_enum_last_mount(check_pkg_entry, &edat_check);
-    }
-    auto_import_nearby_raps(exe, p, edat_check);
-    std::string locked;
-    for (const std::string& mcid : edat_check.missing)
-        locked += (locked.empty() ? "" : ", ") + short_id(mcid);
-    if (p.dlcs.empty()) c.licences = { item_state::ok, "Not needed" };
-    else if (locked.empty()) c.licences = { item_state::ok, "All unlocked" };
-    else c.licences = { item_state::warn, "Missing: " + locked };
 
     c.firmware = firmware_installed(firmware_dir(exe, p)) ? item_status{ item_state::ok, "Installed" } : item_status{ item_state::missing, "Not installed" };
     return m;
@@ -606,19 +613,39 @@ game_check check_game_paths(const std::filesystem::path& exe, const game_paths& 
 
 namespace {
 
-void apply_launch_options(const std::filesystem::path& exe, game_paths& paths, const launch_options& opts)
+bool pkg_matches_title(const std::filesystem::path& pkg, const std::string& tid)
+{
+    std::error_code ec;
+    if (pkg.empty() || !std::filesystem::is_regular_file(pkg, ec)) return false;
+    char ucid[37] = {};
+    int has_eboot = 0;
+    return !ps3_vfs_pkg_info(utf8(pkg).c_str(), ucid, &has_eboot) && has_eboot != 0 && pkg_title_id(ucid) == tid;
+}
+
+void apply_launch_options(const std::filesystem::path& exe, game_paths& paths, const launch_options& opts,
+                          std::string* out_tid = nullptr, bool* out_encrypted = nullptr)
 {
     std::error_code ec;
     if (!opts.game.empty())
         paths.game = normalize_game_dir(opts.game);
+    const bool need_update_check = opts.update.empty() &&
+                                   (!opts.game.empty() || (!paths.update.empty() && !std::filesystem::is_regular_file(paths.update, ec)));
+    std::string detected_tid;
+    if ((need_update_check || out_tid) && !paths.game.empty())
+        detected_tid = detect_game_title(exe, paths.game, out_encrypted);
+    if (out_tid) *out_tid = detected_tid;
     if (!opts.update.empty()) {
         paths.update = opts.update;
-    } else if (!paths.update.empty() && !std::filesystem::is_regular_file(paths.update, ec)) {
-        const std::string tid = detect_game_title(exe, paths.game);
-        const std::filesystem::path default_pkg = default_update_pkg(exe, is_supported_title(tid) ? tid : k_title_id_eu);
-        paths.update = std::filesystem::is_regular_file(default_pkg, ec) ? default_pkg : std::filesystem::path{};
+    } else if (need_update_check) {
+        const std::string want_tid = is_supported_title(detected_tid) ? detected_tid : k_title_id_eu;
+        if (!pkg_matches_title(paths.update, want_tid)) {
+            const std::filesystem::path default_pkg = default_update_pkg(exe, want_tid);
+            paths.update = std::filesystem::is_regular_file(default_pkg, ec) ? default_pkg : std::filesystem::path{};
+        }
     }
-    if (!opts.game.empty() || !opts.dlcs.empty()) {
+    if (opts.has_dlc_flags) {
+        paths.dlcs.clear();
+    } else if (!opts.game.empty() || !opts.dlcs.empty()) {
         paths.dlcs.erase(std::remove_if(paths.dlcs.begin(), paths.dlcs.end(), [&](const std::filesystem::path& d) {
             std::error_code d_ec;
             return !std::filesystem::is_regular_file(d, d_ec);
@@ -664,7 +691,9 @@ int prepare_game_files(const std::filesystem::path& exe, const launch_options& o
     std::error_code ec;
     std::filesystem::create_directories(exe / "user", ec);
     game_paths paths = read_paths(exe);
-    apply_launch_options(exe, paths, opts);
+    std::string detected_tid;
+    bool game_encrypted = false;
+    apply_launch_options(exe, paths, opts, &detected_tid, &game_encrypted);
 
     std::printf("progress 0.05 Checking game files\n");
     std::fflush(stdout);
@@ -674,15 +703,24 @@ int prepare_game_files(const std::filesystem::path& exe, const launch_options& o
         return 3;
     }
 
-    const std::string detected_tid = detect_game_title(exe, paths.game);
-    const std::string active_tid = is_supported_title(detected_tid) ? detected_tid : k_title_id_eu;
-    const std::filesystem::path default_pkg = default_update_pkg(exe, active_tid);
-    bool update_matches_region = false;
-    if (!paths.update.empty() && std::filesystem::is_regular_file(paths.update, ec)) {
-        char ucid[37] = {};
-        int has_eboot = 0;
-        if (!ps3_vfs_pkg_info(utf8(paths.update).c_str(), ucid, &has_eboot))
-            update_matches_region = pkg_title_id(ucid) == active_tid;
+    if (detected_tid.empty()) {
+        std::fprintf(stderr, "Game check failed: No PS3 game found at %s\n", utf8(paths.game).c_str());
+        return 6;
+    }
+    if (!is_supported_title(detected_tid)) {
+        std::fprintf(stderr, "Game check failed: Wrong game (%s, needs BLES01227 or BLUS30721)\n", detected_tid.c_str());
+        return 6;
+    }
+    if (game_encrypted) {
+        std::fprintf(stderr, "Game check failed: Encrypted ISO (needs a decrypted BLES01227 or BLUS30721 dump)\n");
+        return 6;
+    }
+
+    const std::filesystem::path default_pkg = default_update_pkg(exe, detected_tid);
+    const bool update_matches_region = pkg_matches_title(paths.update, detected_tid);
+    if (!update_matches_region && !opts.update.empty()) {
+        std::fprintf(stderr, "Update 1.02 check failed: Package is not a valid 1.02 update for game region (%s)\n", detected_tid.c_str());
+        return 6;
     }
     if (!update_matches_region && opts.update.empty()) {
         if (std::filesystem::is_regular_file(default_pkg, ec)) {
@@ -690,7 +728,7 @@ int prepare_game_files(const std::filesystem::path& exe, const launch_options& o
         } else {
             std::string error;
             const bool ok = run_with_progress(0.10f, 0.45f, "Downloading official 1.02 update from Sony",
-                [&](std::atomic<float>& p, std::string& err) { return update_download(default_pkg, p, err, nullptr, active_tid); }, error);
+                [&](std::atomic<float>& p, std::string& err) { return update_download(default_pkg, p, err, nullptr, detected_tid); }, error);
             if (!ok) {
                 std::fprintf(stderr, "Failed to download 1.02 update: %s\n", error.c_str());
                 return 4;
@@ -737,7 +775,7 @@ int prepare_game_files(const std::filesystem::path& exe, const launch_options& o
 bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out, const launch_options& opts)
 {
     game_paths paths = read_paths(exe);
-    const bool cli_override = !opts.game.empty() || !opts.update.empty() || !opts.dlcs.empty();
+    const bool cli_override = !opts.game.empty() || !opts.update.empty() || !opts.dlcs.empty() || opts.has_dlc_flags;
     apply_launch_options(exe, paths, opts);
     std::error_code ec;
     out.user = exe / "user";

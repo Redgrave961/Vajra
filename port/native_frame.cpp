@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <unordered_map>
 #include <vector>
 
@@ -71,10 +72,10 @@ void failed_landing(void (*body)(ppu_context*), ppu_context* ctx)
     if (std::floor(count) != before)
         count = before;
     const double next = count + k;
-    const int32_t whole = (int32_t)next, mark = whole / 25 * 25;
+    const int32_t whole = (int32_t)next, mark = whole / 50 * 50;
     const int32_t target = whole > 300                    ? whole
                          : mark >= 150 && mark > before   ? mark
-                         : whole >= 150 && whole % 25 == 0 ? whole - 1
+                         : whole >= 150 && whole % 50 == 0 ? whole - 1
                                                            : std::max(whole, 1);
     vm_write32(at, target - 1);
     run(body, ctx);
@@ -177,9 +178,21 @@ void func_006F7558(ppu_context* ctx)
         if (system) warmup_spawn_gate(psc, k, dt);
         return;
     }
-    const uint32_t delta = vm_read32(system + 0x44);
-    vm_write32(system + 0x44, to_bits((float)(from_bits(delta) * k)));
+    struct Scaled { uint32_t system, delta; };
+    static thread_local Scaled active[16];
+    static thread_local uint32_t depth;
+    const uint32_t current = vm_read32(system + 0x44);
+    uint32_t original = current;
+    for (uint32_t i = depth; i-- > 0;)
+        if (active[i].system == system) {
+            original = active[i].delta;
+            break;
+        }
+    vm_write32(system + 0x44, to_bits((float)(from_bits(original) * k)));
+    const bool tracked = depth < std::size(active);
+    if (tracked) active[depth++] = { system, original };
     run(func_006F7558_lifted, ctx);
-    vm_write32(system + 0x44, delta);
+    if (tracked) --depth;
+    vm_write32(system + 0x44, current);
     warmup_spawn_gate(psc, k, dt);
 }

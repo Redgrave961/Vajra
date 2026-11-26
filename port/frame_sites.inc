@@ -258,6 +258,7 @@
 {"BCGame.BCAI_EnemyBossBeadCbt.TickFreeRunExec", 64, Mode::Scale, 0},
 {"BCGame.BCAI_EnemyBossBeadCbt.TickMoveToInit", 66, Mode::Lerp, 0},
 {"BCGame.BCAI_jzo03.MoveUpDown", 59, Mode::Add, 0},
+{"BCGame.BCAI_jzo03.MoveUpDown", 222, Mode::Scale, 0},
 {"BCGame.BCAnim_FadeByButtonRep.CalcParam", 156, Mode::Press, 265},
 {"BCGame.BCAnim_FadeByButtonRep.CalcParam", 256, Mode::Add, 0},
 {"BCGame.BCAnim_FadeByButtonRep.CalcParam", 415, Mode::Add, 0},

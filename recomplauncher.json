@@ -26,7 +26,7 @@
     },
     {
       "id": "dlc1",
-      "label": "DLC: Episode 11.5 (.pkg). Optional. Keep any .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Episode 11.5 (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -35,7 +35,7 @@
     },
     {
       "id": "dlc2",
-      "label": "DLC: Episode 15.5 (.pkg). Optional. Keep any .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Episode 15.5 (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -44,7 +44,7 @@
     },
     {
       "id": "dlc3",
-      "label": "DLC: Part IV Nirvana (.pkg). Optional. Keep any .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Part IV Nirvana (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -53,7 +53,7 @@
     },
     {
       "id": "dlc4",
-      "label": "DLC: Lost Episode 1 (.pkg). Optional. Keep any .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Lost Episode 1 (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -62,7 +62,7 @@
     },
     {
       "id": "dlc5",
-      "label": "DLC: Lost Episode 2 (.pkg). Optional. Keep any .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Lost Episode 2 (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -71,7 +71,7 @@
     },
     {
       "id": "dlc6",
-      "label": "DLC: Devastator / Infinity Pack (.pkg). Optional. Keep any .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Devastator / Infinity Pack (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -190,6 +190,22 @@
       "defaults": { "bloom": "on" }
     },
     {
+      "id": "language",
+      "label": "Language",
+      "help": "Text and menu language. Takes effect on next launch.",
+      "group": "Language",
+      "choices": [
+        { "label": "System Default", "set": { "language": "auto" } },
+        { "label": "English", "set": { "language": "en" } },
+        { "label": "Japanese", "set": { "language": "ja" } },
+        { "label": "French", "set": { "language": "fr" } },
+        { "label": "Spanish", "set": { "language": "es" } },
+        { "label": "German", "set": { "language": "de" } },
+        { "label": "Italian", "set": { "language": "it" } }
+      ],
+      "defaults": { "language": "auto" }
+    },
+    {
       "id": "mouse_sensitivity",
       "label": "Mouse Sensitivity",
       "help": "How fast the camera turns with the mouse.",
@@ -213,7 +229,136 @@
         { "label": "On", "set": { "invert_mouse_y": "on" } }
       ],
       "defaults": { "invert_mouse_y": "off" }
+    },
+    {
+      "id": "god_mode",
+      "label": "God Mode",
+      "help": "Invincibility and full health.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "god_mode": "off" } },
+        { "label": "On", "set": { "god_mode": "on" } }
+      ],
+      "defaults": { "god_mode": "off" }
+    },
+    {
+      "id": "inf_burst",
+      "label": "Infinite Burst",
+      "help": "Keep the Burst gauge full at all times.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "inf_burst": "off" } },
+        { "label": "On", "set": { "inf_burst": "on" } }
+      ],
+      "defaults": { "inf_burst": "off" }
+    },
+    {
+      "id": "inf_unlimited",
+      "label": "Infinite Unlimited",
+      "help": "Keep the Unlimited gauge full and prevent forced deactivation.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "inf_unlimited": "off" } },
+        { "label": "On", "set": { "inf_unlimited": "on" } }
+      ],
+      "defaults": { "inf_unlimited": "off" }
+    },
+    {
+      "id": "one_hit_kill",
+      "label": "One-Hit Kills",
+      "help": "Defeat enemies in a single hit.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "one_hit_kill": "off" } },
+        { "label": "On", "set": { "one_hit_kill": "on" } }
+      ],
+      "defaults": { "one_hit_kill": "off" }
+    },
+    {
+      "id": "damage_mult",
+      "label": "Damage Multiplier",
+      "help": "Multiply damage dealt to enemies.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "1x", "set": { "damage_mult": "1x" } },
+        { "label": "2x", "set": { "damage_mult": "2x" } },
+        { "label": "4x", "set": { "damage_mult": "4x" } },
+        { "label": "8x", "set": { "damage_mult": "8x" } },
+        { "label": "16x", "set": { "damage_mult": "16x" } }
+      ],
+      "defaults": { "damage_mult": "1x" }
+    },
+    {
+      "id": "auto_qte",
+      "label": "Automatic Perfect QTEs",
+      "help": "Instantly complete button, stick, and mash QTEs, and hit timed Synchronic Impacts with Excellent timing.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "auto_qte": "off" } },
+        { "label": "On", "set": { "auto_qte": "on" } }
+      ],
+      "defaults": { "auto_qte": "off" }
+    },
+    {
+      "id": "hold_mash",
+      "label": "Hold Instead of Mash",
+      "help": "Hold the prompted button instead of rapidly mashing.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "hold_mash": "off" } },
+        { "label": "On", "set": { "hold_mash": "on" } }
+      ],
+      "defaults": { "hold_mash": "off" }
+    },
+    {
+      "id": "ext_qte_timer",
+      "label": "Extended QTE Timers",
+      "help": "Slow QTE countdowns and widen Synchronic timing windows.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "ext_qte_timer": "off" } },
+        { "label": "1.5x", "set": { "ext_qte_timer": "1.5x" } },
+        { "label": "2x", "set": { "ext_qte_timer": "2x" } },
+        { "label": "3x", "set": { "ext_qte_timer": "3x" } }
+      ],
+      "defaults": { "ext_qte_timer": "off" }
+    },
+    {
+      "id": "unlock_episodes",
+      "label": "Unlock All Episodes",
+      "help": "Access all episodes without modifying your save file.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "unlock_episodes": "off" } },
+        { "label": "On", "set": { "unlock_episodes": "on" } }
+      ],
+      "defaults": { "unlock_episodes": "off" }
+    },
+    {
+      "id": "unlock_gauges",
+      "label": "Unlock All Gauges",
+      "help": "Access all gauges without modifying your save file.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "unlock_gauges": "off" } },
+        { "label": "On", "set": { "unlock_gauges": "on" } }
+      ],
+      "defaults": { "unlock_gauges": "off" }
+    },
+    {
+      "id": "unlock_extras",
+      "label": "Unlock All Extras",
+      "help": "Access all Art, CG, Movies, and Interludes without modifying your save.",
+      "group": "Cheats",
+      "choices": [
+        { "label": "Off", "set": { "unlock_extras": "off" } },
+        { "label": "On", "set": { "unlock_extras": "on" } }
+      ],
+      "defaults": { "unlock_extras": "off" }
     }
+  ],
+  "groups": [
+    { "id": "Cheats", "advanced": true }
   ],
   "saves": [
     "{data}/user/dev_hdd0/home/00000001/savedata",

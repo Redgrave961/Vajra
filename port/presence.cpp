@@ -1,30 +1,31 @@
 #include "presence.h"
 #include "rl_achievements.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
-#include <vector>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <cstdio>
 #include <windows.h>
 #else
+#include <cstdlib>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <vector>
 #endif
 
 namespace {
@@ -288,7 +289,7 @@ std::thread g_worker;
 std::atomic<bool> g_running{ false };
 bool g_dirty = true;
 int64_t g_start_ts = 0;
-std::string g_details = "Starting Game";
+std::string g_details;
 std::string g_state;
 std::string g_last_arc;
 

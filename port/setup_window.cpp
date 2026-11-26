@@ -161,8 +161,7 @@ public:
         cur_pointer = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
 
         if (!icon.empty()) {
-            const std::u8string icon_u8 = icon.u8string();
-            if (SDL_Surface* image = SDL_LoadPNG(std::string(icon_u8.begin(), icon_u8.end()).c_str())) {
+            if (SDL_Surface* image = SDL_LoadPNG(utf8_from_path(icon).c_str())) {
                 SDL_SetWindowIcon(window, image);
                 SDL_DestroySurface(image);
             }
@@ -595,33 +594,21 @@ private:
 
     static SDL_FColor fcol(rgba c) { return { c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f }; }
 
-    void grad_rect(SDL_FRect r, rgba top, rgba bot)
+    void quad_grad(SDL_FRect r, rgba tl, rgba tr, rgba br, rgba bl)
     {
         r = { r.x * s, r.y * s, r.w * s, r.h * s };
-        const SDL_FColor ct = fcol(top), cb = fcol(bot);
         const SDL_Vertex v[4] = {
-            { { r.x, r.y }, ct, {} },
-            { { r.x + r.w, r.y }, ct, {} },
-            { { r.x + r.w, r.y + r.h }, cb, {} },
-            { { r.x, r.y + r.h }, cb, {} },
+            { { r.x, r.y }, fcol(tl), {} },
+            { { r.x + r.w, r.y }, fcol(tr), {} },
+            { { r.x + r.w, r.y + r.h }, fcol(br), {} },
+            { { r.x, r.y + r.h }, fcol(bl), {} },
         };
         const int idx[6] = { 0, 1, 2, 0, 2, 3 };
         SDL_RenderGeometry(renderer, nullptr, v, 4, idx, 6);
     }
 
-    void horiz_grad(SDL_FRect r, rgba left, rgba right)
-    {
-        r = { r.x * s, r.y * s, r.w * s, r.h * s };
-        const SDL_FColor cl = fcol(left), cr = fcol(right);
-        const SDL_Vertex v[4] = {
-            { { r.x, r.y }, cl, {} },
-            { { r.x + r.w, r.y }, cr, {} },
-            { { r.x + r.w, r.y + r.h }, cr, {} },
-            { { r.x, r.y + r.h }, cl, {} },
-        };
-        const int idx[6] = { 0, 1, 2, 0, 2, 3 };
-        SDL_RenderGeometry(renderer, nullptr, v, 4, idx, 6);
-    }
+    void grad_rect(SDL_FRect r, rgba top, rgba bot) { quad_grad(r, top, top, bot, bot); }
+    void horiz_grad(SDL_FRect r, rgba left, rgba right) { quad_grad(r, left, right, right, left); }
 
     void radial_glow(float cx, float cy, float rx, float ry, rgba center)
     {
@@ -856,7 +843,7 @@ private:
             break;
         case SDL_EVENT_DROP_FILE: {
             std::lock_guard<std::mutex> hold(picks->lock);
-            picks->items.emplace_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(e.drop.data))), game_add_mode::any);
+            picks->items.emplace_back(path_from_utf8(e.drop.data), game_add_mode::any);
             break;
         }
         case SDL_EVENT_KEY_DOWN:
@@ -914,7 +901,7 @@ private:
         std::lock_guard<std::mutex> hold(req->state->lock);
         if (!req->state->alive) return;
         for (; *list; list++)
-            req->state->items.emplace_back(std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(*list))), req->mode);
+            req->state->items.emplace_back(path_from_utf8(*list), req->mode);
     }
 
     void activate(action id)

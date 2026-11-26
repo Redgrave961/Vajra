@@ -189,8 +189,9 @@ EI = get(var('flash'), 'external', 'ExternalInterface')
 GAME = var('BCGame')
 BASE = var('Base')
 TAG = 'PCOpt'
-TAGS = (TAG, 'PCOptKbm')
-CLAUSES = ('CLAUSE_ID_GRAPHICS', 'CLAUSE_ID_KBM')
+TAGS = (TAG, 'PCOptKbm', 'PCOptCheats', 'PCOptLanguage')
+CLAUSES = ('CLAUSE_ID_GRAPHICS', 'CLAUSE_ID_KBM', 'CLAUSE_ID_CHEATS', 'CLAUSE_ID_LANGUAGE')
+PAUSE_TAGS = TAGS[:3]
 
 
 def ei(name, *args): return call(EI, 'call', name, *args)
@@ -459,10 +460,12 @@ def title_details_init(g):
 
 
 def title_details_set(g):
-    cid = R(2)
+    cid, page = R(2), R(3)
     g.stmt(call(THIS, 'PCOpt_SetDetails', cid))
     for k, clause in enumerate(CLAUSES):
-        g.emit(setm(get(THIS, 'mcInst_DetailPC%d' % k), '_visible', eq(cid, get(OM, 'OptionMain', clause))))
+        g.stmt(store(page, get(THIS, 'mcInst_DetailPC%d' % k)))
+        g.emit(setm(page, '_visible', eq(cid, get(OM, 'OptionMain', clause))))
+        if_(g, get(page, '_visible'), lambda g: g.stmt(call(get(proto(OM, 'OptionDetail'), 'DefaultSetting'), 'call', page)))
 
 
 def title_selector_add(g):
@@ -473,7 +476,7 @@ def title_selector_add(g):
         return lambda g: g.stmt(call(THIS, 'PCOpt_AddSelect', get(main, CLAUSES[k]), ei('PCOpt_Page', k), ei('PCOpt_PageHelp', k)))
 
     def graphics(g):
-        g.stmt(store(count, add(get(THIS, 'm_items', 'length'), 2)))
+        g.stmt(store(count, add(get(THIS, 'm_items', 'length'), 4)))
 
         def place_slot(g):
             g.stmt(store(slot, add('mcInst_Sel', add(k, 1))))
@@ -483,6 +486,8 @@ def title_selector_add(g):
 
         loop(g, k, count, place_slot)
         add_page(0)(g)
+        add_page(3)(g)
+        add_page(2)(g)
 
     if_(g, eq(cid, get(main, 'CLAUSE_ID_DEFAULT')), graphics)
     g.stmt(call(THIS, 'PCOpt_AddSelect', cid, label, help_))
@@ -519,7 +524,7 @@ def title_tags():
     wrap(g, OM, 'OptionDetails', 'Init')
     method(g, OM, 'OptionDetails', 'Init', [], 3, title_details_init)
     wrap(g, OM, 'OptionDetails', 'SetDetails')
-    method(g, OM, 'OptionDetails', 'SetDetails', ['ClauseID'], 3, title_details_set)
+    method(g, OM, 'OptionDetails', 'SetDetails', ['ClauseID'], 4, title_details_set)
     wrap(g, OM, 'OptionSelector', 'AddSelect')
     method(g, OM, 'OptionSelector', 'AddSelect', ['ClauseID', 'Text', 'HelpText'], 8, title_selector_add)
     flag_wrap(g, OM, 'OptionMain', 'OpenOperation', 1)
@@ -612,6 +617,7 @@ def pause_page_fill(g):
         if_(g, eq(count, 0), toggle, cycle)
         g.stmt(call(THIS, 'AddDetail', get(PM, 'OptionSelectItem', 'TYPE_CHOICE'), ei('PCOpt_Title', row), on, off,
                     ei('PCOpt_Help', row), add('PCOpt_Set', row), getf))
+        g.stmt(call(item, 'SetParam', param, False, False))
 
     loop(g, i, n, entry)
 
@@ -621,9 +627,9 @@ def pause_selector_init(g):
     details = get(THIS, 'm_instDetails')
     pages = get(THIS, 'm_pc')
     g.stmt(call(THIS, 'PCOpt_Init'))
-    if_(g, neq(pages, UNDEFINED), lambda g: [g.stmt(call(member(pages, tag), 'removeMovieClip')) for tag in TAGS])
+    if_(g, neq(pages, UNDEFINED), lambda g: [g.stmt(call(member(pages, tag), 'removeMovieClip')) for tag in PAUSE_TAGS])
     g.emit(setm(THIS, 'm_pc', obj()))
-    for k, tag in enumerate(TAGS):
+    for k, tag in enumerate(PAUSE_TAGS):
         g.stmt(store(page, call(details, 'attachMovie', 'PCOpt_PausePage', 'mcInst_PCOpt%d' % k, call(details, 'getNextHighestDepth'))))
         g.emit(setm(page, 'm_page', k))
         g.stmt(call(page, 'Init'))
@@ -636,7 +642,7 @@ def pause_selector_change(g):
     details = get(THIS, 'm_instDetails')
     pages = get(THIS, 'm_pc')
     g.stmt(call(THIS, 'PCOpt_ChangeOptionDetails', tag_))
-    for tag in TAGS:
+    for tag in PAUSE_TAGS:
         g.emit(setm(member(pages, tag), '_visible', eq(tag_, tag)))
     g.stmt(store(shown, neq(member(pages, tag_), UNDEFINED)))
     if_(g, shown, lambda g: g.stmt(call(member(pages, tag_), 'Show')))
@@ -670,6 +676,10 @@ def pause_selector_input(g):
 
 def pause_menu_add_main(g):
     args = [R(k) for k in range(2, 11)]
+    if_(g, eq(args[8], CONTROLS_LABEL), lambda g: (
+        g.stmt(store(args[0], 'OPTIONS')),
+        g.stmt(store(args[3], 'Camera, vibration, controls, key bindings, and cheats.')),
+    ))
     g.stmt(call(THIS, 'PCOpt_AddMainSelect', *args))
     if_(g, eq(args[8], CONTROLS_LABEL), lambda g: g.stmt(call(
         THIS, 'PCOpt_AddMainSelect', call(ei('PCOpt_Page', 0), 'toUpperCase'), '', True, ei('PCOpt_PageHelp', 0), '', '', '', '', TAG)))
@@ -678,8 +688,10 @@ def pause_menu_add_main(g):
 def pause_menu_add_sub(g):
     args = [R(k) for k in range(2, 11)]
     g.stmt(call(THIS, 'PCOpt_AddSubSelect', *args))
-    if_(g, eq(args[8], OPERATION_LABEL), lambda g: g.stmt(call(
-        THIS, 'PCOpt_AddSubSelect', ei('PCOpt_Page', 1), '', True, ei('PCOpt_PageHelp', 1), '', '', '', '', TAGS[1])))
+    if_(g, eq(args[8], OPERATION_LABEL), lambda g: (
+        g.stmt(call(THIS, 'PCOpt_AddSubSelect', ei('PCOpt_Page', 1), '', True, ei('PCOpt_PageHelp', 1), '', '', '', '', TAGS[1])),
+        g.stmt(call(THIS, 'PCOpt_AddSubSelect', ei('PCOpt_Page', 2), '', True, ei('PCOpt_PageHelp', 2), '', '', '', '', TAGS[2])),
+    ))
 
 
 def pause_menu_set_sub(g):

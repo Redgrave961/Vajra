@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(AsuraRecomp VERSION 1.0.5 LANGUAGES C CXX)
+project(AsuraRecomp VERSION 1.0.6 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -202,6 +202,7 @@ add_executable(${PROJECT_NAME}
     native_ring.cpp
     native_script.cpp
     native_script_core.cpp
+    assists.cpp
     pc_options.cpp
     presence.cpp
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_loader.cpp"
@@ -231,7 +232,7 @@ find_package(SDL3 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime rl_achievements SDL3::SDL3)
 set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX WIN32_EXECUTABLE TRUE OUTPUT_NAME Vajra)
 if(WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE dbghelp winmm)
+    target_link_libraries(${PROJECT_NAME} PRIVATE winmm)
     target_link_options(${PROJECT_NAME} PRIVATE -static)
 else()
     target_link_options(${PROJECT_NAME} PRIVATE -Wl,--wrap=pthread_create)
@@ -248,6 +249,7 @@ file(SHA256 "${PORT_EBOOT}" PORT_EBOOT_SHA256)
 set_source_files_properties(main.cpp PROPERTIES COMPILE_DEFINITIONS VAJRA_VERSION="${PROJECT_VERSION}")
 set_source_files_properties(game_files.cpp PROPERTIES COMPILE_DEFINITIONS PORT_EBOOT_SHA256="${PORT_EBOOT_SHA256}")
 set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "-w" COMPILE_DEFINITIONS "PPU_FAST_FP")
+set_source_files_properties("${RECOMP_DIR}/ppu_recomp_179.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_0136F9A8=func_0136F9A8_lifted")
 set_source_files_properties(${SPU_SOURCES} PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
     COMPILE_OPTIONS "${PS3RECOMP_OPT_FLAG};-w")

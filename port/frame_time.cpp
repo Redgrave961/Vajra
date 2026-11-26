@@ -1,3 +1,4 @@
+#include "assists.h"
 #include "guest.h"
 #include "pc_options.h"
 #include "vk/rsx_vk.h"
@@ -581,6 +582,7 @@ void func_00078E88(ppu_context* ctx)
     if (path == "BCGame.BCCamMode_Default.CanAssistFunction")
         g_can_assist.store(function, std::memory_order_relaxed);
     pc_options_link(function, path);
+    assists_link(function, path);
     const Site* first = std::lower_bound(std::begin(k_sites), std::end(k_sites), path,
                                          [](const Site& site, const std::string& key) { return key.compare(site.path) > 0; });
     const Site* last = first;
@@ -668,6 +670,11 @@ void func_0005188C(ppu_context* ctx)
 void func_0004E3B4(ppu_context* ctx)
 {
     lerp_op(func_0004E3B4_lifted, ctx, "ra");
+}
+
+void frame_float_multiply(ppu_context* ctx)
+{
+    lerp_op(func_00058990_lifted, ctx, "fa");
 }
 
 void func_00062E98(ppu_context* ctx)

@@ -3,20 +3,20 @@
 #include "../ps3recomp/libs/filesystem/ps3_aes.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <thread>
 #include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <thread>
 
 extern char** environ;
 #endif
