@@ -28,9 +28,9 @@
 
 ## Getting Started
 
-1. Obtain your own legally dumped copy of *Asura's Wrath* (`BLES01227` EU or `BLUS30721` US disc folder or decrypted `.iso`), plus any optional DLC `.pkg` + `.rap` files.
-2. Download the latest release and launch `Vajra.exe` on Windows or `Vajra-x86_64.AppImage` on Linux.
-3. On first launch, drop or select your game folder/ISO and click **Download** for the official `1.02` update and PS3 firmware. Vajra handles decryption and setup automatically.
+1. Obtain your own legally dumped copy of *Asura's Wrath* (`BLES01227` EU or `BLUS30721` US disc folder or decrypted `.iso`), plus any optional EU or US DLC `.pkg` + `.rap` files.
+2. **With RecompLauncher (Recommended):** Install and play Vajra directly through [RecompLauncher](https://recomplauncher.com/game/vajra) for automatic updates, guided setup, settings management, and Recomp Achievements.
+3. **Standalone:** Download the latest release from [GitHub Releases](https://github.com/Redgrave961/Vajra/releases/latest) and launch `Vajra.exe` on Windows or `Vajra-x86_64.AppImage` on Linux. On first launch, drop or select your game folder/ISO and click **Download** for the official `1.02` update and PS3 firmware — Vajra handles decryption and setup automatically.
 
 ### Command-Line Options
 
