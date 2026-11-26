@@ -1,16 +1,3 @@
-/*
- * Native C++ PPU overrides for hot PhysX / UE3 P1 main & P40 PPU PhysX functions.
- *
- * Overrides:
- *   - func_00AFB230 (P40 PPU PhysX joint/constraint update dispatch)
- *   - func_00B8CA04 / func_00B8CC88 (P40 PPU PhysX state read/write dispatch)
- *   - func_00B4A738 (P40 PPU PhysX kinematic target velocity solver)
- *   - func_00531F20 (P1 main USkeletalMeshComponent::ComposeSkeleton)
- *   - func_00392F08 (P1 main UWorld::MultiLineCheck wrapper)
- *   - func_005CCB00 (P1 main USkeletalMeshComponent::UpdateBounds)
- *   - func_00AD0C68 (P1 main NxScene::fetchResults)
- *   - func_00B44FA8 / func_00B49908 / func_00C91AD8 / func_00C4BDFC / func_005C5010 (PhysX bounds & skeleton helpers)
- */
 #include "guest.h"
 
 #include <cmath>
@@ -127,12 +114,8 @@ static inline void init_check_result(uint8_t* p) {
     std::memcpy(p + 0x44, &neg1, 4);
 }
 
-} // namespace
+}
 
-/* ============================================================================
- * func_00AFB230 (ppu_recomp_104.cpp:4917)
- * P40 PPU PhysX: joint/constraint update dispatch (10.8% of P40 PPU PhysX).
- * ============================================================================ */
 void func_00AFB230(ppu_context* ctx) {
     const ppu_mm m     = ppu_mm_take();
     const uint32_t obj = (uint32_t)ctx->gpr[3];
@@ -309,10 +292,6 @@ void func_00B8CC88(ppu_context* ctx) {
     ctx->lr = lr;
 }
 
-/* ============================================================================
- * func_00B4A738 (ppu_recomp_106.cpp:13440)
- * P40 PPU PhysX: kinematic target velocity solver (4.4% of P40 PPU PhysX).
- * ============================================================================ */
 void func_00B4A738(ppu_context* ctx) {
     const ppu_mm m     = ppu_mm_take();
     const uint32_t obj = (uint32_t)ctx->gpr[3];
@@ -495,10 +474,6 @@ void func_00B4A738(ppu_context* ctx) {
     }
 }
 
-/* ============================================================================
- * func_00531F20 (ppu_recomp_050.cpp:6396)
- * P1 main: USkeletalMeshComponent::ComposeSkeleton (native SSE/FMA bone loop).
- * ============================================================================ */
 void func_00531F20(ppu_context* ctx) {
     const uint32_t obj = (uint32_t)ctx->gpr[3];
     if (vm_read32(obj + 0x1E4) == 0)
@@ -571,7 +546,6 @@ void func_00531F20(ppu_context* ctx) {
     if (r30 != 0 && r3_flag == 0 && r384 == 0)
         r27 = 1;
 
-    // Preload read-only VMX constants once outside the bone loop
     const __m128  c_quat_conj = _mm_castsi128_ps(ld_vmx_rev(m, 0x01A63860u));
     const __m128  c_s1        = _mm_castsi128_ps(ld_vmx_rev(m, 0x01A63870u));
     const __m128  c_s2        = _mm_castsi128_ps(ld_vmx_rev(m, 0x01A63880u));
@@ -628,14 +602,12 @@ void func_00531F20(ppu_context* ctx) {
 
             const __m128 v5_w = _mm_castsi128_ps(_mm_shuffle_epi32(_mm_castps_si128(v5), 0x00));
 
-            // Compose quaternion: q_out = parent_q * local_q
             __m128 q_out = _mm_mul_ps(v3_w, v2);
             const __m128 q_conj = _mm_mul_ps(c_quat_conj, v3);
             q_out = _mm_fmadd_ps(_mm_mul_ps(v3_x, vmx_perm_self(v2, p_perm1)), c_s1, q_out);
             q_out = _mm_fmadd_ps(_mm_mul_ps(v3_y, vmx_perm_self(v2, p_perm2)), c_s2, q_out);
             q_out = _mm_fmadd_ps(_mm_mul_ps(v3_z, vmx_perm_self(v2, p_perm3)), c_s3, q_out);
 
-            // Rotate scaled local translation by parent_q + parent_t
             const __m128 s_t   = _mm_mul_ps(_mm_castsi128_ps(_mm_andnot_si128(c_w_mask, _mm_castps_si128(v5_w))), v4);
             const __m128 w_out = _mm_mul_ps(v4, v5);
 
@@ -707,10 +679,6 @@ void func_00531F20(ppu_context* ctx) {
     }
 }
 
-/* ============================================================================
- * func_00392F08 (ppu_recomp_033.cpp:38672)
- * P1 main: UWorld::MultiLineCheck wrapper (eliminates 1,152-write init loop).
- * ============================================================================ */
 void func_00392F08(ppu_context* ctx) {
     const uint32_t world     = (uint32_t)ctx->gpr[3];
     const uint32_t mem_stack = (uint32_t)ctx->gpr[4];
@@ -725,7 +693,6 @@ void func_00392F08(ppu_context* ctx) {
     const uint32_t sp = frame.base;
     const uint32_t hits_ea = sp + 0x7C;
 
-    // Fast init of 64 x 0x4C-byte FCheckResult structs on guest stack
     std::memset(vm_base + hits_ea, 0, 64u * 0x4Cu);
     for (uint32_t i = 0; i < 64u; ++i) {
         uint8_t* p = vm_base + hits_ea + i * 0x4Cu;
@@ -813,7 +780,6 @@ void func_00392F08(ppu_context* ctx) {
         return;
     }
 
-    // Sort hits with qsort callback 0x01973610
     ctx->gpr[3] = hits_ea;
     ctx->gpr[4] = (uint32_t)num_hits;
     ctx->gpr[5] = 0x4C;
@@ -854,11 +820,6 @@ void func_00392F08(ppu_context* ctx) {
     ctx->gpr[3] = out_head;
 }
 
-/* ============================================================================
- * func_005CCB00 (ppu_recomp_055.cpp:26086)
- * P1 main: UPhysicsAsset::CalcAABB (eliminates 13 FPR + 10 GPR spills,
- * 3x3 Newton-Raphson rsqrt loops, and temp TArray heap alloc/free).
- * ============================================================================ */
 void func_005CCB00(ppu_context* ctx) {
     const uint32_t out_box    = (uint32_t)ctx->gpr[3];
     const uint32_t phys_asset = (uint32_t)ctx->gpr[4];
@@ -981,16 +942,9 @@ void func_005CCB00(ppu_context* ctx) {
     vm_write32(out_box + 0x18, (uint32_t)bvalid << 24);
 }
 
-/* ============================================================================
- * func_00AD0C68 (ppu_recomp_103.cpp:722)
- * P1 main: NxScene::fetchResults (replaces 26-op per-body pose/vel float
- * copies with 2 contiguous memcpys and eliminates 14 GPR stack spills).
- * ============================================================================ */
 namespace {
 
 inline void copy_body_state(const ppu_mm& m, uint32_t body) {
-    // +0x124..0x13F (28B: pos + quat) -> +0x1B8..0x1D3
-    // +0xCC..0xE3  (24B: linVel + angVel) -> +0x19C..0x1B3
     if (__builtin_expect(plain_store(m, body + 0x19C, 0x38), 1)) {
         std::memcpy(m.vb + body + 0x1B8, m.vb + body + 0x124, 28);
         std::memcpy(m.vb + body + 0x19C, m.vb + body + 0xCC, 24);
@@ -1002,7 +956,7 @@ inline void copy_body_state(const ppu_mm& m, uint32_t body) {
     vm_write8_mm(&m, body + 0x1B4, vm_read8_mm(&m, body + 0x54) ^ 1u);
 }
 
-} // namespace
+}
 
 void func_00AD0C68(ppu_context* ctx) {
     const uint32_t scene  = (uint32_t)ctx->gpr[3];
@@ -1028,7 +982,6 @@ void func_00AD0C68(ppu_context* ctx) {
         prof = (uint32_t)ctx->gpr[3];
     }
 
-    // Start profiler zone 0x15 if enabled
     {
         const int32_t diff = (int32_t)(vm_read32(prof + 0x8) - vm_read32(prof + 0x4)) >> 3;
         const uint32_t cnt = (uint32_t)(diff * (int32_t)0xB6DB6DB7u) - 1u;
@@ -1060,7 +1013,6 @@ void func_00AD0C68(ppu_context* ctx) {
     if (err_ea != 0)
         vm_write32(err_ea, vm_read32(scene + 0x418));
 
-    // Loop 1: copy active rigid body state
     const ppu_mm m = ppu_mm_take();
     {
         const uint32_t list = vm_read32_mm(&m, scene + 0x3B8);
@@ -1075,7 +1027,6 @@ void func_00AD0C68(ppu_context* ctx) {
         }
     }
 
-    // Loop 2: sleeping/deactivated bodies at scene + 0x2E4
     {
         const uint32_t beg = vm_read32(scene + 0x2E4);
         const uint32_t end = vm_read32(scene + 0x2E8);
@@ -1103,7 +1054,6 @@ void func_00AD0C68(ppu_context* ctx) {
         }
     }
 
-    // Optional subsystem at scene + 0x150
     const uint32_t sub150 = vm_read32(scene + 0x150);
     if (sub150 != 0) {
         ctx->gpr[3] = sub150;
@@ -1111,7 +1061,6 @@ void func_00AD0C68(ppu_context* ctx) {
         run(func_00BB4B50, ctx);
     }
 
-    // Loop 3: sub-scenes / compartments at scene + 0xFC
     {
         const uint32_t beg = vm_read32(scene + 0xFC);
         const uint32_t end = vm_read32(scene + 0x100);
@@ -1136,7 +1085,6 @@ void func_00AD0C68(ppu_context* ctx) {
         }
     }
 
-    // Loop 4: active transforms / dirty bodies at scene + 0x14
     {
         uint32_t count = vm_read32(scene + 0x18);
         const uint32_t arr = vm_read32(scene + 0x1C);
@@ -1196,7 +1144,6 @@ void func_00AD0C68(ppu_context* ctx) {
     ctx->lr = 0x00AD12C0;
     run(func_00BA2CB8, ctx);
 
-    // Loop 5: scene + 0xB0 callbacks
     {
         uint32_t p = vm_read32(scene + 0xB0);
         while (p != vm_read32(scene + 0xB4)) {
@@ -1207,7 +1154,6 @@ void func_00AD0C68(ppu_context* ctx) {
         }
     }
 
-    // End profiler zone 0x15
     ctx->gpr[3] = vm_read32(prof_mgr + 0x34);
     ctx->lr = 0x00AD1300;
     run(func_00A669A0, ctx);
@@ -1292,13 +1238,13 @@ static inline bool compute_shape_bounds_fast(const ppu_mm& m, uint32_t geom,
                                              float out_c[3], float out_e[3]) {
     const uint32_t type = vm_read32_mm(&m, geom + 0x14);
     switch (type) {
-    case 1: { // Sphere
+    case 1: {
         const float r = rd_f32_mm(m, geom + 0x1C);
         out_c[0] = px; out_c[1] = py; out_c[2] = pz;
         out_e[0] = r;  out_e[1] = r;  out_e[2] = r;
         return true;
     }
-    case 3: { // Capsule (local X axis)
+    case 3: {
         const float radius = rd_f32_mm(m, geom + 0x1C);
         const float half_h = rd_f32_mm(m, geom + 0x20);
         const float ax = 1.0f - 2.0f * (qy * qy + qz * qz);
@@ -1310,7 +1256,7 @@ static inline bool compute_shape_bounds_fast(const ppu_mm& m, uint32_t geom,
         out_e[2] = fabsf(az) * half_h + radius;
         return true;
     }
-    case 5: { // Box
+    case 5: {
         const float lex = rd_f32_mm(m, geom + 0x1C);
         const float ley = rd_f32_mm(m, geom + 0x20);
         const float lez = rd_f32_mm(m, geom + 0x24);
@@ -1318,7 +1264,7 @@ static inline bool compute_shape_bounds_fast(const ppu_mm& m, uint32_t geom,
         return true;
     }
     case 6:
-    case 7: { // ConvexMesh / TriangleMesh
+    case 7: {
         const uint32_t b = vm_read32_mm(&m, geom + 0x1C);
         const float min_x = rd_f32_mm(m, b + 0x0),  min_y = rd_f32_mm(m, b + 0x4),  min_z = rd_f32_mm(m, b + 0x8);
         const float max_x = rd_f32_mm(m, b + 0xC),  max_y = rd_f32_mm(m, b + 0x10), max_z = rd_f32_mm(m, b + 0x14);
@@ -1333,9 +1279,8 @@ static inline bool compute_shape_bounds_fast(const ppu_mm& m, uint32_t geom,
     }
 }
 
-} // namespace
+}
 
-// PhysX BoxShape::getWorldBounds (P1 main, 100% pure leaf)
 void func_00B44FA8(ppu_context* ctx) {
     const ppu_mm m = ppu_mm_take();
     const uint32_t shape = (uint32_t)ctx->gpr[3];
@@ -1383,7 +1328,6 @@ void func_00B44FA8(ppu_context* ctx) {
     wr_f32_mm(m, out + 0x14, cz + hz);
 }
 
-// PhysX Body::updateBody2World (P40 PPU PhysX)
 void func_00B49908(ppu_context* ctx) {
     const ppu_mm m = ppu_mm_take();
     const uint32_t body = (uint32_t)ctx->gpr[3];
@@ -1454,7 +1398,6 @@ void func_00B49908(ppu_context* ctx) {
     ctx->lr = saved_lr;
 }
 
-// PhysX Shape::computeWorldBounds (P40 PPU PhysX)
 void func_00C91AD8(ppu_context* ctx) {
     const ppu_mm m = ppu_mm_take();
     const uint32_t geom  = (uint32_t)ctx->gpr[3];
@@ -1473,7 +1416,6 @@ void func_00C91AD8(ppu_context* ctx) {
     func_00C91AD8_lifted(ctx);
 }
 
-// PhysX BroadPhase::updateBounds (P40 PPU PhysX)
 void func_00C4BDFC(ppu_context* ctx) {
     const ppu_mm m = ppu_mm_take();
     const uint32_t self = (uint32_t)ctx->gpr[3];

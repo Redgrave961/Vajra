@@ -90,14 +90,12 @@ std::atomic<uint32_t> g_qte_timer_pct{ 100 };
 std::atomic<uint32_t> g_player_pawn{ 0 };
 std::atomic<uint32_t> g_player_input{ 0 };
 
-// Synchronic QTE time/index and mash pulse timing
 thread_local uint32_t t_sync_obj = 0;
 thread_local float t_sync_now = 0.f;
 thread_local int32_t t_sync_idx = -1;
 thread_local uint8_t t_sync_type = 0;
 thread_local uint64_t t_last_mash_ms = 0;
 
-// Cached UE3 property descriptors (resolved once per class, lock-free reads thereafter)
 Member m_god_mode{ "bPlayerGodMode" }, m_always_hp_max{ "bAlwaysHealthMax" }, m_enemy_blow_death{ "bEnemyBlowDeath" },
     m_disable_unlim_end{ "bDisableUnlimModeForceEnd" }, m_player_input{ "PlayerInput" },
     m_mantra_val{ "MantraGaugeVal" }, m_mantra_max{ "MantraGaugeValMax" }, m_lval_parm{ "lVal" },
@@ -176,7 +174,7 @@ void report_casual_if_needed()
     }
 }
 
-} // namespace
+}
 
 std::atomic<uint64_t> g_assists_hook_mask{ 0 };
 
@@ -396,7 +394,6 @@ uint32_t assists_pre_slow(uint32_t self, uint32_t function, uint32_t locals, uin
                 return (hk << 4) | ASSIST_ACT_SKIP;
             }
             const float st = st_ea ? from_bits(vm_read32(st_ea)) : 0.f;
-            // For Normal Synchronic Impacts, Tracks[Idx].StartTime is the exact visual ring alignment center (RankTimeA).
             if (t_sync_obj != self || t_sync_now >= st) {
                 m_sync_enable.set_flag(self, false);
                 if (result) vm_write32(result, 1u);

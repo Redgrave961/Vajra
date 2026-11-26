@@ -139,10 +139,6 @@ void warmup_spawn_gate(uint32_t psc, double k, float dt)
         tr.last_time = now;
     }
 
-    // Long-warmup projectile tracers (e.g. FX_asr10_Thr_fire01 WarmupTime=6, FX_val_blt01 WarmupTime=2)
-    // already have full-length backward-extending meshes on Frame 0. At 30 FPS, Frame 0 advances the
-    // projectile by Velocity*(1/30s) before rendering; above 30 FPS, gate rendering during that initial
-    // 1/30s window so the mesh doesn't clip through the player into the camera.
     if (now + dt < tr.gate_until) {
         const ppu_mm m = ppu_mm_take();
         const uint32_t inst_data = vm_read32_mm(&m, psc + 0x1E8);
@@ -165,7 +161,7 @@ void warmup_spawn_gate(uint32_t psc, double k, float dt)
     }
 }
 
-} // namespace
+}
 
 void func_006F7558(ppu_context* ctx)
 {

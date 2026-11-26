@@ -175,4 +175,4 @@ inline uint32_t find_function_walk(const uint8_t* vb, uint32_t level, uint32_t i
     return 0;
 }
 
-} // namespace ue3
+}

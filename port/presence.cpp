@@ -154,7 +154,6 @@ public:
             close();
             return false;
         }
-        // Wait briefly for Discord's READY frame before sending SET_ACTIVITY
         for (int tries = 0; tries < 25 && connected() && running.load(std::memory_order_relaxed); tries++) {
             if (drain_once() > 0) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -366,13 +365,11 @@ void presence_on_file_open(const char* guest_path)
         std::tolower((unsigned char)base[len - 2]) != 'x' || std::tolower((unsigned char)base[len - 1]) != 'x')
         return;
 
-    // Extract uppercase package stem before ".XXX"
     char stem[64];
     const size_t stem_len = std::min(len - 4, sizeof(stem) - 1);
     for (size_t i = 0; i < stem_len; i++) stem[i] = (char)std::toupper((unsigned char)base[i]);
     stem[stem_len] = 0;
 
-    // Only react to top-level map packages (no underscore sub-chunks like _LOC_INT or _L01_...)
     if (std::strchr(stem, '_')) return;
 
     std::lock_guard<std::mutex> lk(g_lock);

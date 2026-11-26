@@ -39,7 +39,6 @@ rgba lerp_c(rgba a, rgba b, float t)
     };
 }
 
-// Deep volcanic obsidian -> molten crimson palette
 constexpr rgba c_bg_top{ 8, 6, 7 }, c_bg_bot{ 28, 9, 9 };
 constexpr rgba c_panel{ 15, 11, 12, 238 }, c_panel_border{ 156, 86, 56, 95 };
 constexpr rgba c_row_hover{ 46, 22, 22, 125 };
@@ -116,7 +115,6 @@ struct pick_req {
     game_add_mode mode = game_add_mode::any;
 };
 
-// Distance to line segment (for 4x4 supersampled SDF icons)
 float sd_seg(float px, float py, float ax, float ay, float bx, float by)
 {
     const float pax = px - ax, pay = py - ay, bax = bx - ax, bay = by - ay;
@@ -240,7 +238,6 @@ public:
     }
 
 private:
-    // Bake 4x4 supersampled SDF textures so EVERY rounded corner, border, shadow, glow & icon is razor-sharp!
     void bake_aa_assets()
     {
         auto make_tex = [&](int w, int h, const std::vector<uint8_t>& px) -> SDL_Texture* {
@@ -253,7 +250,6 @@ private:
             return tex;
         };
 
-        // 1. 9-slice anti-aliased rounded pill fill & border baked 1:1 at exact physical DPI (zero minification aliasing!)
         {
             pill_r_px = std::max(8, (int)std::lround(10.f * s));
             pill_corner = (float)pill_r_px + 2.f;
@@ -275,7 +271,6 @@ private:
             pill_fill = make_tex(pill_sz, pill_sz, fill_px);
             pill_border = make_tex(pill_sz, pill_sz, border_px);
 
-            // Soft Gaussian shadow / glow 9-slice with generous 4*sigma margin so alpha reaches 0.0 well inside texture edges (no square cutoff!)
             const float sigma = std::max(4.f, 5.5f * s);
             const int pad = (int)std::ceil(sigma * 3.8f);
             shadow_pad = (float)pad / s;
@@ -293,7 +288,6 @@ private:
             pill_shadow = make_tex(shadow_sz, shadow_sz, sh_px);
         }
 
-        // 2. Smooth radial glow sprite (for embers & mouse-tracking button spotlight)
         {
             constexpr int sz = 64;
             const float c = sz * 0.5f;
@@ -307,7 +301,6 @@ private:
             glow_dot = make_tex(sz, sz, px);
         }
 
-        // 3. 4x4 supersampled anti-aliased status icons (ok, warn, bad, missing) at exact physical pixel DPI!
         {
             const int sz = std::max(44, (int)std::lround(40.f * s));
             const float c = sz * 0.5f;
@@ -320,34 +313,31 @@ private:
                     for (int x = 0; x < sz; x++) {
                         const float u = x + 0.5f, v = y + 0.5f;
                         const float dist = std::hypot(u - c, v - c);
-                        // Soft outer halo
                         const float halo = std::clamp(1.f - (dist - rad) / (sz * 0.20f), 0.f, 1.f);
                         float ga = (dist > rad ? halo * halo * 0.24f : 0.f);
-                        // Crisp 4x4 AA circle disc
                         const float disc = area([&](float px0, float py0) { return std::hypot(px0 - c, py0 - c) - rad; }, u, v, 4);
-                        // Crisp 4x4 AA inner glyph
                         const float stroke = std::max(1.3f, sz * 0.038f);
                         float glyph = 0.f;
                         if (disc > 0.01f) {
-                            if (st == 0) { // Checkmark
+                            if (st == 0) {
                                 glyph = area([&](float px0, float py0) {
                                     const float d1 = sd_seg(px0, py0, c - rad * 0.44f, c + rad * 0.04f, c - rad * 0.10f, c + rad * 0.38f);
                                     const float d2 = sd_seg(px0, py0, c - rad * 0.10f, c + rad * 0.38f, c + rad * 0.48f, c - rad * 0.32f);
                                     return std::min(d1, d2) - stroke;
                                 }, u, v, 4);
-                            } else if (st == 1) { // Exclamation
+                            } else if (st == 1) {
                                 glyph = area([&](float px0, float py0) {
                                     const float d1 = sd_seg(px0, py0, c, c - rad * 0.46f, c, c + rad * 0.08f) - stroke;
                                     const float d2 = std::hypot(px0 - c, py0 - (c + rad * 0.38f)) - stroke * 1.05f;
                                     return std::min(d1, d2);
                                 }, u, v, 4);
-                            } else if (st == 2) { // Cross X
+                            } else if (st == 2) {
                                 glyph = area([&](float px0, float py0) {
                                     const float d1 = sd_seg(px0, py0, c - rad * 0.36f, c - rad * 0.36f, c + rad * 0.36f, c + rad * 0.36f);
                                     const float d2 = sd_seg(px0, py0, c + rad * 0.36f, c - rad * 0.36f, c - rad * 0.36f, c + rad * 0.36f);
                                     return std::min(d1, d2) - stroke;
                                 }, u, v, 4);
-                            } else { // Minus
+                            } else {
                                 glyph = area([&](float px0, float py0) {
                                     return sd_seg(px0, py0, c - rad * 0.38f, c, c + rad * 0.38f, c) - stroke;
                                 }, u, v, 4);
@@ -355,7 +345,6 @@ private:
                         }
                         const float fa = std::max(ga, disc);
                         if (fa <= 0.002f) continue;
-                        // Blend dark glyph onto bright disc
                         const float k = glyph * disc;
                         const uint8_t r = (uint8_t)std::lround(col.r * (1.f - k) + 12.f * k);
                         const uint8_t g = (uint8_t)std::lround(col.g * (1.f - k) + 9.f * k);
@@ -370,7 +359,6 @@ private:
         }
     }
 
-    // Smooth anti-aliased 9-slice draw
     void draw_9slice(SDL_Texture* tex, int tex_sz, float tex_corner, SDL_FRect r, float dst_corner, rgba c)
     {
         if (!tex) return;
@@ -410,10 +398,8 @@ private:
         const float t = std::chrono::duration<float>(now - t0).count();
         last_t = now;
 
-        // 1. Volcanic obsidian -> crimson base
         grad_rect({ 0, 0, k_w, k_h }, c_bg_top, c_bg_bot);
 
-        // 2. Full-bleed Vajra Asura hero artwork fading cleanly into obsidian-crimson
         if (art_tex && art_w > 0 && art_h > 0) {
             const float target_h = 340.f;
             const float src_aspect = (float)art_w / (float)art_h;
@@ -435,7 +421,6 @@ private:
             horiz_grad({ 0, 0, 480, k_hero_h + 40 }, { 10, 7, 8, 188 }, { 10, 7, 8, 0 });
         }
 
-        // 3. Volcanic obsidian furnace underglow + side ember depth + smooth glowing embers
         radial_glow(k_w * 0.5f, k_h * 1.05f, k_w * 0.78f, k_h * 0.52f, { 196, 42, 18, 86 });
         radial_glow(k_w * 0.12f, k_h * 0.72f, k_w * 0.36f, k_h * 0.34f, { 132, 24, 16, 46 });
         radial_glow(k_w * 0.88f, k_h * 0.68f, k_w * 0.36f, k_h * 0.34f, { 148, 32, 16, 48 });
@@ -466,7 +451,6 @@ private:
 
         layout();
 
-        // Update pointer cursor whenever hovering any interactive button
         bool over_interactive = false;
         for (const button& b : buttons)
             if (b.enabled && hit(b.r, mouse_x, mouse_y)) over_interactive = true;
@@ -475,12 +459,10 @@ private:
             if (cur_pointer && cur_default) SDL_SetCursor(is_pointer ? cur_pointer : cur_default);
         }
 
-        // 4. Clean Hero Title
         text_shadow(hero_title, "VAJRA", k_pad, 42.f, c_gold_bright, 3.0f);
         text_shadow(hero_sub, "ASURA'S WRATH", k_pad + 2.f, 96.f, c_gold, 0.8f);
         text_shadow(body, "Select your game files below, or drag and drop them anywhere.", k_pad, k_hero_h - 36.f, c_sub);
 
-        // 5. Forged Volcanic-Obsidian Panel (deep shadow + subtle molten crimson underglow + obsidian glass)
         const float panel_h = 5.f * k_row_h + 16.f;
         const SDL_FRect pr{ k_pad, k_panel_y, k_w - 2 * k_pad, panel_h };
         aa_shadow({ pr.x, pr.y + 4.f, pr.w, pr.h }, 14.f, 14.f, { 0, 0, 0, 170 });
@@ -499,10 +481,8 @@ private:
         const item_status* items[] = { &check.game, &check.update, &check.dlc, &check.licences, &check.firmware };
         for (int i = 0; i < 5; i++) draw_row(i, names[i], hints[i], *items[i], dt);
 
-        // 6. Tactile animated buttons + Play CTA
         for (size_t i = 0; i < buttons.size(); i++) draw_button(buttons[i], kbd_nav && (int)i == focus, dt, t);
 
-        // 7. Live Drag-and-Drop Overlay
         const float drop_target = dragging ? 1.f : 0.f;
         drop_alpha += (drop_target - drop_alpha) * std::min(1.f, dt * 14.f);
         if (drop_alpha > 0.01f) {
@@ -676,7 +656,6 @@ private:
         if (i > 0)
             grad_rect({ r.x + 16.f, r.y, r.w - 32.f, 1.f }, c_divider, c_divider);
 
-        // Razor-sharp 4x4 supersampled SDF status icon
         const int idx = st.state == item_state::ok ? 0 : st.state == item_state::warn ? 1 : st.state == item_state::bad ? 2 : 3;
         if (SDL_Texture* itex = status_tex[idx]) {
             const float isz = 40.f * s;
@@ -724,19 +703,16 @@ private:
         const float prev_h = anim.hover;
         anim.hover += ((hot ? 1.f : 0.f) - anim.hover) * rate;
         anim.press += ((down ? 1.f : 0.f) - anim.press) * std::min(1.f, dt * 24.f);
-        // Trigger subtle specular light sweep when entering hover
         if (hot && prev_h < 0.08f && anim.sweep < 0.f) anim.sweep = 0.f;
         if (anim.sweep >= 0.f) {
             anim.sweep += dt * 2.1f;
             if (anim.sweep > 1.35f) anim.sweep = -1.f;
         }
 
-        // Tactile lift on hover (-1.5px), press down (+1.2px)
         const float lift = b.enabled ? (-1.4f * anim.hover + 2.4f * anim.press) : 0.f;
         const SDL_FRect r{ b.r.x, b.r.y + lift, b.r.w, b.r.h };
         const float rad = is_play ? 12.f : 9.f;
 
-        // Real Gaussian drop shadow + smooth blooming hover / Play aura
         if (b.enabled) {
             aa_shadow({ r.x, r.y + 3.f, r.w, r.h }, 7.f, rad, { 0, 0, 0, (uint8_t)(95 + anim.hover * 45) });
             if (is_play) {
@@ -747,7 +723,6 @@ private:
             }
         }
 
-        // Smoothly animated fill color
         rgba fill = c_disabled;
         if (b.enabled) {
             if (is_play) fill = lerp_c(lerp_c(c_play_base, c_play_hot, anim.hover), c_play_down, anim.press);
@@ -756,7 +731,6 @@ private:
         }
         aa_rect(r, rad, fill);
 
-        // Soft rounded inner sheen & mouse spotlight (no rectangular clip leaking past rounded corners!)
         if (b.enabled && glow_dot) {
             if (anim.hover > 0.01f) {
                 const float mx = std::clamp(mouse_x, r.x + rad, r.x + r.w - rad);
@@ -767,7 +741,6 @@ private:
                 const SDL_FRect gd{ mx * s - gw * 0.5f, (r.y + r.h * 0.5f) * s - gh * 0.5f, gw, gh };
                 SDL_RenderTexture(renderer, glow_dot, nullptr, &gd);
             }
-            // Periodic gentle shimmer on Play button, or hover-enter sweep strictly inside rounded bounds
             float sp = anim.sweep;
             if (is_play && sp < 0.f) {
                 const float cycle = std::fmod(t, 4.2f);
@@ -785,7 +758,6 @@ private:
             }
         }
 
-        // Crisp 4x4 AA forged-obsidian border
         rgba border{ 72, 50, 48, 80 };
         if (b.enabled) {
             if (focused) border = c_gold_bright;

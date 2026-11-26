@@ -859,7 +859,6 @@ struct OverlapSearch : OctreeBase {
         const __m128 p_hi = _mm_add_ps(p_center, p_ext);
         const int sep = (_mm_movemask_ps(_mm_cmpgt_ps(p_lo, hi)) | _mm_movemask_ps(_mm_cmpgt_ps(lo, p_hi))) & 7;
         if (sep) return;
-        // Inlined func_001B7848(prim): (prim->Flags & 0x40000000) && (actor->Flags & 0x10)
         if ((fast32(prim + 0x12C) & 0x40000000u) == 0) return;
         if ((fast32(actor + 0xB0) & 0x00000010u) == 0) return;
         for (uint32_t a = actor; a; a = fast32(a + 0x9C))
@@ -1024,7 +1023,7 @@ void func_005B0EB0(ppu_context* ctx)
             __m128 r1 = _mm256_extractf128_ps(p01, 1);
             __m128 r2 = _mm256_castps256_ps128(p23);
             __m128 r3 = _mm256_extractf128_ps(p23, 1);
-            _MM_TRANSPOSE4_PS(r0, r1, r2, r3); // r0=px, r1=py, r2=pz, r3=pw
+            _MM_TRANSPOSE4_PS(r0, r1, r2, r3);
             const __m128 sdist = _mm_sub_ps(_mm_fmadd_ps(r0, vsx, _mm_fmadd_ps(r1, vsy, _mm_mul_ps(r2, vsz))), r3);
             const __m128 ddot = _mm_fmadd_ps(r0, vdx, _mm_fmadd_ps(r1, vdy, _mm_mul_ps(r2, vdz)));
             const __m128 par = _mm_cmplt_ps(_mm_and_ps(ddot, vabs_mask), veps);
