@@ -282,11 +282,9 @@ if(WIN32)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PORT_RECOMPLAUNCHER_JSON}" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/recomplauncher.json"
         COMMENT "Copying recomplauncher.json beside Vajra.exe")
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upscalers")
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different "${CMAKE_CURRENT_SOURCE_DIR}/upscalers" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/upscalers"
-            COMMENT "Copying upscaler DLLs beside Vajra.exe")
-    endif()
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different "${CMAKE_CURRENT_SOURCE_DIR}/upscalers/windows" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/upscalers"
+        COMMENT "Copying upscaler DLLs beside Vajra.exe")
 else()
     set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PORT_STAGE}")
     set(PORT_RUNTIME "${PORT_STAGE}/runtime-x86_64")
@@ -296,6 +294,12 @@ else()
     file(WRITE "${PORT_DESKTOP}" "[Desktop Entry]\nType=Application\nName=Vajra\nComment=Asura's Wrath PC Recompilation\nExec=Vajra\nIcon=Vajra\nCategories=Game;\nTerminal=false\nStartupWMClass=Vajra\n")
     set(PORT_STRIPPED "${PORT_STAGE}/Vajra.stripped")
     set(PORT_DEBUG "${PORT_STAGE}/Vajra.debug")
+    file(GLOB PORT_UPSCALERS "${CMAKE_CURRENT_SOURCE_DIR}/upscalers/linux/*")
+    set(PORT_UPSCALER_LIST "dir /upscalers 0755 0 0\n")
+    foreach(lib IN LISTS PORT_UPSCALERS)
+        get_filename_component(name "${lib}" NAME)
+        string(APPEND PORT_UPSCALER_LIST "file /upscalers/${name} 0755 0 0 ${lib}\n")
+    endforeach()
     file(WRITE "${PORT_STAGE}/AppDir.list"
 "file /Vajra 0755 0 0 ${PORT_STRIPPED}
 slink /AppRun 0777 0 0 Vajra
@@ -303,7 +307,7 @@ file /Vajra.desktop 0644 0 0 ${PORT_DESKTOP}
 file /Vajra.png 0644 0 0 ${PORT_ICON}
 slink /.DirIcon 0777 0 0 Vajra.png
 file /recomplauncher.json 0644 0 0 ${PORT_RECOMPLAUNCHER_JSON}
-")
+${PORT_UPSCALER_LIST}")
     find_program(ASURA_GENSQUASHFS gensquashfs REQUIRED)
     set(PORT_SQUASHFS "${PORT_STAGE}/AppDir.squashfs")
     set(PORT_APPIMAGE "${CMAKE_CURRENT_BINARY_DIR}/Vajra-x86_64.AppImage")
@@ -314,6 +318,7 @@ file /recomplauncher.json 0644 0 0 ${PORT_RECOMPLAUNCHER_JSON}
         COMMAND "${ASURA_GENSQUASHFS}" --pack-file "${PORT_STAGE}/AppDir.list" --compressor zstd --defaults mode=0755 --force "${PORT_SQUASHFS}"
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_appimage.py" "${PORT_RUNTIME}" "${PORT_SQUASHFS}" "${PORT_APPIMAGE}"
         DEPENDS ${PROJECT_NAME} "${PORT_ICON}" "${PORT_DESKTOP}" "${PORT_STAGE}/AppDir.list" "${PORT_RECOMPLAUNCHER_JSON}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_appimage.py"
+                ${PORT_UPSCALERS}
         COMMENT "Packing Vajra-x86_64.AppImage")
     add_custom_target(AppImage ALL DEPENDS "${PORT_APPIMAGE}")
 endif()

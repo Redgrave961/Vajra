@@ -345,7 +345,7 @@ constexpr uint32_t k_aa_smaa = 0x100u;
 
 const Choices& aa_choices()
 {
-    const int caps = rsx_vk_upscaler_caps();
+    const int caps = rsx_vk_upscaler_caps() | std::max(g_upscaler_caps_cached, 0);
     if (caps != g_upscaler_caps_cached) {
         g_upscaler_choices.clear();
         g_upscaler_choices.push_back({ "off", "Off", 0u });
@@ -413,7 +413,6 @@ std::atomic<float> g_mouse_units{ 30.f };
 std::atomic<bool> g_invert_mouse{ false };
 std::atomic<float> g_aspect_scale{ 1.f };
 std::atomic<bool> g_gfx_aspect_dirty{ false };
-std::atomic<uint32_t> g_upscaler_mode{ RSX_VK_UPSCALE_OFF };
 std::atomic<uint32_t> g_fsr_sharpness{ 0u };
 std::atomic<uint32_t> g_eff_w{ 1280u };
 std::atomic<uint32_t> g_eff_h{ 720u };
@@ -483,11 +482,9 @@ void apply_resolution(uint32_t value)
 void apply_aa(uint32_t value)
 {
     if (value == k_aa_smaa) {
-        g_upscaler_mode.store(RSX_VK_UPSCALE_OFF, std::memory_order_relaxed);
         rsx_vk_set_upscaler(RSX_VK_UPSCALE_OFF);
         rsx_vk_set_aa(RSX_VK_AA_SMAA);
     } else {
-        g_upscaler_mode.store(value, std::memory_order_relaxed);
         rsx_vk_set_aa(RSX_VK_AA_OFF);
         rsx_vk_set_upscaler((int)value);
     }
@@ -700,8 +697,11 @@ std::optional<uint32_t> selected(uint32_t row, const Choices& list)
 std::optional<uint32_t> value(uint32_t row)
 {
     const Choices& list = k_options[row].choices();
+    for (const Choice& c : list)
+        if (c.token == g_saved[row]) return c.value;
+    if (k_options[row].parse)
+        if (const auto v = k_options[row].parse(g_saved[row])) return v;
     if (const auto c = selected(row, list)) return list[*c].value;
-    if (k_options[row].parse) return k_options[row].parse(g_saved[row]);
     return std::nullopt;
 }
 
@@ -1501,7 +1501,7 @@ void func_010ED3A0(ppu_context* ctx)
 void func_006AC518(ppu_context* ctx)
 {
     const bool mb = g_motion_blur.load(std::memory_order_relaxed);
-    const uint32_t up = g_upscaler_mode.load(std::memory_order_relaxed);
+    const uint32_t up = (uint32_t)rsx_vk_upscaler_active();
     if (!mb && up == RSX_VK_UPSCALE_OFF) return;
     if (up == RSX_VK_UPSCALE_OFF) {
         run(func_006AC518_lifted, ctx);
@@ -1618,7 +1618,7 @@ static void widen_scene_view(ppu_context* ctx, void (*lifted)(ppu_context*))
     if (__builtin_expect(g_gfx_aspect_dirty.exchange(false, std::memory_order_acq_rel), 0))
         refresh_gfx_viewports(ctx);
     const float aspect = g_aspect_scale.load(std::memory_order_relaxed);
-    const uint32_t up_mode = g_upscaler_mode.load(std::memory_order_relaxed);
+    const uint32_t up_mode = (uint32_t)rsx_vk_upscaler_active();
     uint32_t proj_ea = 0, orig_m00 = 0, orig_m20 = 0, orig_m21 = 0;
     bool patched = false, jittered = false;
     const float sx = (float)ctx->fpr[3], sy = (float)ctx->fpr[4];
@@ -1716,7 +1716,7 @@ void func_006784C4(ppu_context* ctx)
     }
     run(func_006784C4_lifted, ctx);
     if (!main_view) return;
-    const uint32_t up_mode = g_upscaler_mode.load(std::memory_order_relaxed);
+    const uint32_t up_mode = (uint32_t)rsx_vk_upscaler_active();
     if (up_mode == RSX_VK_UPSCALE_OFF) {
         std::lock_guard<std::mutex> hold(g_up.lock);
         g_up.queue.clear();
