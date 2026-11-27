@@ -1,11 +1,14 @@
 #include "assists.h"
 #include "guest.h"
 #include "pc_options.h"
+#include "presence.h"
+#include "rl_achievements.h"
 #include "ue3_reflect.h"
 #include "vk/rsx_vk.h"
 #include "../ps3recomp/libs/input/pad_bindings.h"
 #include "../ps3recomp/libs/system/cellSysutil.h"
 
+#include <SDL3/SDL_events.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -19,14 +22,16 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
+
+extern "C" void ppu_fs_set_open_callback(void (*cb)(const char*));
 
 namespace {
 
 using ue3::Elements;
 using ue3::Member;
 using ue3::elements;
-using ue3::hook_bit;
 using ue3::k_object_class;
 using ue3::k_struct_super;
 using ue3::object_name_eq;
@@ -81,6 +86,11 @@ constexpr char k_start_word[] = "START", k_enter_word[] = "ENTER";
 constexpr uint32_t k_view_user_data = 0xD0;
 constexpr uint32_t k_user_data_player = 0xD4;
 constexpr uint32_t k_value_managed = 0x40;
+constexpr uint32_t k_gfx_engine = 0x019CF64C;
+constexpr uint32_t k_gfx_set_viewport = 0x68;
+constexpr uint32_t k_gfx_get_viewport = 0x6C;
+constexpr uint32_t k_gcm_ctx_ptr = 0x01B42038;
+constexpr uint32_t k_bink_fullscreen_lr = 0x001547C0;
 enum : uint32_t { hook_save_param = 1, hook_scene_manager, hook_stick_rotation, hook_judge_update, hook_judge_destroyed };
 constexpr std::pair<const char*, uint32_t> k_hooks[] = {
     { "BCGame.BCGameEngine.GetSaveParam", hook_save_param },
@@ -135,7 +145,7 @@ const Choices k_language = {
     { "it", "Italian", CELL_SYSUTIL_LANG_ITALIAN },
 };
 
-constexpr uint32_t k_max_scale = 8;
+constexpr uint32_t k_max_scale = 12;
 
 std::vector<rsx_vk_mode> g_modes;
 Choices g_res_choices;
@@ -160,12 +170,49 @@ const std::vector<rsx_vk_mode>& display_modes()
 }
 
 constexpr uint32_t k_resolution_heights[] = { 720, 900, 1080, 1440, 1800, 2160, 2880, 4320 };
+constexpr std::pair<uint32_t, uint32_t> k_ultrawide_presets[] = {
+    { 2560, 1080 }, { 3440, 1440 }, { 3840, 1600 }, { 5120, 2160 },
+    { 3840, 1200 },
+    { 3840, 1080 }, { 5120, 1440 }, { 7680, 2160 },
+    { 5760, 1200 },
+    { 5760, 1080 }, { 7680, 1440 }, { 11520, 2160 },
+    { 7680, 1080 }, { 10320, 1440 },
+};
+
+const char* aspect_tag(uint32_t w, uint32_t h)
+{
+    if (!h) return "";
+    const double r = (double)w / (double)h;
+    if (r <= 16.0 / 9.0 + 0.02) return "";
+    if (std::fabs(r - 21.0 / 9.0) < 0.08) return " (21:9)";
+    if (std::fabs(r - 32.0 / 10.0) < 0.08) return " (32:10)";
+    if (std::fabs(r - 32.0 / 9.0) < 0.08) return " (32:9)";
+    if (std::fabs(r - 48.0 / 10.0) < 0.08) return " (48:10)";
+    if (std::fabs(r - 48.0 / 9.0) < 0.08) return " (48:9)";
+    if (r >= 6.8 && r <= 7.3) return " (63:9)";
+    return "";
+}
+
+constexpr uint32_t pack_resolution(uint32_t w, uint32_t h) { return (w << 16) | (h & 0xFFFFu); }
+constexpr uint32_t res_width(uint32_t packed) { return packed >> 16; }
+constexpr uint32_t res_height(uint32_t packed) { return packed & 0xFFFFu; }
+
+bool valid_resolution(uint32_t w, uint32_t h)
+{
+    return w >= 1280u && h >= 720u && w <= 1280u * k_max_scale && h <= 720u * k_max_scale && (uint64_t)w * 9u >= (uint64_t)h * 16u;
+}
+
+bool same_aspect(uint32_t aw, uint32_t ah, uint32_t bw, uint32_t bh)
+{
+    return ah && bh && std::fabs((double)aw / (double)ah - (double)bw / (double)bh) < 0.02;
+}
 
 std::optional<uint32_t> parse_resolution(const std::string& token)
 {
     uint32_t w = 0, h = 0;
-    if (std::sscanf(token.c_str(), "%ux%u", &w, &h) != 2 || h < 720 || h > 720 * k_max_scale || w * 9 != h * 16) return std::nullopt;
-    return h;
+    char tail = 0;
+    if (std::sscanf(token.c_str(), "%ux%u%c", &w, &h, &tail) != 2 || !valid_resolution(w, h)) return std::nullopt;
+    return pack_resolution(w, h);
 }
 
 std::optional<uint32_t> parse_frame_rate(const std::string& token)
@@ -200,19 +247,67 @@ const Choices& resolution_choices()
     if (!g_res_choices_valid) {
         g_res_choices.clear();
         if (!modes.empty()) {
-            const rsx_vk_mode native = *std::max_element(modes.begin(), modes.end(), [](const rsx_vk_mode& a, const rsx_vk_mode& b) {
-                return (uint64_t)a.width * a.height < (uint64_t)b.width * b.height;
+            rsx_vk_mode native{};
+            if (!rsx_vk_desktop_mode(&native)) {
+                native = *std::max_element(modes.begin(), modes.end(), [](const rsx_vk_mode& a, const rsx_vk_mode& b) {
+                    return (uint64_t)a.width * a.height < (uint64_t)b.width * b.height;
+                });
+            }
+            std::vector<uint32_t> list;
+            const auto add = [&](uint32_t w, uint32_t h) {
+                if (valid_resolution(w, h)) list.push_back(pack_resolution(w, h));
+            };
+            for (const uint32_t h : k_resolution_heights) add(h * 16u / 9u, h);
+            const auto add_matching_presets = [&](uint32_t aw, uint32_t ah) {
+                for (const auto& [pw, ph] : k_ultrawide_presets)
+                    if (same_aspect(pw, ph, aw, ah)) add(pw, ph);
+            };
+            for (const rsx_vk_mode& m : modes) {
+                if ((uint64_t)m.width * 9u > (uint64_t)m.height * 16u) {
+                    add(m.width, m.height);
+                    add_matching_presets(m.width, m.height);
+                }
+            }
+            const bool native_uw = (uint64_t)native.width * 9u > (uint64_t)native.height * 16u;
+            add(native.width, native.height);
+            if (native_uw) {
+                add_matching_presets(native.width, native.height);
+                const auto even = [](double v) { return ((uint32_t)std::lround(v) + 1u) & ~1u; };
+                constexpr std::pair<uint32_t, uint32_t> k_scales[] = { { 3, 4 }, { 5, 4 }, { 3, 2 }, { 2, 1 } };
+                for (const auto& [num, den] : k_scales)
+                    add(even((double)native.width * num / den), even((double)native.height * num / den));
+            }
+            std::sort(list.begin(), list.end());
+            list.erase(std::unique(list.begin(), list.end()), list.end());
+            const auto bucket = [&](uint32_t p) -> int {
+                const uint32_t w = res_width(p), h = res_height(p);
+                if (same_aspect(w, h, native.width, native.height)) return 0;
+                if ((uint64_t)w * 9u == (uint64_t)h * 16u) return 1;
+                return 2;
+            };
+            std::sort(list.begin(), list.end(), [&](uint32_t a, uint32_t b) {
+                const int ba = bucket(a), bb = bucket(b);
+                if (ba != bb) return ba < bb;
+                const uint32_t aw = res_width(a), ah = res_height(a), bw = res_width(b), bh = res_height(b);
+                if (ba == 2) {
+                    const double ra = (double)aw / ah, rb = (double)bw / bh;
+                    if (std::fabs(ra - rb) >= 0.02) return ra < rb;
+                }
+                return ah != bh ? ah < bh : aw < bw;
             });
-            std::vector<uint32_t> heights(std::begin(k_resolution_heights), std::end(k_resolution_heights));
-            if (parse_resolution(std::to_string(native.width) + "x" + std::to_string(native.height))) heights.push_back(native.height);
-            std::sort(heights.begin(), heights.end());
-            heights.erase(std::unique(heights.begin(), heights.end()), heights.end());
-            const auto distance = [&](uint32_t h) { return h > native.height ? h - native.height : native.height - h; };
-            const uint32_t preferred = *std::min_element(heights.begin(), heights.end(), [&](uint32_t a, uint32_t b) { return distance(a) < distance(b); });
-            g_res_choices.reserve(heights.size());
-            for (const uint32_t h : heights) {
-                const std::string w = std::to_string(h * 16 / 9);
-                g_res_choices.push_back({ w + "x" + std::to_string(h), w + " x " + std::to_string(h), h, h == preferred });
+            const uint32_t exact_native = pack_resolution(native.width, native.height);
+            const auto distance = [&](uint32_t p) -> uint64_t {
+                if (p == exact_native) return 0u;
+                const uint32_t h = res_height(p);
+                const uint64_t dh = h > native.height ? h - native.height : native.height - h;
+                return (uint64_t)bucket(p) * 100000ull + dh + 1u;
+            };
+            const uint32_t preferred = *std::min_element(list.begin(), list.end(), [&](uint32_t a, uint32_t b) { return distance(a) < distance(b); });
+            g_res_choices.reserve(list.size());
+            for (const uint32_t p : list) {
+                const uint32_t rw = res_width(p), rh = res_height(p);
+                const std::string w = std::to_string(rw), h = std::to_string(rh);
+                g_res_choices.push_back({ w + "x" + h, w + " x " + h + aspect_tag(rw, rh), p, p == preferred });
             }
         }
         g_res_choices_valid = g_modes_valid;
@@ -247,9 +342,69 @@ std::atomic<bool> g_depth_of_field{ true };
 std::atomic<bool> g_bloom{ true };
 std::atomic<float> g_mouse_units{ 30.f };
 std::atomic<bool> g_invert_mouse{ false };
+std::atomic<float> g_aspect_scale{ 1.f };
+std::atomic<bool> g_gfx_aspect_dirty{ false };
+std::mutex g_res_lock;
+uint32_t g_base_res = pack_resolution(1280u, 720u);
+uint32_t g_win_w = 0, g_win_h = 0;
+uint32_t g_cur_display = RSX_VK_BORDERLESS;
 
-void apply_display(uint32_t value) { rsx_vk_set_display((rsx_vk_display)value); }
-void apply_resolution(uint32_t value) { rsx_vk_set_resolution_scale(value, 720); }
+void apply_effective_resolution_locked()
+{
+    uint32_t w = res_width(g_base_res), h = res_height(g_base_res);
+    if (g_cur_display == RSX_VK_WINDOWED && g_win_w && g_win_h) {
+        const double win_ar = (double)g_win_w / (double)g_win_h;
+        const double eff_ar = win_ar > 16.0 / 9.0 + 0.01 ? win_ar : 16.0 / 9.0;
+        w = std::clamp(((uint32_t)std::lround((double)h * eff_ar) + 1u) & ~1u, 1280u, 1280u * k_max_scale);
+    }
+    rsx_vk_set_resolution_scale(w, 1280u, h, 720u);
+    const float aspect = ((float)w * 9.f) / ((float)h * 16.f);
+    const float clamped = aspect > 1.0001f ? aspect : 1.f;
+    if (g_aspect_scale.exchange(clamped, std::memory_order_relaxed) != clamped)
+        g_gfx_aspect_dirty.store(true, std::memory_order_release);
+}
+
+void window_resized(uint32_t w, uint32_t h)
+{
+    std::lock_guard<std::mutex> hold(g_res_lock);
+    g_win_w = w;
+    g_win_h = h;
+    if (g_cur_display == RSX_VK_WINDOWED) apply_effective_resolution_locked();
+}
+
+void apply_display(uint32_t value)
+{
+    uint32_t rw = 0, rh = 0;
+    {
+        std::lock_guard<std::mutex> hold(g_res_lock);
+        g_cur_display = value;
+        if (value == RSX_VK_WINDOWED) {
+            rw = res_width(g_base_res);
+            rh = res_height(g_base_res);
+            g_win_w = rw;
+            g_win_h = rh;
+        }
+        apply_effective_resolution_locked();
+    }
+    rsx_vk_set_display((rsx_vk_display)value);
+    if (rw && rh) rsx_vk_resize_window(rw, rh);
+}
+void apply_resolution(uint32_t value)
+{
+    uint32_t rw = 0, rh = 0;
+    {
+        std::lock_guard<std::mutex> hold(g_res_lock);
+        g_base_res = value;
+        if (g_cur_display == RSX_VK_WINDOWED) {
+            rw = res_width(value);
+            rh = res_height(value);
+            g_win_w = rw;
+            g_win_h = rh;
+        }
+        apply_effective_resolution_locked();
+    }
+    if (rw && rh) rsx_vk_resize_window(rw, rh);
+}
 void apply_aa(uint32_t value) { rsx_vk_set_aa(value ? RSX_VK_AA_SMAA : RSX_VK_AA_OFF); }
 void apply_frame_rate(uint32_t value)
 {
@@ -397,7 +552,7 @@ uint32_t g_slot[std::size(k_bindings)];
 int g_swap_row = -1;
 std::string g_swap_text;
 
-std::atomic<uint64_t> g_hooks[std::size(k_hooks)];
+std::mutex g_hooks_lock;
 std::atomic<uint64_t> g_save_param{ 0 };
 std::atomic<uint32_t> g_stick_lit{ 0 };
 std::atomic<uint64_t> g_spin_ms{ 0 };
@@ -587,6 +742,11 @@ std::string help(uint32_t row)
 
 void display_toggled(rsx_vk_display display)
 {
+    {
+        std::lock_guard<std::mutex> hold(g_res_lock);
+        g_cur_display = (uint32_t)display;
+        apply_effective_resolution_locked();
+    }
     std::lock_guard<std::mutex> hold(g_settings_lock);
     for (const Choice& c : k_display)
         if (c.value == (uint32_t)display) g_saved[row_display] = c.token;
@@ -824,6 +984,90 @@ std::string start_text(std::string text)
     return text;
 }
 
+void quit_game()
+{
+    static std::atomic<bool> quitting{ false };
+    if (quitting.exchange(true, std::memory_order_acq_rel)) return;
+    ppu_fs_set_open_callback(nullptr);
+    presence_shutdown();
+    rl_ach_shutdown();
+    SDL_Event e{};
+    e.type = SDL_EVENT_QUIT;
+    if (SDL_PushEvent(&e)) std::this_thread::sleep_for(std::chrono::seconds(10));
+    std::fflush(nullptr);
+    std::_Exit(0);
+}
+
+void refresh_gfx_viewports(ppu_context* ctx)
+{
+    const uint32_t engine = vm_read32(k_gfx_engine);
+    if (!engine) return;
+    const uint32_t data = vm_read32(engine + 0x14u);
+    const uint32_t count = vm_read32(engine + 0x18u);
+    if (!data || !count || count > 64u) return;
+    uint64_t saved_gpr[8];
+    double saved_fpr[5];
+    std::copy_n(&ctx->gpr[3], 8, saved_gpr);
+    std::copy_n(&ctx->fpr[1], 5, saved_fpr);
+    const uint64_t saved_lr = ctx->lr;
+    {
+        const GuestFrame frame(ctx, 0xC0u);
+        const uint32_t vp = frame.base + 0x70u;
+        for (uint32_t i = 0; i < count; i++) {
+            const uint32_t movie = vm_read32(data + i * 4u);
+            const uint32_t view = movie ? vm_read32(movie + 0x34u) : 0u;
+            const uint32_t vtbl = view ? vm_read32(view) : 0u;
+            if (!vtbl) continue;
+            ctx->gpr[3] = view;
+            ctx->gpr[4] = vp;
+            guest_call(ctx, vm_read32(vtbl + k_gfx_get_viewport));
+            ctx->gpr[3] = view;
+            ctx->gpr[4] = vp;
+            guest_call(ctx, vm_read32(vtbl + k_gfx_set_viewport));
+        }
+    }
+    std::copy_n(saved_gpr, 8, &ctx->gpr[3]);
+    std::copy_n(saved_fpr, 5, &ctx->fpr[1]);
+    ctx->lr = saved_lr;
+}
+
+void set_gcm_viewport_x(ppu_context* ctx, float scale_x)
+{
+    const uint32_t gcm = vm_read32(k_gcm_ctx_ptr);
+    if (!gcm) return;
+    uint64_t saved_gpr[8];
+    double saved_fpr[5];
+    std::copy_n(&ctx->gpr[3], 8, saved_gpr);
+    std::copy_n(&ctx->fpr[1], 5, saved_fpr);
+    const uint64_t saved_lr = ctx->lr;
+    {
+        const GuestFrame frame(ctx, 0xB0u);
+        const uint32_t sc = frame.base + 0x80u;
+        const uint32_t of = frame.base + 0x90u;
+        vm_write_f32(sc + 0x00u, scale_x);
+        vm_write_f32(sc + 0x04u, -360.f);
+        vm_write_f32(sc + 0x08u, 1.f);
+        vm_write_f32(sc + 0x0Cu, 0.f);
+        vm_write_f32(of + 0x00u, 640.f);
+        vm_write_f32(of + 0x04u, 360.f);
+        vm_write_f32(of + 0x08u, 0.f);
+        vm_write_f32(of + 0x0Cu, 0.f);
+        vm_write64(frame.base + 0x70u, of);
+        ctx->gpr[3] = gcm;
+        ctx->gpr[4] = 0;
+        ctx->gpr[5] = 0;
+        ctx->gpr[6] = 1280;
+        ctx->gpr[7] = 720;
+        ctx->gpr[10] = sc;
+        ctx->fpr[1] = 0.0;
+        ctx->fpr[2] = 1.0;
+        run(func_00CF1D34, ctx);
+    }
+    std::copy_n(saved_gpr, 8, &ctx->gpr[3]);
+    std::copy_n(saved_fpr, 5, &ctx->fpr[1]);
+    ctx->lr = saved_lr;
+}
+
 bool external_call(ppu_context* ctx)
 {
     char name[24] = {};
@@ -843,13 +1087,18 @@ bool external_call(ppu_context* ctx)
     else if (!std::strcmp(op, "Count")) reply_number(ctx, count(row));
     else if (!std::strcmp(op, "Label")) reply(ctx, 0, label(row, (uint32_t)argument(ctx, 1)).c_str());
     else if (!std::strncmp(op, "Get", 3)) reply_number(ctx, current(std::strtoul(op + 3, nullptr, 10) % k_all_rows));
-    else if (!std::strncmp(op, "Set", 3)) set(std::strtoul(op + 3, nullptr, 10), (uint32_t)first);
-    else if (!std::strcmp(op, "Default")) reset(page);
-    else if (!std::strcmp(op, "Decide")) reply_number(ctx, decide(row));
+    else if (!std::strncmp(op, "Set", 3)) {
+        set(std::strtoul(op + 3, nullptr, 10), (uint32_t)first);
+        if (g_gfx_aspect_dirty.exchange(false, std::memory_order_acq_rel)) refresh_gfx_viewports(ctx);
+    } else if (!std::strcmp(op, "Default")) {
+        reset(page);
+        if (g_gfx_aspect_dirty.exchange(false, std::memory_order_acq_rel)) refresh_gfx_viewports(ctx);
+    } else if (!std::strcmp(op, "Decide")) reply_number(ctx, decide(row));
     else if (!std::strcmp(op, "Capture")) reply_number(ctx, capture(first != 0));
     else if (!std::strcmp(op, "Prompt")) first ? remember(g_prompt, movie_player(ctx)) : g_prompt.store(0, std::memory_order_relaxed);
     else if (!std::strcmp(op, "StartText")) reply(ctx, 0, start_text(text_argument(ctx, 0)).c_str());
     else if (!std::strcmp(op, "Diagram")) g_controller_screen.store(first != 0, std::memory_order_relaxed);
+    else if (!std::strcmp(op, "Quit")) quit_game();
     return true;
 }
 
@@ -886,6 +1135,8 @@ Menu g_menus[] = {
     { 137803, 0xA9057316A0914E31ull, k_pause_menu_tags },
     { 84243, 0x5577A21354B4EAFFull, k_start_menu_tags },
     { 45352, 0xC58DF766DDD3BC80ull, k_logo_menu_tags },
+    { 30905, 0x6EDFF88E0597725Cull, k_wide_cover_tags },
+    { 51014, 0x8722369DB976359Cull, k_wide_cover_tags },
 };
 std::mutex g_menu_lock;
 
@@ -907,7 +1158,7 @@ void build_menu(ppu_context* ctx, const uint8_t* swf, Menu& menu)
 
 }
 
-std::atomic<uint64_t> g_pc_options_hook_mask{ 0 };
+std::atomic<uint64_t> g_pc_options_hooks[64]{};
 
 void pc_options_boot(const std::filesystem::path& dir)
 {
@@ -916,6 +1167,7 @@ void pc_options_boot(const std::filesystem::path& dir)
     load();
     rsx_vk_on_display_toggle(display_toggled);
     rsx_vk_on_display_modes(display_modes_changed);
+    rsx_vk_on_window_resize(window_resized);
     pad_set_menu_probe(ui_context);
     pad_set_layout_probe(face_layout);
     pad_set_mouse_route_probe(mouse_route);
@@ -924,33 +1176,45 @@ void pc_options_boot(const std::filesystem::path& dir)
 
 void pc_options_link(uint32_t function, const std::string& path)
 {
-    for (size_t i = 0; i < std::size(k_hooks); i++)
-        if (path == k_hooks[i].first) {
-            g_hooks[i].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_release);
-            g_pc_options_hook_mask.fetch_or(hook_bit(function), std::memory_order_release);
+    if (!function) return;
+    for (size_t i = 0; i < std::size(k_hooks); i++) {
+        if (path != k_hooks[i].first) continue;
+        const std::lock_guard<std::mutex> hold(g_hooks_lock);
+        static uint32_t used = 0;
+        uint32_t s = (function * 0x9E3779B1u) >> 26;
+        for (uint32_t n = 0; n < 64u; ++n, s = (s + 1u) & 63u) {
+            const uint64_t cur = g_pc_options_hooks[s].load(std::memory_order_relaxed);
+            if ((uint32_t)(cur >> 32) == function) {
+                g_pc_options_hooks[s].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_release);
+                break;
+            }
+            if (!cur) {
+                if (used < 63u) {
+                    ++used;
+                    g_pc_options_hooks[s].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_release);
+                }
+                break;
+            }
         }
+        return;
+    }
 }
 
-uint32_t pc_options_call_slow(uint32_t self, uint32_t function)
+uint32_t pc_options_call_hook(uint32_t hook, uint32_t self)
 {
-    for (const std::atomic<uint64_t>& slot : g_hooks) {
-        const uint64_t hook = slot.load(std::memory_order_acquire);
-        if ((uint32_t)(hook >> 32) != function) continue;
-        if ((uint32_t)hook == hook_judge_update || (uint32_t)hook == hook_judge_destroyed) {
-            g_stick_lit.store((uint32_t)hook == hook_judge_update ? stick_lit(self) : 0, std::memory_order_relaxed);
-            return 0;
-        }
-        if ((uint32_t)hook == hook_scene_manager && m_player_owner.obj(self)) remember(g_hud, self);
-        if ((uint32_t)hook != hook_stick_rotation) return (uint32_t)hook;
-        const uint8_t command = m_command.byte(self);
-        if (m_judging.flag(self) && command >= k_left_rotation_first && command <= k_left_rotation_last) {
-            note_stick_rotation();
-            const uint64_t now_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            g_spin_cmd.store(command, std::memory_order_relaxed);
-            g_spin_ms.store(now_ms, std::memory_order_relaxed);
-        }
+    if (hook == hook_judge_update || hook == hook_judge_destroyed) {
+        g_stick_lit.store(hook == hook_judge_update ? stick_lit(self) : 0, std::memory_order_relaxed);
         return 0;
+    }
+    if (hook == hook_scene_manager && m_player_owner.obj(self)) remember(g_hud, self);
+    if (hook != hook_stick_rotation) return hook;
+    const uint8_t command = m_command.byte(self);
+    if (m_judging.flag(self) && command >= k_left_rotation_first && command <= k_left_rotation_last) {
+        note_stick_rotation();
+        const uint64_t now_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        g_spin_cmd.store(command, std::memory_order_relaxed);
+        g_spin_ms.store(now_ms, std::memory_order_relaxed);
     }
     return 0;
 }
@@ -968,7 +1232,7 @@ bool pc_options_controller_screen()
 uint32_t pc_options_stick_lit()
 {
     uint32_t lit = g_stick_lit.load(std::memory_order_relaxed) & ~k_start_judged;
-    const uint64_t spin_ms = g_spin_ms.load(std::memory_order_relaxed);
+    uint64_t spin_ms = g_spin_ms.load(std::memory_order_relaxed);
     if (spin_ms) {
         const uint64_t now_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -978,6 +1242,8 @@ uint32_t pc_options_stick_lit()
             const uint32_t phase = (uint32_t)((now_ms / 140u) & 3u);
             const uint8_t cmd = g_spin_cmd.load(std::memory_order_relaxed);
             lit = (lit & ~0xFu) | ((cmd & 1u) ? k_ccw[phase] : k_cw[phase]);
+        } else {
+            g_spin_ms.compare_exchange_strong(spin_ms, 0, std::memory_order_relaxed);
         }
     }
     return lit;
@@ -1082,4 +1348,70 @@ void func_00214910(ppu_context* ctx)
 void func_006AC518(ppu_context* ctx)
 {
     if (g_motion_blur.load(std::memory_order_relaxed)) run(func_006AC518_lifted, ctx);
+}
+
+extern void func_00661DA8_lifted(ppu_context* ctx);
+extern void func_00662E70_lifted(ppu_context* ctx);
+
+static void widen_scene_view(ppu_context* ctx, void (*lifted)(ppu_context*))
+{
+    if (__builtin_expect(g_gfx_aspect_dirty.exchange(false, std::memory_order_acq_rel), 0))
+        refresh_gfx_viewports(ctx);
+    const float aspect = g_aspect_scale.load(std::memory_order_relaxed);
+    uint32_t proj_ea = 0, orig_m00 = 0;
+    bool patched = false;
+    if (aspect > 1.f) {
+        const float sx = (float)ctx->fpr[3], sy = (float)ctx->fpr[4];
+        if (sx >= 16.f && sy >= 9.f && sx * 10.f >= sy * 15.f) {
+            proj_ea = vm_read32((uint32_t)ctx->gpr[1] + 0xACu);
+            if (proj_ea && vm_read_f32(proj_ea + 0x2Cu) != 0.f && vm_read_f32(proj_ea + 0x3Cu) == 0.f) {
+                orig_m00 = vm_read32(proj_ea);
+                vm_write_f32(proj_ea, from_bits(orig_m00) / aspect);
+                patched = true;
+            }
+        }
+    }
+    run(lifted, ctx);
+    if (patched) vm_write32(proj_ea, orig_m00);
+}
+
+void func_00661DA8(ppu_context* ctx) { widen_scene_view(ctx, func_00661DA8_lifted); }
+void func_00662E70(ppu_context* ctx) { widen_scene_view(ctx, func_00662E70_lifted); }
+
+extern void func_00D71F04_lifted(ppu_context* ctx);
+
+void func_00D71F04(ppu_context* ctx)
+{
+    if (__builtin_expect(g_gfx_aspect_dirty.exchange(false, std::memory_order_acq_rel), 0))
+        refresh_gfx_viewports(ctx);
+    const float aspect = g_aspect_scale.load(std::memory_order_relaxed);
+    const uint32_t vp = (uint32_t)ctx->gpr[4];
+    uint32_t orig_ar = 0;
+    bool patched = false;
+    if (vp) {
+        const uint32_t bw = vm_read32(vp + 0x00u);
+        const uint32_t bh = vm_read32(vp + 0x04u);
+        const uint32_t flags = vm_read32(vp + 0x30u);
+        if (!(flags & 1u) && bw >= 1280u && (uint64_t)bw * 9u == (uint64_t)bh * 16u) {
+            orig_ar = vm_read32(vp + 0x2Cu);
+            const uint32_t want = to_bits(aspect);
+            if (orig_ar != want) {
+                vm_write32(vp + 0x2Cu, want);
+                patched = true;
+            }
+        }
+    }
+    run(func_00D71F04_lifted, ctx);
+    if (patched) vm_write32(vp + 0x2Cu, orig_ar);
+}
+
+extern void func_002BE2A8_lifted(ppu_context* ctx);
+
+void func_002BE2A8(ppu_context* ctx)
+{
+    const float aspect = g_aspect_scale.load(std::memory_order_relaxed);
+    const bool pillarbox = aspect > 1.f && (uint32_t)ctx->lr == k_bink_fullscreen_lr;
+    if (pillarbox) set_gcm_viewport_x(ctx, 640.f / aspect);
+    run(func_002BE2A8_lifted, ctx);
+    if (pillarbox) set_gcm_viewport_x(ctx, 640.f);
 }

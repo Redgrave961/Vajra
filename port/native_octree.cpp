@@ -471,7 +471,7 @@ struct LineSearch : OctreeBase {
         called = false;
         uint64_t head = fast64(n);
         uint32_t list = (uint32_t)(head >> 32);
-        const int32_t count = (int32_t)(uint32_t)head;
+        int32_t count = (int32_t)(uint32_t)head;
         bool list_fast = count > 0 && vm_mm_ok(&m, list, 4u * (uint32_t)count);
         for (int32_t i = 0; i < count; i++) {
             if (i + 6 < count) {
@@ -497,6 +497,7 @@ struct LineSearch : OctreeBase {
                 called = false;
                 head = fast64(n);
                 list = (uint32_t)(head >> 32);
+                count = (int32_t)(uint32_t)head;
                 list_fast = count > 0 && vm_mm_ok(&m, list, 4u * (uint32_t)count);
             }
         }
@@ -558,7 +559,7 @@ struct SingleLineSearch : OctreeBase {
     uint32_t tag = 0, tag_be = 0, stack = 0, ignore = 0, flags = 0, mirror = 0, world = 0;
     __m128 q_start{}, q_inv{}, q_ext{}, q_start_lo{}, q_start_hi{};
     __m128i zero_mask{};
-    __m128 ray_origin{};
+    __m128 ray_origin{}, neg_flt_max{}, pos_flt_max{};
     bool framed = false;
     bool called = false;
 
@@ -576,6 +577,8 @@ struct SingleLineSearch : OctreeBase {
         q_ext = vec3(query + 0x40);
         zero_mask = vec4i(query + 0x50);
         ray_origin = vec4(query + 0x70);
+        neg_flt_max = vec4(k_neg_flt_max);
+        pos_flt_max = vec4(k_pos_flt_max);
         q_start_lo = _mm_sub_ps(q_start, q_ext);
         q_start_hi = _mm_add_ps(q_start, q_ext);
     }
@@ -682,7 +685,7 @@ struct SingleLineSearch : OctreeBase {
         called = false;
         uint64_t head = fast64(n);
         uint32_t list = (uint32_t)(head >> 32);
-        const int32_t count = (int32_t)(uint32_t)head;
+        int32_t count = (int32_t)(uint32_t)head;
         uint32_t kids = fast32(n + 0xC);
         bool list_fast = count > 0 && vm_mm_ok(&m, list, 4u * (uint32_t)count);
         const int32_t pref = count < 6 ? count : 6;
@@ -703,7 +706,7 @@ struct SingleLineSearch : OctreeBase {
             touch(kids);
             const __m128 tm_norm = _mm_mul_ps(_mm_add_ps(t0, t1), _mm_set1_ps(0.5f));
             const __m128 gt = _mm_cmpgt_ps(b, ray_origin);
-            const __m128 tm_zero = _mm_blendv_ps(vec4(k_neg_flt_max), vec4(k_pos_flt_max), gt);
+            const __m128 tm_zero = _mm_blendv_ps(neg_flt_max, pos_flt_max, gt);
             tm = _mm_blendv_ps(tm_norm, tm_zero, _mm_castsi128_ps(zero_mask));
             alignas(16) float t0a[4], tma[4];
             _mm_store_ps(t0a, t0);
@@ -734,6 +737,7 @@ struct SingleLineSearch : OctreeBase {
                 called = false;
                 head = fast64(n);
                 list = (uint32_t)(head >> 32);
+                count = (int32_t)(uint32_t)head;
                 list_fast = count > 0 && vm_mm_ok(&m, list, 4u * (uint32_t)count);
             }
         }
@@ -905,7 +909,7 @@ struct OverlapSearch : OctreeBase {
         called = false;
         uint64_t head = fast64(n);
         uint32_t list = (uint32_t)(head >> 32);
-        const int32_t count = (int32_t)(uint32_t)head;
+        int32_t count = (int32_t)(uint32_t)head;
         for (int32_t i = 0; i < count; i++) {
             if (i + 6 < count) {
                 const uint32_t p = peek(list + 4u * (uint32_t)(i + 6));
@@ -917,6 +921,7 @@ struct OverlapSearch : OctreeBase {
                 called = false;
                 head = fast64(n);
                 list = (uint32_t)(head >> 32);
+                count = (int32_t)(uint32_t)head;
             }
         }
         uint32_t kids = fast32(n + 0xC);

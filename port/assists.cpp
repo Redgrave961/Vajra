@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <mutex>
 #include <utility>
 
 namespace {
@@ -12,7 +13,6 @@ namespace {
 using ue3::Elements;
 using ue3::Member;
 using ue3::elements;
-using ue3::hook_bit;
 using ue3::k_object_class;
 
 constexpr uint32_t k_delta_seconds = 0x019B8690;
@@ -84,7 +84,7 @@ constexpr std::pair<const char*, uint32_t> k_hooks[] = {
 constexpr uint32_t k_dirty_pc_bit = 1u << 31;
 
 std::atomic<uint32_t> g_assists_flags{ 0 };
-std::atomic<uint64_t> g_hooks[std::size(k_hooks)]{};
+std::mutex g_hooks_lock;
 std::atomic<uint32_t> g_damage_mult{ 1 };
 std::atomic<uint32_t> g_qte_timer_pct{ 100 };
 std::atomic<uint32_t> g_player_pawn{ 0 };
@@ -154,15 +154,6 @@ uint8_t judge_cmd_type(uint32_t req, uint32_t req_type)
     return cmd_ea ? vm_read8(cmd_ea) : 0;
 }
 
-uint32_t find_hook(uint32_t function)
-{
-    for (const std::atomic<uint64_t>& slot : g_hooks) {
-        const uint64_t h = slot.load(std::memory_order_acquire);
-        if ((uint32_t)(h >> 32) == function) return (uint32_t)h;
-    }
-    return 0;
-}
-
 constexpr uint32_t k_any_assist_mask = 0x7FFu;
 std::atomic<bool> g_casual_reported{ false };
 
@@ -176,7 +167,7 @@ void report_casual_if_needed()
 
 }
 
-std::atomic<uint64_t> g_assists_hook_mask{ 0 };
+std::atomic<uint64_t> g_assists_hooks[256]{};
 
 void assists_sync_casual()
 {
@@ -209,18 +200,32 @@ void assists_set_qte_timer_pct(uint32_t pct)
 
 void assists_link(uint32_t function, const std::string& path)
 {
+    if (!function) return;
     for (size_t i = 0; i < std::size(k_hooks); ++i) {
-        if (path == k_hooks[i].first) {
-            g_hooks[i].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_release);
-            g_assists_hook_mask.fetch_or(hook_bit(function), std::memory_order_release);
+        if (path != k_hooks[i].first) continue;
+        const std::lock_guard<std::mutex> hold(g_hooks_lock);
+        static uint32_t used = 0;
+        uint32_t s = (function * 0x9E3779B1u) >> 24;
+        for (uint32_t n = 0; n < 256u; ++n, s = (s + 1u) & 255u) {
+            const uint64_t cur = g_assists_hooks[s].load(std::memory_order_relaxed);
+            if ((uint32_t)(cur >> 32) == function) {
+                g_assists_hooks[s].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_release);
+                break;
+            }
+            if (!cur) {
+                if (used < 255u) {
+                    ++used;
+                    g_assists_hooks[s].store((uint64_t)function << 32 | k_hooks[i].second, std::memory_order_release);
+                }
+                break;
+            }
         }
+        return;
     }
 }
 
-uint32_t assists_pre_slow(uint32_t self, uint32_t function, uint32_t locals, uint32_t result)
+uint32_t assists_pre_hook(uint32_t hk, uint32_t self, uint32_t function, uint32_t locals, uint32_t result)
 {
-    const uint32_t hk = find_hook(function);
-    if (!hk) return 0;
     const uint32_t flags = g_assists_flags.load(std::memory_order_relaxed);
 
     switch (hk) {
@@ -361,15 +366,28 @@ uint32_t assists_pre_slow(uint32_t self, uint32_t function, uint32_t locals, uin
         }
         if (hk == hk_sync_barrage && (flags & ASSIST_HOLD_MASH) && !(flags & ASSIST_AUTO_QTE) && mash_pulse_ready())
             pulse_held_buttons(g_player_input.load(std::memory_order_relaxed));
-        if (hk == hk_sync_normal && (flags & ASSIST_EXT_QTE_TIMER)) {
-            const float scale = (float)g_qte_timer_pct.load(std::memory_order_relaxed) / 100.f;
+        if (hk == hk_sync_normal) {
+            struct SyncOrig { uint32_t obj; float a, b, c; };
+            static thread_local SyncOrig s_orig[16]{};
+            static thread_local uint32_t s_orig_n = 0;
+            SyncOrig* entry = nullptr;
+            for (uint32_t i = 0; i < s_orig_n; ++i)
+                if (s_orig[i].obj == self) { entry = &s_orig[i]; break; }
+            const float scale = (flags & ASSIST_EXT_QTE_TIMER) ? (float)g_qte_timer_pct.load(std::memory_order_relaxed) / 100.f : 1.f;
             if (scale > 1.f) {
-                const float ra = m_sync_rank_a.f32(self);
-                const float rb = m_sync_rank_b.f32(self);
-                const float rc = m_sync_rank_c.f32(self);
-                if (ra > 0.f && ra < 0.8f) m_sync_rank_a.set_f32(self, std::min(ra * scale, 0.95f));
-                if (rb > 0.f && rb < 0.9f) m_sync_rank_b.set_f32(self, std::min(rb * scale, 0.98f));
-                if (rc > 0.f && rc < 0.95f) m_sync_rank_c.set_f32(self, std::min(rc * scale, 0.99f));
+                if (!entry) {
+                    const uint32_t idx = s_orig_n < 16u ? s_orig_n++ : (self >> 4) & 15u;
+                    s_orig[idx] = { self, m_sync_rank_a.f32(self), m_sync_rank_b.f32(self), m_sync_rank_c.f32(self) };
+                    entry = &s_orig[idx];
+                }
+                if (entry->a > 0.f && entry->a < 0.8f) m_sync_rank_a.set_f32(self, std::min(entry->a * scale, 0.95f));
+                if (entry->b > 0.f && entry->b < 0.9f) m_sync_rank_b.set_f32(self, std::min(entry->b * scale, 0.98f));
+                if (entry->c > 0.f && entry->c < 0.95f) m_sync_rank_c.set_f32(self, std::min(entry->c * scale, 0.99f));
+            } else if (entry) {
+                m_sync_rank_a.set_f32(self, entry->a);
+                m_sync_rank_b.set_f32(self, entry->b);
+                m_sync_rank_c.set_f32(self, entry->c);
+                entry->obj = 0;
             }
         }
         return 0;

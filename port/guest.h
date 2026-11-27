@@ -5,6 +5,9 @@
 
 #include <bit>
 #include <cstring>
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" void ps3_indirect_call(ppu_context* ctx);
@@ -30,38 +33,58 @@ inline uint32_t stfs(double d) { return to_bits((float)d); }
 inline bool plain_store(const ppu_mm& m, uint32_t ea, uint32_t n)
 {
     if (!vm_mm_in(m.st_span, ea, n) || (uint32_t)(ea - m.gcm) < 0x10000u || (uint32_t)(m.gcm - ea) < n) return false;
-    if (const unsigned char* bits = g_spu_coh_bits)
-        for (uint32_t line = ea >> 7; line <= (ea + n - 1) >> 7; line++)
-            if ((bits[line >> 3] >> (line & 7)) & 1u) return false;
+    if (!n) return true;
+    if (const unsigned char* bits = g_spu_coh_bits) {
+        const uint32_t p0 = ea >> 12;
+        const uint32_t p1 = (ea + n - 1u) >> 12;
+        if (__builtin_expect(p0 == p1, 1)) {
+            if (__builtin_expect(!(ppu_slow_page[p0] & VM_PAGE_COHERENT), 1)) return true;
+            for (uint32_t line = ea >> 7; line <= (ea + n - 1u) >> 7; line++)
+                if ((bits[line >> 3] >> (line & 7)) & 1u) return false;
+            return true;
+        }
+        uint32_t p = p0;
+#ifdef __AVX2__
+        const __m256i coh_mask = _mm256_set1_epi8((char)VM_PAGE_COHERENT);
+        while (p + 31u <= p1) {
+            const __m256i v = _mm256_loadu_si256((const __m256i*)(ppu_slow_page + p));
+            if (__builtin_expect(!_mm256_testz_si256(v, coh_mask), 0)) break;
+            p += 32u;
+        }
+#endif
+        for (; p <= p1; ++p) {
+            if (__builtin_expect(ppu_slow_page[p] & VM_PAGE_COHERENT, 0)) {
+                const uint32_t lo = (p == p0 ? ea : p << 12) >> 7;
+                const uint32_t hi = (p == p1 ? ea + n - 1u : (p << 12) + 4095u) >> 7;
+                for (uint32_t line = lo; line <= hi; ++line)
+                    if ((bits[line >> 3] >> (line & 7)) & 1u) return false;
+            }
+        }
+    }
     return true;
 }
 
 inline uint32_t vm_fast_read32(const ppu_mm& m, uint32_t ea)
 {
-    if (__builtin_expect(vm_mm_ok(&m, ea, 4), 1)) {
-        uint32_t raw;
-        std::memcpy(&raw, m.vb + ea, 4);
-        return __builtin_bswap32(raw);
-    }
-    return vm_read32_mm(&m, ea);
+    uint32_t raw;
+    std::memcpy(&raw, m.vb + ea, 4);
+    return __builtin_bswap32(raw);
 }
 
 inline uint64_t vm_fast_read64(const ppu_mm& m, uint32_t ea)
 {
-    if (__builtin_expect(vm_mm_ok(&m, ea, 8), 1)) {
-        uint64_t raw;
-        std::memcpy(&raw, m.vb + ea, 8);
-        return __builtin_bswap64(raw);
-    }
-    return vm_read64_mm(&m, ea);
+    uint64_t raw;
+    std::memcpy(&raw, m.vb + ea, 8);
+    return __builtin_bswap64(raw);
 }
 
 inline void vm_fast_write32(const ppu_mm& m, uint32_t ea, uint32_t v)
 {
-    if (__builtin_expect(plain_store(m, ea, 4), 1)) {
+    if (__builtin_expect((ea & 4095u) <= 4092u && !ppu_slow_page[ea >> 12], 1)) {
         const uint32_t be = __builtin_bswap32(v);
         std::memcpy(m.vb + ea, &be, 4);
-        if (__builtin_expect(ppu_slow_page[ea >> 12], 0)) vm_track_write(ea, 4);
+        if (__builtin_expect(*(const volatile unsigned char*)&ppu_slow_page[ea >> 12], 0))
+            ppu_store_recheck(ea);
         return;
     }
     vm_write32_mm(&m, ea, v);

@@ -175,8 +175,8 @@ void func_000E5170(ppu_context* ctx)
 {
     const ppu_mm m = ppu_mm_take();
     if (!plain_copy(m, (uint32_t)ctx->gpr[3], ctx->gpr[7], ctx->gpr[8])) return func_000E5170_lifted(ctx);
-    const uint32_t dst = (uint32_t)ctx->gpr[4], value = vm_read32_mm(&m, ctx->gpr[5]);
-    vm_write32_mm(&m, dst, value);
+    const uint32_t dst = (uint32_t)ctx->gpr[4], value = vm_fast_read32(m, (uint32_t)ctx->gpr[5]);
+    vm_fast_write32(m, dst, value);
 }
 
 void func_000E5548(ppu_context* ctx)
@@ -493,7 +493,7 @@ void func_00CF08F0(ppu_context* ctx)
         cur += 8u + rem_bytes;
     }
     if (__builtin_expect(fast, 1)) vm_track_write(cur0, total_bytes);
-    vm_write32_mm(&m, gcm_ctx + 8u, cur);
+    vm_fast_write32(m, gcm_ctx + 8u, cur);
 }
 
 void func_00CF0BD0(ppu_context* ctx)
@@ -516,7 +516,7 @@ void func_00CF0BD0(ppu_context* ctx)
         ((loc & 1u) << 31) | off
     };
     gcm_put_words(m, cur, w, 4u);
-    vm_write32_mm(&m, gcm_ctx + 8u, cur + 0x10u);
+    vm_fast_write32(m, gcm_ctx + 8u, cur + 0x10u);
 }
 
 void func_00CF3758(ppu_context* ctx)
@@ -552,7 +552,7 @@ void func_00CF3758(ppu_context* ctx)
         remap
     };
     gcm_put_words(m, cur, w, 9u);
-    vm_write32_mm(&m, gcm_ctx + 8u, cur + 0x24u);
+    vm_fast_write32(m, gcm_ctx + 8u, cur + 0x24u);
 }
 
 void func_00CEF93C(ppu_context* ctx)
@@ -571,7 +571,7 @@ void func_00CEF93C(ppu_context* ctx)
         ((en & 1u) << 31) | ((minlod & 0xFFFu) << 19) | ((maxlod & 0xFFFu) << 7) | ((maxaniso & 0xFFu) << 4)
     };
     gcm_put_words(m, cur, w, 2u);
-    vm_write32_mm(&m, gcm_ctx + 8u, cur + 8u);
+    vm_fast_write32(m, gcm_ctx + 8u, cur + 8u);
 }
 
 void func_00CEFE7C(ppu_context* ctx)
@@ -590,10 +590,8 @@ void func_00CEFE7C(ppu_context* ctx)
         (bias & 0x1FFFu) | ((minf & 0xFFu) << 16) | ((magf & 0xFFu) << 24) | ((conv & 0xFFu) << 13)
     };
     gcm_put_words(m, cur, w, 2u);
-    vm_write32_mm(&m, gcm_ctx + 8u, cur + 8u);
+    vm_fast_write32(m, gcm_ctx + 8u, cur + 8u);
 }
-
-extern "C" uint64_t ppu_timebase_now(void);
 
 namespace {
 
@@ -816,7 +814,7 @@ void func_00CEFF60(ppu_context* ctx)
         (wraps & 0xFFu) | ((wrapt & 0xFFu) << 8) | ((wrapr & 0xFFu) << 16) | ((remap & 0xFFu) << 12) | ((zfunc & 0xFu) << 28) | ((gamma & 0xFFu) << 20)
     };
     gcm_put_words(m, cur, w, 2u);
-    vm_write32_mm(&m, gcm_ctx + 8u, cur + 8u);
+    vm_fast_write32(m, gcm_ctx + 8u, cur + 8u);
 }
 
 void func_002392C8(ppu_context* ctx)

@@ -116,20 +116,27 @@ void func_00930440(ppu_context* ctx)
 
 namespace {
 
-void warmup_spawn_gate(uint32_t psc, double k, float dt)
+struct WarmupTrack {
+    uint32_t psc;
+    uint32_t same_time_ticks;
+    double last_time;
+    double gate_until;
+};
+thread_local WarmupTrack g_warmup_tracks[512];
+
+void warmup_spawn_gate(const ppu_mm& m, uint32_t psc, double k, float dt)
 {
     if (k >= 0.99 || !(dt > 0.0f)) return;
 
-    struct WarmupTrack {
-        double last_time = -1.0;
-        double gate_until = -1.0;
-        uint32_t same_time_ticks = 0;
-    };
-    static thread_local std::unordered_map<uint32_t, WarmupTrack> tracks;
-    if (tracks.size() > 2048) tracks.clear();
-    auto& tr = tracks[psc];
+    WarmupTrack& tr = g_warmup_tracks[((psc >> 4) * 2654435761u) >> 23];
+    if (tr.psc != psc) {
+        tr.psc = psc;
+        tr.same_time_ticks = 0;
+        tr.last_time = -1.0;
+        tr.gate_until = -1.0;
+    }
 
-    const double now = from_bits64(vm_read64(0x019FED10));
+    const double now = from_bits64(vm_fast_read64(m, 0x019FED10));
     if (now == tr.last_time) {
         tr.same_time_ticks++;
         if (tr.same_time_ticks >= 4)
@@ -140,22 +147,21 @@ void warmup_spawn_gate(uint32_t psc, double k, float dt)
     }
 
     if (now + dt < tr.gate_until) {
-        const ppu_mm m = ppu_mm_take();
-        const uint32_t inst_data = vm_read32_mm(&m, psc + 0x1E8);
-        const uint32_t inst_num = std::min(vm_read32_mm(&m, psc + 0x1EC), 8u);
+        const uint32_t inst_data = vm_fast_read32(m, psc + 0x1E8);
+        const uint32_t inst_num = std::min(vm_fast_read32(m, psc + 0x1EC), 8u);
         for (uint32_t i = 0; i < inst_num; ++i) {
-            const uint32_t inst = vm_read32_mm(&m, inst_data + i * 4u);
+            const uint32_t inst = vm_fast_read32(m, inst_data + i * 4u);
             if (!inst) continue;
-            const uint32_t act = (uint32_t)std::max((int32_t)vm_read32_mm(&m, inst + 0xD4), 0);
-            const uint32_t pdata = vm_read32_mm(&m, inst + 0x40);
-            const uint32_t pind = vm_read32_mm(&m, inst + 0x44);
-            const uint32_t stride = vm_read32_mm(&m, inst + 0xD0);
+            const uint32_t act = (uint32_t)std::max((int32_t)vm_fast_read32(m, inst + 0xD4), 0);
+            const uint32_t pdata = vm_fast_read32(m, inst + 0x40);
+            const uint32_t pind = vm_fast_read32(m, inst + 0x44);
+            const uint32_t stride = vm_fast_read32(m, inst + 0xD0);
             if (!act || !pdata || !pind || stride < 0x60) continue;
             for (uint32_t p = 0; p < act; ++p) {
                 const uint32_t base = pdata + vm_read16_mm(&m, pind + p * 2u) * stride;
-                vm_write32_mm(&m, base + 0x50, 0);
-                vm_write32_mm(&m, base + 0x54, 0);
-                vm_write32_mm(&m, base + 0x58, 0);
+                vm_fast_write32(m, base + 0x50, 0);
+                vm_fast_write32(m, base + 0x54, 0);
+                vm_fast_write32(m, base + 0x58, 0);
             }
         }
     }
@@ -167,28 +173,29 @@ void func_006F7558(ppu_context* ctx)
 {
     const double k = tick_scale();
     const uint32_t psc = (uint32_t)ctx->gpr[3];
-    const uint32_t system = vm_read32(psc + 0x1D8);
+    const ppu_mm m = ppu_mm_take();
+    const uint32_t system = vm_fast_read32(m, psc + 0x1D8);
     const float dt = (float)ctx->fpr[1];
-    if (k == 1 || !system || vm_read8(system + 0x3C) != 1) {
+    if (k == 1 || !system || vm_read8_mm(&m, system + 0x3C) != 1) {
         run(func_006F7558_lifted, ctx);
-        if (system) warmup_spawn_gate(psc, k, dt);
+        if (system) warmup_spawn_gate(m, psc, k, dt);
         return;
     }
     struct Scaled { uint32_t system, delta; };
     static thread_local Scaled active[16];
     static thread_local uint32_t depth;
-    const uint32_t current = vm_read32(system + 0x44);
+    const uint32_t current = vm_fast_read32(m, system + 0x44);
     uint32_t original = current;
     for (uint32_t i = depth; i-- > 0;)
         if (active[i].system == system) {
             original = active[i].delta;
             break;
         }
-    vm_write32(system + 0x44, to_bits((float)(from_bits(original) * k)));
+    vm_fast_write32(m, system + 0x44, to_bits((float)(from_bits(original) * k)));
     const bool tracked = depth < std::size(active);
     if (tracked) active[depth++] = { system, original };
     run(func_006F7558_lifted, ctx);
     if (tracked) --depth;
-    vm_write32(system + 0x44, current);
-    warmup_spawn_gate(psc, k, dt);
+    vm_fast_write32(m, system + 0x44, current);
+    warmup_spawn_gate(m, psc, k, dt);
 }

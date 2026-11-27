@@ -24,7 +24,7 @@ enum AssistAction : uint32_t {
     ASSIST_ACT_SKIP = 1u << 1,
 };
 
-extern std::atomic<uint64_t> g_assists_hook_mask;
+extern std::atomic<uint64_t> g_assists_hooks[256];
 
 void assists_set_flag(AssistFlag flag, bool on);
 void assists_set_damage_mult(uint32_t mult);
@@ -33,17 +33,22 @@ void assists_sync_casual();
 
 void assists_link(uint32_t function, const std::string& path);
 
-uint32_t assists_pre_slow(uint32_t self, uint32_t function, uint32_t locals, uint32_t result);
+uint32_t assists_pre_hook(uint32_t hk, uint32_t self, uint32_t function, uint32_t locals, uint32_t result);
 void assists_post_slow(uint32_t token, uint32_t self, uint32_t function, uint32_t locals, uint32_t result);
 
 static inline uint32_t assists_pre(uint32_t self, uint32_t function, uint32_t locals, uint32_t result)
 {
     if (__builtin_expect(!function, 0))
         return 0;
-    const uint64_t bit = 1ull << ((function * 0x9E3779B1u) >> 26);
-    if (__builtin_expect(!(g_assists_hook_mask.load(std::memory_order_relaxed) & bit), 1))
-        return 0;
-    return assists_pre_slow(self, function, locals, result);
+    uint32_t i = (function * 0x9E3779B1u) >> 24;
+    for (;;) {
+        const uint64_t h = g_assists_hooks[i].load(std::memory_order_acquire);
+        if (__builtin_expect(!h, 1))
+            return 0;
+        if (__builtin_expect((uint32_t)(h >> 32) == function, 0))
+            return assists_pre_hook((uint32_t)h, self, function, locals, result);
+        i = (i + 1u) & 255u;
+    }
 }
 
 static inline void assists_post(uint32_t token, uint32_t self, uint32_t function, uint32_t locals, uint32_t result)

@@ -283,6 +283,7 @@
 {"BCGame.BCCamMode_LockOn.CalcCameraOrigin", 522, Mode::Lerp, 0},
 {"BCGame.BCCamMode_LockOn.CalcCameraOrigin", 794, Mode::Lerp, 0},
 {"BCGame.BCCamMode_LockOn.CalcCameraOrigin", 1856, Mode::Lerp, 0},
+{"BCGame.BCCamMode_LockOn.CalcCameraOrigin", 1885, Mode::Add, 0},
 {"BCGame.BCCamMode_LockOn.CalcCameraOrigin", 2712, Mode::Lerp, 0},
 {"BCGame.BCCamMode_LockOn.GetDesiredFOV", 79, Mode::Lerp, 0},
 {"BCGame.BCCamMode_PDE2DBattle.CalcCameraOrigin", 1228, Mode::Lerp, 0},

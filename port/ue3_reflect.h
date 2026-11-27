@@ -18,11 +18,6 @@ constexpr uint32_t k_property_element = 0x44;
 constexpr uint32_t k_property_offset = 0x54;
 constexpr uint32_t k_property_detail = 0x64;
 
-inline constexpr uint64_t hook_bit(uint32_t fn)
-{
-    return 1ull << ((fn * 0x9E3779B1u) >> 26);
-}
-
 inline bool object_name_eq(uint32_t object, const char* want)
 {
     if (vm_read32(object + k_object_name + 4)) return false;

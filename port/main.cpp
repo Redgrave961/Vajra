@@ -46,13 +46,14 @@ extern uint32_t ppu_vm_size;
 extern const char* ppu_vfs_root;
 extern uint32_t g_last_hle_nid;
 extern const char* g_last_hle_name;
-extern const char* g_hle_inflight[];
+extern const char* ppu_hle_inflight_name(unsigned tid);
 extern int g_sys_process_exit_called;
 extern int32_t g_sys_process_exit_code;
 
 uint32_t ppu_load_elf(const char* path);
 uint32_t ppu_load_elf_image(const uint8_t* file, uint64_t size);
 void ppu_recomp_register(void);
+void ppu_exec_enable_wrapped(void);
 void ps3_load_prx_modules(void);
 void ppu_hle_init(void);
 void ppu_sysprx_register(void);
@@ -361,7 +362,7 @@ void debug_console(const char* path)
                          rsx_core_frames_presented(), g_last_hle_nid, g_last_hle_name ? g_last_hle_name : "");
         } else if (!std::strcmp(cmd, "threads")) {
             for (unsigned t = 0; t < 64u; t++)
-                if (g_hle_inflight[t]) std::fprintf(o, "  guest tid %u in %s\n", t, g_hle_inflight[t]);
+                if (const char* name = ppu_hle_inflight_name(t)) std::fprintf(o, "  guest tid %u in %s\n", t, name);
             std::fclose(o);
             o = nullptr;
             ppu_report_guest_lrs();
@@ -646,6 +647,7 @@ int main(int argc, char** argv)
     use_button_prompts();
 
     ppu_recomp_register();
+    ppu_exec_enable_wrapped();
     ps3_load_prx_modules();
     ppu_hle_init();
     ppu_sysprx_register();

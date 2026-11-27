@@ -62,6 +62,7 @@ constexpr Shape k_post_increment = {1, true, true, false};
 
 std::atomic<uint64_t> g_keys[1u << k_slot_bits];
 std::atomic<uint64_t> g_owners[1u << k_slot_bits];
+std::atomic<uint64_t> g_code_bloom[32]{};
 std::atomic<uint32_t> g_version{0};
 std::mutex g_writer;
 uint32_t g_site_code[std::size(k_sites)];
@@ -139,22 +140,28 @@ uint32_t home(uint32_t code)
 
 const Site* lookup(uint32_t stack)
 {
-    const uint32_t code = vm_read32(stack + 0x18);
+    const uint32_t code = vm_ld32(vm_base + stack + 0x18u);
+    const uint32_t bh = code * 0x9E3779B1u;
+    if (__builtin_expect(
+            !((g_code_bloom[bh >> 27].load(std::memory_order_acquire) >> ((bh >> 21) & 63u)) &
+              (g_code_bloom[(bh >> 16) & 31u].load(std::memory_order_acquire) >> ((bh >> 10) & 63u)) & 1ull), 1))
+        return nullptr;
     for (;;) {
         const uint32_t version = g_version.load(std::memory_order_acquire);
+        if (version & 1) continue;
         const Site* found = nullptr;
         for (uint32_t i = home(code); const uint64_t key = g_keys[i].load(std::memory_order_relaxed); i = (i + 1) & k_slot_mask) {
             if ((uint32_t)(key >> 32) != code)
                 continue;
             const uint64_t owner = g_owners[i].load(std::memory_order_relaxed);
-            const uint32_t node = vm_read32(stack + 0x10);
-            if ((uint32_t)(owner >> 32) == node && vm_read32(node + 0x4C) == (uint32_t)owner) {
+            const uint32_t node = vm_ld32(vm_base + stack + 0x10u);
+            if ((uint32_t)(owner >> 32) == node && vm_ld32(vm_base + node + 0x4Cu) == (uint32_t)owner) {
                 found = &k_sites[(uint32_t)key];
                 break;
             }
         }
         std::atomic_thread_fence(std::memory_order_acquire);
-        if (!(version & 1) && g_version.load(std::memory_order_relaxed) == version)
+        if (g_version.load(std::memory_order_relaxed) == version)
             return found;
     }
 }
@@ -191,6 +198,9 @@ void enroll(const Site* first, const Site* last, uint32_t function)
         g_owners[i].store((uint64_t)function << 32 | data, std::memory_order_relaxed);
         g_keys[i].store((uint64_t)code << 32 | index, std::memory_order_relaxed);
         g_site_code[index] = code;
+        const uint32_t bh = code * 0x9E3779B1u;
+        g_code_bloom[bh >> 27].fetch_or(1ull << ((bh >> 21) & 63u), std::memory_order_release);
+        g_code_bloom[(bh >> 16) & 31u].fetch_or(1ull << ((bh >> 10) & 63u), std::memory_order_release);
     }
     g_version.store(version + 2, std::memory_order_release);
 }
@@ -340,6 +350,7 @@ void compound(void (*body)(ppu_context*), ppu_context* ctx, const Shape& shape)
     }
     const uint64_t key = (uint64_t)vm_read32(stack + 0x14) << 32 | (uint32_t)(site - k_sites) << 2;
     const uint32_t new_at = shape.returns_new ? (uint32_t)result : lvalue;
+    if (!new_at) return;
     for (uint32_t i = 0; i < shape.count; ++i) {
         const uint32_t after = vm_read32(new_at + 4 * i);
         const uint32_t value = shape.integer
@@ -782,7 +793,7 @@ void func_00934904(ppu_context* ctx)
 {
     const uint32_t rate = (uint32_t)ctx->gpr[3] + 0xB28;
     const uint32_t original = vm_read32(rate);
-    write_f32(rate, corrected_alpha(Mode::Lerp, read_f32(rate), tick_scale()));
+    write_f32(rate, corrected_alpha(Mode::Lerp, from_bits(original), tick_scale()));
     run(func_00934904_lifted, ctx);
     vm_write32(rate, original);
 }

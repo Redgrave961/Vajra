@@ -24,10 +24,6 @@ inline void call_vfn_toc_mm(ppu_context* ctx, const ppu_mm& m, uint32_t obj_ea, 
     ctx->gpr[2] = 0x019AF8F8ULL;
 }
 
-inline void call_vfn_toc(ppu_context* ctx, uint32_t obj_ea, uint32_t vtbl_off, uint32_t lr_val) {
-    call_vfn_toc_mm(ctx, ppu_mm_take(), obj_ea, vtbl_off, lr_val);
-}
-
 inline void copy_bytes_mm(const ppu_mm& m, uint32_t dst, uint32_t src, uint32_t n) {
     if (__builtin_expect(vm_mm_ok(&m, src, n) && plain_store(m, dst, n), 1)) {
         std::memcpy(m.vb + dst, m.vb + src, n);
@@ -692,22 +688,16 @@ void func_00392F08(ppu_context* ctx) {
     GuestFrame frame(ctx, 0x13F0);
     const uint32_t sp = frame.base;
     const uint32_t hits_ea = sp + 0x7C;
-
-    std::memset(vm_base + hits_ea, 0, 64u * 0x4Cu);
-    for (uint32_t i = 0; i < 64u; ++i) {
-        uint8_t* p = vm_base + hits_ea + i * 0x4Cu;
-        const uint32_t neg1 = 0xFFFFFFFFu;
-        std::memcpy(p + 0x24, &neg1, 4);
-        std::memcpy(p + 0x44, &neg1, 4);
-    }
+    const ppu_mm m = ppu_mm_take();
 
     int32_t num_hits = 0;
     float best_time = 1.0f;
-    wr_f32(sp + 0x70, rd_f32(end_ea + 0x0));
-    wr_f32(sp + 0x74, rd_f32(end_ea + 0x4));
-    wr_f32(sp + 0x78, rd_f32(end_ea + 0x8));
+    wr_f32_mm(m, sp + 0x70, rd_f32_mm(m, end_ea + 0x0));
+    wr_f32_mm(m, sp + 0x74, rd_f32_mm(m, end_ea + 0x4));
+    wr_f32_mm(m, sp + 0x78, rd_f32_mm(m, end_ea + 0x8));
 
     if ((trace_flg & 0x4u) != 0) {
+        init_check_result(m.vb + hits_ea);
         ctx->gpr[3] = world;
         ctx->gpr[4] = hits_ea;
         ctx->gpr[5] = 0;
@@ -722,26 +712,26 @@ void func_00392F08(ppu_context* ctx) {
             ctx->gpr[4] = 0;
             ctx->lr = 0x0039333C;
             run(func_00582F38, ctx);
-            vm_write32(sp + 0x80, (uint32_t)ctx->gpr[3]);
+            fast_w32(m, sp + 0x80, (uint32_t)ctx->gpr[3]);
 
-            const float sx = rd_f32(start_ea + 0x0);
-            const float sy = rd_f32(start_ea + 0x4);
-            const float sz = rd_f32(start_ea + 0x8);
-            const float dx = rd_f32(sp + 0x84) - sx;
-            const float dy = rd_f32(sp + 0x88) - sy;
-            const float dz = rd_f32(sp + 0x8C) - sz;
+            const float sx = rd_f32_mm(m, start_ea + 0x0);
+            const float sy = rd_f32_mm(m, start_ea + 0x4);
+            const float sz = rd_f32_mm(m, start_ea + 0x8);
+            const float dx = rd_f32_mm(m, sp + 0x84) - sx;
+            const float dy = rd_f32_mm(m, sp + 0x88) - sy;
+            const float dz = rd_f32_mm(m, sp + 0x8C) - sz;
             const float dist = sqrtf(dx * dx + dy * dy + dz * dz);
-            const float hit_t = rd_f32(sp + 0x9C);
+            const float hit_t = rd_f32_mm(m, sp + 0x9C);
             const float scaled_t = (hit_t * (dist + 5.0f)) / (dist + 9.999999747378752e-05f);
             if (best_time - scaled_t >= 0.0f)
                 best_time = scaled_t;
 
-            const float ex = rd_f32(end_ea + 0x0) - sx;
-            const float ey = rd_f32(end_ea + 0x4) - sy;
-            const float ez = rd_f32(end_ea + 0x8) - sz;
-            wr_f32(sp + 0x70, best_time * ex + sx);
-            wr_f32(sp + 0x74, best_time * ey + sy);
-            wr_f32(sp + 0x78, best_time * ez + sz);
+            const float ex = rd_f32_mm(m, end_ea + 0x0) - sx;
+            const float ey = rd_f32_mm(m, end_ea + 0x4) - sy;
+            const float ez = rd_f32_mm(m, end_ea + 0x8) - sz;
+            wr_f32_mm(m, sp + 0x70, best_time * ex + sx);
+            wr_f32_mm(m, sp + 0x74, best_time * ey + sy);
+            wr_f32_mm(m, sp + 0x78, best_time * ez + sz);
             num_hits = 1;
         }
     }
@@ -749,10 +739,10 @@ void func_00392F08(ppu_context* ctx) {
     const bool skip_hash = ((double)best_time <= 1e-8) ||
                            (num_hits != 0 && (trace_flg & 0x200u) != 0);
     if (!skip_hash && (trace_flg & 0x209Bu) != 0) {
-        const uint32_t hash = vm_read32(world + 0x128);
+        const uint32_t hash = fast32(m, world + 0x128);
         if (hash != 0) {
-            const uint32_t vtbl = vm_read32(hash);
-            const uint32_t opd  = vm_read32(vtbl + 0x14);
+            const uint32_t vtbl = fast32(m, hash);
+            const uint32_t opd  = fast32(m, vtbl + 0x14);
             ctx->gpr[3]  = hash;
             ctx->gpr[4]  = mem_stack;
             ctx->gpr[5]  = sp + 0x70;
@@ -766,11 +756,11 @@ void func_00392F08(ppu_context* ctx) {
 
             uint32_t node = (uint32_t)ctx->gpr[3];
             while (node != 0 && (uint32_t)num_hits < 64u) {
-                const float t = rd_f32(node + 0x20) * best_time;
-                wr_f32(node + 0x20, t);
-                std::memcpy(vm_base + hits_ea + (uint32_t)num_hits * 0x4Cu, vm_base + node, 0x4C);
+                const float t = rd_f32_mm(m, node + 0x20) * best_time;
+                wr_f32_mm(m, node + 0x20, t);
+                std::memcpy(m.vb + hits_ea + (uint32_t)num_hits * 0x4Cu, m.vb + node, 0x4C);
                 num_hits++;
-                node = vm_read32(node);
+                node = fast32(m, node);
             }
         }
     }
@@ -780,41 +770,36 @@ void func_00392F08(ppu_context* ctx) {
         return;
     }
 
-    ctx->gpr[3] = hits_ea;
-    ctx->gpr[4] = (uint32_t)num_hits;
-    ctx->gpr[5] = 0x4C;
-    ctx->gpr[6] = 0x01973610u;
-    ctx->lr = 0x00393054;
-    run(func_0002BAE0, ctx);
+    if (num_hits > 1) {
+        ctx->gpr[3] = hits_ea;
+        ctx->gpr[4] = (uint32_t)num_hits;
+        ctx->gpr[5] = 0x4C;
+        ctx->gpr[6] = 0x01973610u;
+        ctx->lr = 0x00393054;
+        run(func_0002BAE0, ctx);
+    }
 
     const uint32_t total_bytes = (uint32_t)num_hits * 0x4Cu;
-    uint32_t top = (vm_read32(mem_stack + 0x0) + 7u) & ~7u;
-    uint32_t end = vm_read32(mem_stack + 0x4);
+    uint32_t top = (fast32(m, mem_stack + 0x0) + 7u) & ~7u;
+    uint32_t end = fast32(m, mem_stack + 0x4);
     uint32_t next_top = top + total_bytes;
     if (next_top > end) {
         ctx->gpr[3] = mem_stack;
         ctx->gpr[4] = (int64_t)(int32_t)(total_bytes + 8u);
         ctx->lr = 0x00393098;
         run(func_000B902C, ctx);
-        top = (vm_read32(mem_stack + 0x0) + 7u) & ~7u;
+        top = (fast32(m, mem_stack + 0x0) + 7u) & ~7u;
         next_top = top + total_bytes;
     }
-    vm_write32(mem_stack + 0x0, next_top);
+    fast_w32(m, mem_stack + 0x0, next_top);
 
-    uint32_t out_head = 0;
-    if (top != 0) {
-        init_check_result(vm_base + top);
-        out_head = top;
-    }
-
-    if (num_hits > 0) {
-        uint32_t dst = out_head;
-        for (int32_t i = 0; i < num_hits; ++i) {
-            std::memcpy(vm_base + dst, vm_base + hits_ea + (uint32_t)i * 0x4Cu, 0x4C);
-            const uint32_t next_ptr = (i + 1 < num_hits) ? (dst + 0x4Cu) : 0u;
-            vm_write32(dst, next_ptr);
-            dst += 0x4Cu;
-        }
+    uint32_t out_head = top;
+    uint32_t dst = out_head;
+    for (int32_t i = 0; i < num_hits; ++i) {
+        std::memcpy(m.vb + dst, m.vb + hits_ea + (uint32_t)i * 0x4Cu, 0x4C);
+        const uint32_t next_ptr = (i + 1 < num_hits) ? (dst + 0x4Cu) : 0u;
+        fast_w32(m, dst, next_ptr);
+        dst += 0x4Cu;
     }
 
     ctx->gpr[3] = out_head;
@@ -827,42 +812,44 @@ void func_005CCB00(ppu_context* ctx) {
 
     GuestFrame frame(ctx, 0x1F0);
     const uint32_t sp = frame.base;
+    const ppu_mm m = ppu_mm_take();
 
-    float sx = rd_f32(skel_comp + 0x1BC) * rd_f32(skel_comp + 0x1B8);
-    float sy = rd_f32(skel_comp + 0x1C0) * rd_f32(skel_comp + 0x1B8);
-    float sz = rd_f32(skel_comp + 0x1C4) * rd_f32(skel_comp + 0x1B8);
+    const float sc_scale = rd_f32_mm(m, skel_comp + 0x1B8);
+    float sx = rd_f32_mm(m, skel_comp + 0x1BC) * sc_scale;
+    float sy = rd_f32_mm(m, skel_comp + 0x1C0) * sc_scale;
+    float sz = rd_f32_mm(m, skel_comp + 0x1C4) * sc_scale;
 
-    const uint32_t owner = vm_read32(skel_comp + 0x4C);
+    const uint32_t owner = fast32(m, skel_comp + 0x4C);
     if (owner != 0) {
-        const float os = rd_f32(owner + 0x6C);
-        sx *= rd_f32(owner + 0x70) * os;
-        sy *= rd_f32(owner + 0x74) * os;
-        sz *= rd_f32(owner + 0x78) * os;
+        const float os = rd_f32_mm(m, owner + 0x6C);
+        sx *= rd_f32_mm(m, owner + 0x70) * os;
+        sy *= rd_f32_mm(m, owner + 0x74) * os;
+        sz *= rd_f32_mm(m, owner + 0x78) * os;
     }
-    wr_f32(sp + 0xB0, sx);
-    wr_f32(sp + 0xB4, sy);
-    wr_f32(sp + 0xB8, sz);
+    wr_f32_mm(m, sp + 0xB0, sx);
+    wr_f32_mm(m, sp + 0xB4, sy);
+    wr_f32_mm(m, sp + 0xB8, sz);
 
-    const float eps        = rd_f32(0x005CCAECu);
-    const float min_len_sq = rd_f32(0x005CCAF0u);
-    const float one_val    = rd_f32(0x005CCAF4u);
+    const float eps        = rd_f32_mm(m, 0x005CCAECu);
+    const float min_len_sq = rd_f32_mm(m, 0x005CCAF0u);
+    const float one_val    = rd_f32_mm(m, 0x005CCAF4u);
 
     float bmin_x = 0.0f, bmin_y = 0.0f, bmin_z = 0.0f;
     float bmax_x = 0.0f, bmax_y = 0.0f, bmax_z = 0.0f;
     uint8_t bvalid = 0;
 
     if (fabsf(sx - sy) < eps && fabsf(sy - sz) < eps) {
-        const bool all_bodies = ((vm_read32(skel_comp + 0x3A8) >> 27) & 1u) != 0;
-        const int32_t count = all_bodies ? (int32_t)vm_read32(phys_asset + 0x40)
-                                         : (int32_t)vm_read32(phys_asset + 0x88);
-        const uint32_t idx_arr  = all_bodies ? 0u : vm_read32(phys_asset + 0x84);
-        const uint32_t body_arr = vm_read32(phys_asset + 0x3C);
+        const bool all_bodies = ((fast32(m, skel_comp + 0x3A8) >> 27) & 1u) != 0;
+        const int32_t count = all_bodies ? (int32_t)fast32(m, phys_asset + 0x40)
+                                         : (int32_t)fast32(m, phys_asset + 0x88);
+        const uint32_t idx_arr  = all_bodies ? 0u : fast32(m, phys_asset + 0x84);
+        const uint32_t body_arr = fast32(m, phys_asset + 0x3C);
 
         for (int32_t i = 0; i < count; ++i) {
-            const uint32_t body_idx = all_bodies ? (uint32_t)i : vm_read32(idx_arr + (uint32_t)i * 4u);
-            const uint32_t body = vm_read32(body_arr + body_idx * 4u);
+            const uint32_t body_idx = all_bodies ? (uint32_t)i : fast32(m, idx_arr + (uint32_t)i * 4u);
+            const uint32_t body = fast32(m, body_arr + body_idx * 4u);
 
-            const uint64_t fname = ((uint64_t)vm_read32(body + 0x84) << 32) | vm_read32(body + 0x88);
+            const uint64_t fname = ((uint64_t)fast32(m, body + 0x84) << 32) | fast32(m, body + 0x88);
             ctx->gpr[3] = skel_comp;
             ctx->gpr[4] = fname;
             ctx->lr = 0x005CCDC0;
@@ -876,9 +863,9 @@ void func_005CCB00(ppu_context* ctx) {
             ctx->lr = 0x005CCDD8;
             run(func_00529DC0, ctx);
 
-            float m00 = rd_f32(sp + 0x70), m01 = rd_f32(sp + 0x74), m02 = rd_f32(sp + 0x78);
-            float m10 = rd_f32(sp + 0x80), m11 = rd_f32(sp + 0x84), m12 = rd_f32(sp + 0x88);
-            float m20 = rd_f32(sp + 0x90), m21 = rd_f32(sp + 0x94), m22 = rd_f32(sp + 0x98);
+            float m00 = rd_f32_mm(m, sp + 0x70), m01 = rd_f32_mm(m, sp + 0x74), m02 = rd_f32_mm(m, sp + 0x78);
+            float m10 = rd_f32_mm(m, sp + 0x80), m11 = rd_f32_mm(m, sp + 0x84), m12 = rd_f32_mm(m, sp + 0x88);
+            float m20 = rd_f32_mm(m, sp + 0x90), m21 = rd_f32_mm(m, sp + 0x94), m22 = rd_f32_mm(m, sp + 0x98);
 
             const float c0 = m11 * m22 - m12 * m21;
             const float c1 = m01 * m22 - m02 * m21;
@@ -894,9 +881,9 @@ void func_005CCB00(ppu_context* ctx) {
             const float s1 = (l1 >= min_len_sq) ? (1.0f / sqrtf(l1)) : one_val;
             const float s2 = (l2 >= min_len_sq) ? (1.0f / sqrtf(l2)) : one_val;
 
-            wr_f32(sp + 0x70, m00 * s0); wr_f32(sp + 0x74, m01 * s0); wr_f32(sp + 0x78, m02 * s0);
-            wr_f32(sp + 0x80, m10 * s1); wr_f32(sp + 0x84, m11 * s1); wr_f32(sp + 0x88, m12 * s1);
-            wr_f32(sp + 0x90, m20 * s2); wr_f32(sp + 0x94, m21 * s2); wr_f32(sp + 0x98, m22 * s2);
+            wr_f32_mm(m, sp + 0x70, m00 * s0); wr_f32_mm(m, sp + 0x74, m01 * s0); wr_f32_mm(m, sp + 0x78, m02 * s0);
+            wr_f32_mm(m, sp + 0x80, m10 * s1); wr_f32_mm(m, sp + 0x84, m11 * s1); wr_f32_mm(m, sp + 0x88, m12 * s1);
+            wr_f32_mm(m, sp + 0x90, m20 * s2); wr_f32_mm(m, sp + 0x94, m21 * s2); wr_f32_mm(m, sp + 0x98, m22 * s2);
 
             ctx->gpr[3] = sp + 0x100;
             ctx->gpr[4] = body + 0x48;
@@ -905,12 +892,12 @@ void func_005CCB00(ppu_context* ctx) {
             ctx->lr = 0x005CCF74;
             run(func_005B9480, ctx);
 
-            const uint8_t nv = vm_read8(sp + 0x118);
+            const uint8_t nv = vm_read8_mm(&m, sp + 0x118);
             if (!nv)
                 continue;
 
-            const float nx0 = rd_f32(sp + 0x100), ny0 = rd_f32(sp + 0x104), nz0 = rd_f32(sp + 0x108);
-            const float nx1 = rd_f32(sp + 0x10C), ny1 = rd_f32(sp + 0x110), nz1 = rd_f32(sp + 0x114);
+            const float nx0 = rd_f32_mm(m, sp + 0x100), ny0 = rd_f32_mm(m, sp + 0x104), nz0 = rd_f32_mm(m, sp + 0x108);
+            const float nx1 = rd_f32_mm(m, sp + 0x10C), ny1 = rd_f32_mm(m, sp + 0x110), nz1 = rd_f32_mm(m, sp + 0x114);
             if (!bvalid) {
                 bmin_x = nx0; bmin_y = ny0; bmin_z = nz0;
                 bmax_x = nx1; bmax_y = ny1; bmax_z = nz1;
@@ -927,19 +914,19 @@ void func_005CCB00(ppu_context* ctx) {
     }
 
     if (!bvalid) {
-        bmin_x = bmax_x = rd_f32(skel_comp + 0xC0);
-        bmin_y = bmax_y = rd_f32(skel_comp + 0xC4);
-        bmin_z = bmax_z = rd_f32(skel_comp + 0xC8);
+        bmin_x = bmax_x = rd_f32_mm(m, skel_comp + 0xC0);
+        bmin_y = bmax_y = rd_f32_mm(m, skel_comp + 0xC4);
+        bmin_z = bmax_z = rd_f32_mm(m, skel_comp + 0xC8);
         bvalid = 1;
     }
 
-    wr_f32(out_box + 0x00, bmin_x);
-    wr_f32(out_box + 0x04, bmin_y);
-    wr_f32(out_box + 0x08, bmin_z);
-    wr_f32(out_box + 0x0C, bmax_x);
-    wr_f32(out_box + 0x10, bmax_y);
-    wr_f32(out_box + 0x14, bmax_z);
-    vm_write32(out_box + 0x18, (uint32_t)bvalid << 24);
+    wr_f32_mm(m, out_box + 0x00, bmin_x);
+    wr_f32_mm(m, out_box + 0x04, bmin_y);
+    wr_f32_mm(m, out_box + 0x08, bmin_z);
+    wr_f32_mm(m, out_box + 0x0C, bmax_x);
+    wr_f32_mm(m, out_box + 0x10, bmax_y);
+    wr_f32_mm(m, out_box + 0x14, bmax_z);
+    fast_w32(m, out_box + 0x18, (uint32_t)bvalid << 24);
 }
 
 namespace {
@@ -1028,22 +1015,22 @@ void func_00AD0C68(ppu_context* ctx) {
     }
 
     {
-        const uint32_t beg = vm_read32(scene + 0x2E4);
-        const uint32_t end = vm_read32(scene + 0x2E8);
+        const uint32_t beg = fast32(m, scene + 0x2E4);
+        const uint32_t end = fast32(m, scene + 0x2E8);
         if ((uint32_t)((end - beg) + 3u) > 6u) {
             uint32_t idx = 0;
             for (;;) {
-                const uint32_t cur_beg = vm_read32(scene + 0x2E4);
-                const uint32_t cur_end = vm_read32(scene + 0x2E8);
+                const uint32_t cur_beg = fast32(m, scene + 0x2E4);
+                const uint32_t cur_end = fast32(m, scene + 0x2E8);
                 const uint32_t n = (uint32_t)((int32_t)(cur_end - cur_beg) >> 2);
                 if (idx >= n) break;
-                const uint32_t node = vm_read32(cur_beg + idx * 4u);
-                const uint32_t body = vm_read32(node + 0x20);
+                const uint32_t node = fast32(m, cur_beg + idx * 4u);
+                const uint32_t body = fast32(m, node + 0x20);
                 idx++;
-                if (vm_read8(body + 0x54) != 0) continue;
+                if (vm_read8_mm(&m, body + 0x54) != 0) continue;
 
-                std::memset(vm_base + sp + 0x74, 0, 0x18);
-                ctx->gpr[3] = vm_read32(body + 0xE8);
+                std::memset(m.vb + sp + 0x74, 0, 0x18);
+                ctx->gpr[3] = fast32(m, body + 0xE8);
                 ctx->gpr[4] = 2;
                 ctx->gpr[5] = sp + 0x74;
                 ctx->gpr[6] = 0x18;
@@ -1054,7 +1041,7 @@ void func_00AD0C68(ppu_context* ctx) {
         }
     }
 
-    const uint32_t sub150 = vm_read32(scene + 0x150);
+    const uint32_t sub150 = fast32(m, scene + 0x150);
     if (sub150 != 0) {
         ctx->gpr[3] = sub150;
         ctx->lr = 0x00AD107C;
@@ -1062,23 +1049,23 @@ void func_00AD0C68(ppu_context* ctx) {
     }
 
     {
-        const uint32_t beg = vm_read32(scene + 0xFC);
-        const uint32_t end = vm_read32(scene + 0x100);
+        const uint32_t beg = fast32(m, scene + 0xFC);
+        const uint32_t end = fast32(m, scene + 0x100);
         if ((uint32_t)((end - beg) + 3u) > 6u) {
             uint32_t idx = 0;
             for (;;) {
-                const uint32_t cur_beg = vm_read32(scene + 0xFC);
-                const uint32_t cur_end = vm_read32(scene + 0x100);
+                const uint32_t cur_beg = fast32(m, scene + 0xFC);
+                const uint32_t cur_end = fast32(m, scene + 0x100);
                 const uint32_t n = (uint32_t)((int32_t)(cur_end - cur_beg) >> 2);
                 if (idx >= n) break;
-                vm_write32(sp + 0x70, 0);
-                ctx->gpr[3] = vm_read32(cur_beg + idx * 4u);
+                fast_w32(m, sp + 0x70, 0);
+                ctx->gpr[3] = fast32(m, cur_beg + idx * 4u);
                 ctx->gpr[4] = sp + 0x70;
                 ctx->lr = (err_ea == 0) ? 0x00AD10D4 : 0x00AD14A8;
                 run(func_00AA6870, ctx);
-                if (err_ea != 0 && vm_read32(err_ea) == 0) {
-                    const uint32_t e = vm_read32(sp + 0x70);
-                    if (e != 0) vm_write32(err_ea, e);
+                if (err_ea != 0 && fast32(m, err_ea) == 0) {
+                    const uint32_t e = fast32(m, sp + 0x70);
+                    if (e != 0) fast_w32(m, err_ea, e);
                 }
                 idx++;
             }
@@ -1086,36 +1073,36 @@ void func_00AD0C68(ppu_context* ctx) {
     }
 
     {
-        uint32_t count = vm_read32(scene + 0x18);
-        const uint32_t arr = vm_read32(scene + 0x1C);
+        uint32_t count = fast32(m, scene + 0x18);
+        const uint32_t arr = fast32(m, scene + 0x1C);
         uint32_t i = 0;
         while (i < count) {
-            const uint32_t body = vm_read32(arr + i * 4u);
+            const uint32_t body = fast32(m, arr + i * 4u);
             const uint32_t b104 = body + 0x104u;
-            const uint16_t slot = vm_read16(b104 + 0x20);
+            const uint16_t slot = vm_read16_mm(&m, b104 + 0x20);
             if (slot != 0xFFFFu) {
-                const uint32_t f8 = vm_read32(b104 + 0x8) & ~0x2u;
-                vm_write32(b104 + 0x8, f8);
-                const uint32_t idx8 = vm_read8(b104 + 0x23);
-                const uint32_t mgr = vm_read32(scene + 0x160u + idx8 * 4u + 4u);
+                const uint32_t f8 = fast32(m, b104 + 0x8) & ~0x2u;
+                fast_w32(m, b104 + 0x8, f8);
+                const uint32_t idx8 = vm_read8_mm(&m, b104 + 0x23);
+                const uint32_t mgr = fast32(m, scene + 0x160u + idx8 * 4u + 4u);
                 ctx->gpr[3] = mgr;
                 ctx->gpr[4] = b104;
-                call_vfn_toc(ctx, mgr, 0x14, 0x00AD1208);
+                call_vfn_toc_mm(ctx, m, mgr, 0x14, 0x00AD1208);
 
-                const uint16_t slot2 = vm_read16(b104 + 0x20);
+                const uint16_t slot2 = vm_read16_mm(&m, b104 + 0x20);
                 if (slot2 != 0xFFFFu) {
-                    const uint32_t f8b = vm_read32(b104 + 0x8);
+                    const uint32_t f8b = fast32(m, b104 + 0x8);
                     if ((f8b & 0x2u) == 0) {
-                        vm_write32(b104 + 0x8, f8b | 0x2u);
-                        const uint32_t cb_ptr = vm_read32((uint32_t)(0x019AF8F8u - 0x5194u));
-                        const uint32_t cb_opd = vm_read32(cb_ptr);
+                        fast_w32(m, b104 + 0x8, f8b | 0x2u);
+                        const uint32_t cb_ptr = fast32(m, (uint32_t)(0x019AF8F8u - 0x5194u));
+                        const uint32_t cb_opd = fast32(m, cb_ptr);
                         if (cb_opd != 0) {
-                            const uint32_t b18 = vm_read32(b104 + 0x18);
-                            const uint32_t base10 = vm_read32(b18 + 0x10);
-                            ctx->gpr[3] = vm_read32(b104 + 0x4);
+                            const uint32_t b18 = fast32(m, b104 + 0x18);
+                            const uint32_t base10 = fast32(m, b18 + 0x10);
+                            ctx->gpr[3] = fast32(m, b104 + 0x4);
                             ctx->gpr[4] = base10 + (uint32_t)slot2 * 24u;
-                            ctx->ctr    = vm_read32(cb_opd);
-                            ctx->gpr[2] = vm_read32(cb_opd + 4);
+                            ctx->ctr    = fast32(m, cb_opd);
+                            ctx->gpr[2] = fast32(m, cb_opd + 4);
                             ctx->lr     = 0x00AD127C;
                             guest_icall(ctx);
                             ctx->gpr[2] = 0x019AF8F8ULL;
@@ -1124,16 +1111,16 @@ void func_00AD0C68(ppu_context* ctx) {
                 }
             }
 
-            const uint32_t f14c = vm_read32(body + 0x14C);
+            const uint32_t f14c = fast32(m, body + 0x14C);
             const bool keep = (f14c & 0x4u) != 0;
-            vm_write32(body + 0x14C, f14c & ~0x8u);
+            fast_w32(m, body + 0x14C, f14c & ~0x8u);
             if (!keep) {
                 count--;
-                const uint32_t new_n = vm_read32(scene + 0x18) - 1u;
-                const uint32_t cur_arr = vm_read32(scene + 0x1C);
-                vm_write32(scene + 0x18, new_n);
-                vm_write32(cur_arr + i * 4u, vm_read32(cur_arr + new_n * 4u));
-                vm_write32(body + 0x14C, vm_read32(body + 0x14C) & ~0x2u);
+                const uint32_t new_n = fast32(m, scene + 0x18) - 1u;
+                const uint32_t cur_arr = fast32(m, scene + 0x1C);
+                fast_w32(m, scene + 0x18, new_n);
+                fast_w32(m, cur_arr + i * 4u, fast32(m, cur_arr + new_n * 4u));
+                fast_w32(m, body + 0x14C, fast32(m, body + 0x14C) & ~0x2u);
             } else {
                 i++;
             }
@@ -1145,9 +1132,9 @@ void func_00AD0C68(ppu_context* ctx) {
     run(func_00BA2CB8, ctx);
 
     {
-        uint32_t p = vm_read32(scene + 0xB0);
-        while (p != vm_read32(scene + 0xB4)) {
-            ctx->gpr[3] = vm_read32(p);
+        uint32_t p = fast32(m, scene + 0xB0);
+        while (p != fast32(m, scene + 0xB4)) {
+            ctx->gpr[3] = fast32(m, p);
             p += 4u;
             ctx->lr = 0x00AD12E8;
             run(func_00BE77F4, ctx);
@@ -1349,51 +1336,51 @@ void func_00B49908(ppu_context* ctx) {
     wr_f32_mm(m, body + 0x128, rd_f32_mm(m, body + 0xB4) - ry);
     wr_f32_mm(m, body + 0x12C, rd_f32_mm(m, body + 0xB8) - rz);
 
-    const uint32_t f14c = vm_read32_mm(&m, body + 0x14C);
-    vm_write32_mm(&m, body + 0x140, vm_read32_mm(&m, body + 0x140) + 1u);
+    const uint32_t f14c = fast32(m, body + 0x14C);
+    fast_w32(m, body + 0x140, fast32(m, body + 0x140) + 1u);
 
-    const uint32_t beg = vm_read32_mm(&m, body + 0x48);
-    const uint32_t end = vm_read32_mm(&m, body + 0x4C);
+    const uint32_t beg = fast32(m, body + 0x48);
+    const uint32_t end = fast32(m, body + 0x4C);
     if (beg == end) return;
 
     const uint64_t saved_lr = ctx->lr;
     if (f14c & 0x2000u) {
         GuestFrame frame(ctx, 0xA0);
         for (uint32_t p = beg; p != end; p += 4u) {
-            const uint32_t s = vm_read32(p);
-            if (vm_read32(s + 8u) != 0u) continue;
+            const uint32_t s = fast32(m, p);
+            if (fast32(m, s + 8u) != 0u) continue;
             const uint32_t obj = s - 4u;
             if (obj == 0u) break;
             ctx->gpr[3] = obj;
-            call_vfn_toc(ctx, obj, 0x1F0u, 0x00B49AD8u);
+            call_vfn_toc_mm(ctx, m, obj, 0x1F0u, 0x00B49AD8u);
         }
         ctx->lr = saved_lr;
         return;
     }
     if (vm_read8_mm(&m, body + 0x54) != 0u) return;
-    uint32_t scene = vm_read32_mm(&m, body + 0x144);
-    const uint32_t b_flag = vm_read32_mm(&m, vm_read32_mm(&m, scene + 0x3B8) + 0xC8);
+    uint32_t scene = fast32(m, body + 0x144);
+    const uint32_t b_flag = fast32(m, fast32(m, scene + 0x3B8) + 0xC8);
     const bool notify_bp = ((b_flag & 1u) != 0u) || ((f14c & 0x80u) != 0u);
     GuestFrame frame(ctx, 0xA0);
     for (uint32_t p = beg; p != end; p += 4u) {
-        const uint32_t s = vm_read32(p);
-        if (vm_read32(s + 8u) != 0u) continue;
+        const uint32_t s = fast32(m, p);
+        if (fast32(m, s + 8u) != 0u) continue;
         const uint32_t obj = s - 4u;
         if (obj == 0u) break;
         if (notify_bp) {
-            ctx->gpr[3] = vm_read32(scene + 0x15C);
+            ctx->gpr[3] = fast32(m, scene + 0x15C);
             ctx->gpr[4] = obj;
             ctx->gpr[5] = 0;
             ctx->lr = 0x00B49C4Cu;
             run(func_00B41078, ctx);
-            scene = vm_read32(body + 0x144);
+            scene = fast32(m, body + 0x144);
         }
         ctx->gpr[3] = scene;
         ctx->gpr[4] = obj;
         ctx->gpr[5] = 0;
         ctx->lr = notify_bp ? 0x00B49C60u : 0x00B49BB0u;
         run(func_00AC6534, ctx);
-        scene = vm_read32(body + 0x144);
+        scene = fast32(m, body + 0x144);
     }
     ctx->lr = saved_lr;
 }

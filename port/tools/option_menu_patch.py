@@ -851,7 +851,99 @@ def prompt_input(g):
     ret(g, result)
 
 
-def start_tags(page, cls, name, params, path, resize, prompt):
+TITLE_SEL_FIRST = 32
+TITLE_SEL_PITCH = 35
+TITLE_SEL_MAX = 5
+
+
+def title_clear_select(g):
+    g.emit(setm(THIS, 'm_pcQuit', False))
+    g.stmt(call(THIS, 'PCOpt_ClearSelect'))
+
+
+def title_ensure_quit(g):
+    sel = get(MENU, 'TitleSelector')
+    n = R(2)
+
+    def layout_select(g):
+        g.stmt(store(n, get(THIS, 'm_items', 'length')))
+        if_(g, less(TITLE_SEL_MAX, n),
+            lambda g: (
+                g.emit(setm(THIS, 'm_addY', TITLE_SEL_PITCH)),
+                g.emit(setm(get(var('_root'), 'mcInst_Main', 'mcInst_Select'), '_y',
+                            div(mul(sub(TITLE_SEL_MAX, n), TITLE_SEL_PITCH), 2))),
+            ),
+            lambda g: (
+                g.emit(setm(THIS, 'm_addY', 0)),
+                if_(g, less(3, n), lambda g: g.emit(setm(get(var('_root'), 'mcInst_Main', 'mcInst_Select'), '_y', 0))),
+            ))
+        g.stmt(call(THIS, 'SetCursor', get(THIS, 'm_cursor')))
+        g.stmt(call(THIS, 'MoveCursor'))
+
+    def add_quit(g):
+        g.emit(setm(THIS, 'm_pcQuit', True))
+        g.stmt(call(THIS, 'AddSelect',
+                    text('Menu.TitleMenu.Exit'), 'PCOpt_Quit', True,
+                    text('Menu.TitleMenu.ExitHelp'), False, '',
+                    'Q', text('Menu.TitleMenu.ExitMsg'), True))
+        if_(g, eq(get(THIS, 'm_state'), get(sel, 'STATE_SELECT')), layout_select)
+
+    if_(g, land(less(0, get(THIS, 'm_items', 'length')), (g_not, get(THIS, 'm_pcQuit'))), add_quit)
+
+
+def title_add_select(g):
+    args = [R(k) for k in range(2, 11)]
+    slot, mc = R(11), R(12)
+    g.stmt(store(slot, add('mcInst_Sel', add(get(THIS, 'm_itemNum'), 1))))
+
+    def create_slot(g):
+        g.stmt(store(mc, call(THIS, 'attachMovie', 'mc_selectItem', slot, call(THIS, 'getNextHighestDepth'))))
+        g.emit(setm(mc, '_x', 0))
+        g.emit(setm(mc, '_y', add(TITLE_SEL_FIRST, mul(get(THIS, 'm_itemNum'), TITLE_SEL_PITCH))))
+
+    if_(g, eq(member(THIS, slot), UNDEFINED), create_slot)
+    if_(g, eq(args[1], 'OnPressExit'), lambda g: (
+        g.stmt(store(args[1], 'PCOpt_Quit')),
+        g.emit(setm(THIS, 'm_pcQuit', True)),
+    ))
+    ret(g, call(THIS, 'PCOpt_AddSelect', *args))
+
+
+def title_change_state(g):
+    state = R(2)
+    sel = get(MENU, 'TitleSelector')
+
+    def on_select(g):
+        g.stmt(call(THIS, 'PCOpt_EnsureQuit'))
+        if_(g, less(TITLE_SEL_MAX, get(THIS, 'm_items', 'length')),
+            lambda g: g.emit(setm(THIS, 'm_addY', TITLE_SEL_PITCH)),
+            lambda g: g.emit(setm(THIS, 'm_addY', 0)))
+
+    if_(g, eq(state, get(sel, 'STATE_SELECT')), on_select)
+    g.stmt(call(THIS, 'PCOpt_ChangeState', state))
+
+
+def title_enter_frame(g):
+    if_(g, eq(get(THIS, 'm_state'), get(MENU, 'TitleSelector', 'STATE_SELECT')),
+        lambda g: g.stmt(call(THIS, 'PCOpt_EnsureQuit')))
+    g.stmt(call(THIS, 'PCOpt_onEnterFrame'))
+
+
+def title_start_extra(g):
+    wrap(g, MENU, 'TitleSelector', 'ClearSelect')
+    method(g, MENU, 'TitleSelector', 'ClearSelect', [], 2, title_clear_select)
+    method(g, MENU, 'TitleSelector', 'PCOpt_EnsureQuit', [], 3, title_ensure_quit)
+    wrap(g, MENU, 'TitleSelector', 'AddSelect')
+    method(g, MENU, 'TitleSelector', 'AddSelect',
+           ['Text', 'selectFunc', 'bEnable', 'helpText', 'bNew', 'LabelName', 'DType', 'DMsg', 'bClose'],
+           13, title_add_select)
+    wrap(g, MENU, 'TitleSelector', 'ChangeState')
+    method(g, MENU, 'TitleSelector', 'ChangeState', ['State'], 3, title_change_state)
+    wrap(g, MENU, 'TitleSelector', 'onEnterFrame')
+    method(g, MENU, 'TitleSelector', 'onEnterFrame', [], 2, title_enter_frame)
+
+
+def start_tags(page, cls, name, params, path, resize, prompt, extra=None):
     def wrapped(g):
         args = [R(k) for k in range(2, 2 + len(params))]
         g.stmt(call(THIS, 'PCOpt_' + name, *args))
@@ -866,15 +958,43 @@ def start_tags(page, cls, name, params, path, resize, prompt):
     if prompt:
         wrap(g, MENU, cls, 'handleInput')
         method(g, MENU, cls, 'handleInput', ['details', 'pathToFocus'], 5, prompt_input)
+    if extra:
+        extra(g)
     return sprite(page, b'') + export((page, 'PCOpt_Start')) + init_action(page, g)
 
 
+def wide_cover_init(g):
+    def widen(g, name):
+        mc = R(2)
+        g.stmt(store(mc, get(var('_root'), name)))
+        if_(g, land(neq(mc, UNDEFINED), less(get(mc, '_xscale'), 200)), lambda g: (
+            g.emit(setm(mc, '_xscale', mul(get(mc, '_xscale'), 4))),
+            g.emit(setm(mc, '_x', add(640, mul(sub(get(mc, '_x'), 640), 4)))),
+        ))
+
+    def tick(g):
+        widen(g, 'mcInst_Fade')
+        widen(g, 'mcInst_LetterBox')
+
+    w = R(2)
+    if_(g, eq(get(var('_root'), '__pcWide'), UNDEFINED), lambda g: (
+        g.stmt(store(w, call(var('_root'), 'createEmptyMovieClip', '__pcWide', 15999))),
+        g.emit(setm(w, 'onEnterFrame', func([], 3, tick))),
+    ))
+
+
+def wide_cover_tags():
+    g = Gen()
+    wide_cover_init(g)
+    return sprite(60000, b'') + export((60000, 'PCOpt_Wide')) + init_action(60000, g)
+
+
 def title_start_tags():
-    return start_tags(71, 'TitleSelector', 'SetStart', ['mc', 'Text', 'FuncName', 'helpText'], ('m_instStart', 'mcInst_Sel1'), True, False)
+    return start_tags(71, 'TitleSelector', 'SetStart', ['mc', 'Text', 'FuncName', 'helpText'], ('m_instStart', 'mcInst_Sel1'), True, False, title_start_extra) + wide_cover_tags()
 
 
 def logo_start_tags():
-    return start_tags(30, 'TitleRogo', 'Init', [], ('m_instText', 'mcInst_Text'), False, True)
+    return start_tags(30, 'TitleRogo', 'Init', [], ('m_instText', 'mcInst_Text'), False, True) + wide_cover_tags()
 
 
 def array(name, data):
@@ -883,8 +1003,11 @@ def array(name, data):
 
 
 def write_inc(path):
-    Path(path).write_text(array('k_title_menu_tags', title_tags()) + '\n' + array('k_pause_menu_tags', pause_tags()) + '\n'
-                          + array('k_start_menu_tags', title_start_tags()) + '\n' + array('k_logo_menu_tags', logo_start_tags()),
+    Path(path).write_text(array('k_title_menu_tags', title_tags() + wide_cover_tags()) + '\n'
+                          + array('k_pause_menu_tags', pause_tags() + wide_cover_tags()) + '\n'
+                          + array('k_start_menu_tags', title_start_tags()) + '\n'
+                          + array('k_logo_menu_tags', logo_start_tags()) + '\n'
+                          + array('k_wide_cover_tags', wide_cover_tags()),
                           encoding='ascii', newline='\n')
 
 

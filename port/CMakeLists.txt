@@ -253,14 +253,16 @@ endif()
 target_compile_options(${PROJECT_NAME} PRIVATE
     -Wall -Wextra -Wno-unused-parameter
     -fno-strict-aliasing
-    -fms-volatile
     -fwrapv
     -ffp-contract=off)
 
 file(SHA256 "${PORT_EBOOT}" PORT_EBOOT_SHA256)
 set_source_files_properties(main.cpp PROPERTIES COMPILE_DEFINITIONS VAJRA_VERSION="${PROJECT_VERSION}")
 set_source_files_properties(game_files.cpp PROPERTIES COMPILE_DEFINITIONS PORT_EBOOT_SHA256="${PORT_EBOOT_SHA256}")
-set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "-w" COMPILE_DEFINITIONS "PPU_FAST_FP")
+set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "-w;-fms-volatile" COMPILE_DEFINITIONS "PPU_FAST_FP")
+set_source_files_properties("${RECOMP_DIR}/ppu_recomp_024.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_002BE2A8=func_002BE2A8_lifted")
+set_source_files_properties("${RECOMP_DIR}/ppu_recomp_060.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_00661DA8=func_00661DA8_lifted;func_00662E70=func_00662E70_lifted")
+set_source_files_properties("${RECOMP_DIR}/ppu_recomp_128.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_00D71F04=func_00D71F04_lifted")
 set_source_files_properties("${RECOMP_DIR}/ppu_recomp_179.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_0136F9A8=func_0136F9A8_lifted")
 set_source_files_properties(${SPU_SOURCES} PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
