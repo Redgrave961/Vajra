@@ -144,9 +144,21 @@ add_custom_command(
     COMMENT "Building the icon from the game's ICON0.PNG")
 set(PORT_PLATFORM_SOURCES "")
 if(WIN32)
+    set(PORT_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/Vajra.manifest")
+    file(WRITE "${PORT_MANIFEST}"
+"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">
+  <application xmlns=\"urn:schemas-microsoft-com:asm.v3\">
+    <windowsSettings>
+      <activeCodePage xmlns=\"http://schemas.microsoft.com/SMI/2019/WindowsSettings\">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>
+")
     set(PORT_RC "${CMAKE_CURRENT_BINARY_DIR}/Vajra.rc")
     file(WRITE "${PORT_RC}"
 "1 ICON \"Vajra.ico\"
+1 24 \"Vajra.manifest\"
 1 VERSIONINFO
 FILEVERSION ${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0
 PRODUCTVERSION ${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0
@@ -171,7 +183,7 @@ BEGIN
   END
 END
 ")
-    set_source_files_properties("${PORT_RC}" PROPERTIES OBJECT_DEPENDS "${PORT_ICON}")
+    set_source_files_properties("${PORT_RC}" PROPERTIES OBJECT_DEPENDS "${PORT_ICON};${PORT_MANIFEST}")
     set(PORT_PLATFORM_SOURCES "${PORT_RC}")
 endif()
 
