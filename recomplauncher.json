@@ -147,14 +147,36 @@
     },
     {
       "id": "anti_aliasing",
-      "label": "SMAA",
-      "help": "Subpixel morphological anti-aliasing for smoother edges.",
+      "label": "Anti-Aliasing / Upscaling",
+      "help": "SMAA, AMD FSR, or NVIDIA DLSS / DLAA anti-aliasing and upscaling.",
       "group": "Graphics",
       "choices": [
-        { "label": "On", "set": { "anti_aliasing": "on" } },
-        { "label": "Off", "set": { "anti_aliasing": "off" } }
+        { "label": "Off", "set": { "anti_aliasing": "off" } },
+        { "label": "SMAA", "set": { "anti_aliasing": "on" } },
+        { "label": "FSR Native AA", "set": { "anti_aliasing": "fsr_native" } },
+        { "label": "FSR Quality", "set": { "anti_aliasing": "fsr_quality" } },
+        { "label": "FSR Balanced", "set": { "anti_aliasing": "fsr_balanced" } },
+        { "label": "FSR Performance", "set": { "anti_aliasing": "fsr_performance" } },
+        { "label": "NVIDIA DLAA", "set": { "anti_aliasing": "dlaa" } },
+        { "label": "DLSS Quality", "set": { "anti_aliasing": "dlss_quality" } },
+        { "label": "DLSS Balanced", "set": { "anti_aliasing": "dlss_balanced" } },
+        { "label": "DLSS Performance", "set": { "anti_aliasing": "dlss_performance" } }
       ],
       "defaults": { "anti_aliasing": "on" }
+    },
+    {
+      "id": "rcas_sharpness",
+      "label": "RCAS Sharpness",
+      "help": "Robust Contrast-Adaptive Sharpening strength (0% disables RCAS).",
+      "group": "Graphics",
+      "slider": {
+        "key": "rcas_sharpness",
+        "min": 0,
+        "max": 100,
+        "step": 1,
+        "format": "%.0f%%"
+      },
+      "defaults": { "rcas_sharpness": "0" }
     },
     {
       "id": "motion_blur",

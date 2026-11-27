@@ -4,6 +4,7 @@
 #include "presence.h"
 #include "rl_achievements.h"
 #include "ue3_reflect.h"
+#include "rsx_core.h"
 #include "vk/rsx_vk.h"
 #include "../ps3recomp/libs/input/pad_bindings.h"
 #include "../ps3recomp/libs/system/cellSaveData.h"
@@ -17,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -151,6 +153,8 @@ constexpr uint32_t k_max_scale = 12;
 std::vector<rsx_vk_mode> g_modes;
 Choices g_res_choices;
 Choices g_fps_choices;
+Choices g_upscaler_choices;
+int g_upscaler_caps_cached = -1;
 bool g_modes_valid = false;
 bool g_res_choices_valid = false;
 bool g_fps_choices_valid = false;
@@ -337,6 +341,70 @@ const Choices& frame_rate_choices()
     return g_fps_choices;
 }
 
+constexpr uint32_t k_aa_smaa = 0x100u;
+
+const Choices& aa_choices()
+{
+    const int caps = rsx_vk_upscaler_caps();
+    if (caps != g_upscaler_caps_cached) {
+        g_upscaler_choices.clear();
+        g_upscaler_choices.push_back({ "off", "Off", 0u });
+        g_upscaler_choices.push_back({ "on", "SMAA", k_aa_smaa });
+        if (caps & RSX_VK_UPSCALE_CAP_FSR) {
+            const char* ver = rsx_vk_upscaler_fsr_version();
+            const std::string fsr = (ver && *ver) ? ("FSR " + std::string(ver)) : std::string("FSR 3.1");
+            g_upscaler_choices.push_back({ "fsr_native", fsr + " Native AA", RSX_VK_UPSCALE_FSR_NATIVE });
+            g_upscaler_choices.push_back({ "fsr_quality", fsr + " Quality", RSX_VK_UPSCALE_FSR_QUALITY });
+            g_upscaler_choices.push_back({ "fsr_balanced", fsr + " Balanced", RSX_VK_UPSCALE_FSR_BALANCED });
+            g_upscaler_choices.push_back({ "fsr_performance", fsr + " Performance", RSX_VK_UPSCALE_FSR_PERFORMANCE });
+        }
+        if (caps & RSX_VK_UPSCALE_CAP_DLSS) {
+            g_upscaler_choices.push_back({ "dlaa", "NVIDIA DLAA", RSX_VK_UPSCALE_DLAA });
+            g_upscaler_choices.push_back({ "dlss_quality", "DLSS Quality", RSX_VK_UPSCALE_DLSS_QUALITY });
+            g_upscaler_choices.push_back({ "dlss_balanced", "DLSS Balanced", RSX_VK_UPSCALE_DLSS_BALANCED });
+            g_upscaler_choices.push_back({ "dlss_performance", "DLSS Performance", RSX_VK_UPSCALE_DLSS_PERFORMANCE });
+        }
+        g_upscaler_caps_cached = caps;
+    }
+    return g_upscaler_choices;
+}
+
+std::optional<uint32_t> parse_aa(const std::string& token)
+{
+    if (token == "off") return 0u;
+    if (token == "on" || token == "smaa") return k_aa_smaa;
+    if (token == "fsr_native") return RSX_VK_UPSCALE_FSR_NATIVE;
+    if (token == "fsr_quality") return RSX_VK_UPSCALE_FSR_QUALITY;
+    if (token == "fsr_balanced") return RSX_VK_UPSCALE_FSR_BALANCED;
+    if (token == "fsr_performance") return RSX_VK_UPSCALE_FSR_PERFORMANCE;
+    if (token == "dlaa") return RSX_VK_UPSCALE_DLAA;
+    if (token == "dlss_quality") return RSX_VK_UPSCALE_DLSS_QUALITY;
+    if (token == "dlss_balanced") return RSX_VK_UPSCALE_DLSS_BALANCED;
+    if (token == "dlss_performance") return RSX_VK_UPSCALE_DLSS_PERFORMANCE;
+    return std::nullopt;
+}
+
+const Choices& fsr_sharpness_choices()
+{
+    static const Choices list = [] {
+        Choices c;
+        c.reserve(101);
+        for (uint32_t v = 0; v <= 100u; ++v)
+            c.push_back({ std::to_string(v), v ? std::to_string(v) + "%" : "Off", v });
+        return c;
+    }();
+    return list;
+}
+
+std::optional<uint32_t> parse_fsr_sharpness(const std::string& token)
+{
+    if (token.empty()) return std::nullopt;
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(token.c_str(), &end, 10);
+    if (!end || *end != '\0' || v > 100ul) return std::nullopt;
+    return (uint32_t)v;
+}
+
 bool g_settings_parsed;
 std::atomic<bool> g_motion_blur{ true };
 std::atomic<bool> g_depth_of_field{ true };
@@ -345,6 +413,10 @@ std::atomic<float> g_mouse_units{ 30.f };
 std::atomic<bool> g_invert_mouse{ false };
 std::atomic<float> g_aspect_scale{ 1.f };
 std::atomic<bool> g_gfx_aspect_dirty{ false };
+std::atomic<uint32_t> g_upscaler_mode{ RSX_VK_UPSCALE_OFF };
+std::atomic<uint32_t> g_fsr_sharpness{ 0u };
+std::atomic<uint32_t> g_eff_w{ 1280u };
+std::atomic<uint32_t> g_eff_h{ 720u };
 std::mutex g_res_lock;
 uint32_t g_base_res = pack_resolution(1280u, 720u);
 uint32_t g_win_w = 0, g_win_h = 0;
@@ -358,6 +430,8 @@ void apply_effective_resolution_locked()
         const double eff_ar = win_ar > 16.0 / 9.0 + 0.01 ? win_ar : 16.0 / 9.0;
         w = std::clamp(((uint32_t)std::lround((double)h * eff_ar) + 1u) & ~1u, 1280u, 1280u * k_max_scale);
     }
+    g_eff_w.store(w, std::memory_order_relaxed);
+    g_eff_h.store(h, std::memory_order_relaxed);
     rsx_vk_set_resolution_scale(w, 1280u, h, 720u);
     const float aspect = ((float)w * 9.f) / ((float)h * 16.f);
     const float clamped = aspect > 1.0001f ? aspect : 1.f;
@@ -406,7 +480,19 @@ void apply_resolution(uint32_t value)
     }
     if (rw && rh) rsx_vk_resize_window(rw, rh);
 }
-void apply_aa(uint32_t value) { rsx_vk_set_aa(value ? RSX_VK_AA_SMAA : RSX_VK_AA_OFF); }
+void apply_aa(uint32_t value)
+{
+    if (value == k_aa_smaa) {
+        g_upscaler_mode.store(RSX_VK_UPSCALE_OFF, std::memory_order_relaxed);
+        rsx_vk_set_upscaler(RSX_VK_UPSCALE_OFF);
+        rsx_vk_set_aa(RSX_VK_AA_SMAA);
+    } else {
+        g_upscaler_mode.store(value, std::memory_order_relaxed);
+        rsx_vk_set_aa(RSX_VK_AA_OFF);
+        rsx_vk_set_upscaler((int)value);
+    }
+}
+void apply_fsr_sharpness(uint32_t value) { g_fsr_sharpness.store(std::min(value, 100u), std::memory_order_relaxed); }
 void apply_frame_rate(uint32_t value)
 {
     const bool console = value == 30;
@@ -445,7 +531,8 @@ constexpr Option k_options[] = {
     { "display", "Display Mode", "Windowed, borderless window, or exclusive fullscreen at the display's native mode.", display_choices, "borderless", nullptr, apply_display },
     { "resolution", "Resolution", "Internal rendering resolution.", resolution_choices, nullptr, parse_resolution, apply_resolution },
     { "frame_rate", "Frame Rate", "Frame rate limit. 30 uses the console's original pacing.", frame_rate_choices, "unlimited", parse_frame_rate, apply_frame_rate },
-    { "anti_aliasing", "SMAA", "Subpixel morphological anti-aliasing for smoother edges.", switch_choices, "on", nullptr, apply_aa },
+    { "anti_aliasing", "Anti-Aliasing / Upscaling", "SMAA, AMD FSR, or NVIDIA DLSS / DLAA anti-aliasing and upscaling.", aa_choices, "on", parse_aa, apply_aa },
+    { "rcas_sharpness", "RCAS Sharpness", "Robust Contrast-Adaptive Sharpening strength (0% disables RCAS).", fsr_sharpness_choices, "0", parse_fsr_sharpness, apply_fsr_sharpness },
     { "motion_blur", "Motion Blur", "Blur from camera and object motion.", switch_choices, "on", nullptr, apply_motion_blur },
     { "depth_of_field", "Depth of Field", "Blur outside the camera's focus, mainly in cutscenes.", switch_choices, "on", nullptr, apply_depth_of_field },
     { "bloom", "Bloom", "Glow around bright lights.", switch_choices, "on", nullptr, apply_bloom },
@@ -1336,6 +1423,58 @@ void func_01472450(ppu_context* ctx)
     }
 }
 
+extern void func_010ED3A0_lifted(ppu_context* ctx);
+
+namespace {
+
+struct captured_view {
+    uint32_t mode = RSX_VK_UPSCALE_OFF;
+    uint32_t render_w = 1280u;
+    uint32_t render_h = 720u;
+    float view[16]{};
+    float curr_vp[16]{};
+    float inv_curr_vp[16]{};
+    float fwd[3]{};
+    float pos[3]{};
+    float jx = 0.f;
+    float jy = 0.f;
+    float near_clip = 10.f;
+    float far_clip = 100000.f;
+    float fov_y = 1.04719755f;
+};
+
+struct upscale_state {
+    std::mutex lock;
+    bool has_prev = false;
+    bool vel_valid = false;
+    uint32_t frame_index = 0;
+    uint32_t prev_mode = RSX_VK_UPSCALE_OFF;
+    float prev_vp[16]{};
+    float prev_fwd[3]{};
+    float prev_pos[3]{};
+    float prev_fov = 1.04719755f;
+    float prev_jx = 0.f;
+    float prev_jy = 0.f;
+    float vel_coeff_x = 0.f;
+    float vel_coeff_y = 0.f;
+    std::deque<captured_view> queue;
+    std::chrono::steady_clock::time_point last_time{};
+} g_up;
+
+void flush_guest_gcm()
+{
+    const uint32_t gcm = vm_read32(k_gcm_ctx_ptr);
+    if (!gcm) return;
+    const uint32_t cur = vm_read32(gcm + 8u);
+    const uint32_t io = rsx_ea_to_io(cur);
+    if (io != 0xFFFFFFFFu) {
+        vm_write32(RSX_PUT_EA, io);
+        rsx_core_doorbell();
+    }
+}
+
+}
+
 void func_00214910(ppu_context* ctx)
 {
     run(func_00214910_lifted, ctx);
@@ -1344,41 +1483,305 @@ void func_00214910(ppu_context* ctx)
     if (!g_depth_of_field.load(std::memory_order_relaxed))
         for (const uint32_t field : k_proxy_blur) vm_write32(proxy + field, 0);
     if (!g_bloom.load(std::memory_order_relaxed)) vm_write32(proxy + k_proxy_bloom_scale, 0);
-    if (!g_motion_blur.load(std::memory_order_relaxed)) vm_write32(proxy + k_proxy_motion_blur, 0);
+}
+
+void func_010ED3A0(ppu_context* ctx)
+{
+    const uint32_t proxy = (uint32_t)ctx->gpr[3];
+    const bool suppress_mb = proxy && !g_motion_blur.load(std::memory_order_relaxed);
+    uint32_t orig_mb = 0;
+    if (suppress_mb) {
+        orig_mb = vm_read32(proxy + k_proxy_motion_blur);
+        vm_write32(proxy + k_proxy_motion_blur, 0);
+    }
+    run(func_010ED3A0_lifted, ctx);
+    if (suppress_mb) vm_write32(proxy + k_proxy_motion_blur, orig_mb);
 }
 
 void func_006AC518(ppu_context* ctx)
 {
-    if (g_motion_blur.load(std::memory_order_relaxed)) run(func_006AC518_lifted, ctx);
+    const bool mb = g_motion_blur.load(std::memory_order_relaxed);
+    const uint32_t up = g_upscaler_mode.load(std::memory_order_relaxed);
+    if (!mb && up == RSX_VK_UPSCALE_OFF) return;
+    if (up == RSX_VK_UPSCALE_OFF) {
+        run(func_006AC518_lifted, ctx);
+        return;
+    }
+    const uint32_t dpg = (uint32_t)ctx->gpr[4];
+    const uint32_t sr = (uint32_t)ctx->gpr[3];
+    const uint32_t views = sr ? vm_read32(sr + 0x58u) : 0u;
+    const uint32_t count = sr ? std::min(vm_read32(sr + 0x5Cu), 4u) : 0u;
+    struct saved_vel { uint32_t view, fam, vs, mv, ts; } saved[4]{};
+    uint32_t nsaved = 0;
+    float vel_max = 1.f, vel_scale = 1.f, time_scale = 1.f, aspect = 9.f / 16.f;
+    bool have_view = false;
+    if (dpg == 1u) {
+        for (uint32_t i = 0; i < count && views; ++i) {
+            const uint32_t v = views + i * 0x10A0u;
+            if ((vm_read32(v + 0xF38u) & 0x40000000u) == 0u) continue;
+            const uint32_t fam = vm_read32(v + 0x04u);
+            if (!fam) continue;
+            const float sx = vm_read_f32(v + 0x38u), sy = vm_read_f32(v + 0x3Cu);
+            if (sx < 1024.f || sy < 576.f) continue;
+            if (!have_view) {
+                aspect = sy / sx;
+                vel_scale = mb ? vm_read_f32(v + 0x100Cu) : 1.f;
+                vel_max = mb ? vm_read_f32(v + 0x1010u) : 8.f;
+                time_scale = mb ? vm_read_f32(fam + 0x238u) : 1.f;
+                have_view = true;
+            }
+            if (!mb) {
+                saved[nsaved++] = { v, fam, vm_read32(v + 0x100Cu), vm_read32(v + 0x1010u), vm_read32(fam + 0x238u) };
+                vm_write_f32(v + 0x100Cu, 1.f);
+                vm_write_f32(v + 0x1010u, 8.f);
+                vm_write_f32(fam + 0x238u, 1.f);
+            }
+        }
+    }
+    run(func_006AC518_lifted, ctx);
+    for (uint32_t i = 0; i < nsaved; ++i) {
+        vm_write32(saved[i].view + 0x100Cu, saved[i].vs);
+        vm_write32(saved[i].view + 0x1010u, saved[i].mv);
+        vm_write32(saved[i].fam + 0x238u, saved[i].ts);
+    }
+    if (dpg == 1u && have_view && std::fabs(time_scale * vel_scale) > 1e-5f && vel_max > 1e-5f) {
+        flush_guest_gcm();
+        rsx_vk_upscale_capture_velocity();
+        const float cx = -2.f * (vel_max * 0.0125f) / (time_scale * vel_scale);
+        const float cy = cx / aspect;
+        std::lock_guard<std::mutex> hold(g_up.lock);
+        g_up.vel_coeff_x = cx;
+        g_up.vel_coeff_y = cy;
+        g_up.vel_valid = true;
+    }
 }
 
 extern void func_00661DA8_lifted(ppu_context* ctx);
 extern void func_00662E70_lifted(ppu_context* ctx);
+extern void func_006784C4_lifted(ppu_context* ctx);
+
+namespace {
+
+void mat4_mul_f64(const float a[16], const float b[16], float out[16])
+{
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            double s = 0.0;
+            for (int k = 0; k < 4; ++k)
+                s += (double)a[r * 4 + k] * (double)b[k * 4 + c];
+            out[r * 4 + c] = (float)s;
+        }
+    }
+}
+
+bool mat4_invert_f64(const float in[16], float out[16])
+{
+    double m[4][8]{};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            m[r][c] = (double)in[r * 4 + c];
+            m[r][c + 4] = (r == c) ? 1.0 : 0.0;
+        }
+    }
+    for (int i = 0; i < 4; ++i) {
+        int piv = i;
+        double best = std::fabs(m[i][i]);
+        for (int r = i + 1; r < 4; ++r) {
+            const double v = std::fabs(m[r][i]);
+            if (v > best) {
+                best = v;
+                piv = r;
+            }
+        }
+        if (best < 1e-18) return false;
+        if (piv != i) {
+            for (int c = 0; c < 8; ++c) std::swap(m[i][c], m[piv][c]);
+        }
+        const double inv = 1.0 / m[i][i];
+        for (int c = 0; c < 8; ++c) m[i][c] *= inv;
+        for (int r = 0; r < 4; ++r) {
+            if (r == i) continue;
+            const double f = m[r][i];
+            for (int c = 0; c < 8; ++c) m[r][c] -= f * m[i][c];
+        }
+    }
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            out[r * 4 + c] = (float)m[r][c + 4];
+    return true;
+}
+
+}
 
 static void widen_scene_view(ppu_context* ctx, void (*lifted)(ppu_context*))
 {
     if (__builtin_expect(g_gfx_aspect_dirty.exchange(false, std::memory_order_acq_rel), 0))
         refresh_gfx_viewports(ctx);
     const float aspect = g_aspect_scale.load(std::memory_order_relaxed);
-    uint32_t proj_ea = 0, orig_m00 = 0;
-    bool patched = false;
-    if (aspect > 1.f) {
-        const float sx = (float)ctx->fpr[3], sy = (float)ctx->fpr[4];
-        if (sx >= 16.f && sy >= 9.f && sx * 10.f >= sy * 15.f) {
-            proj_ea = vm_read32((uint32_t)ctx->gpr[1] + 0xACu);
-            if (proj_ea && vm_read_f32(proj_ea + 0x2Cu) != 0.f && vm_read_f32(proj_ea + 0x3Cu) == 0.f) {
+    const uint32_t up_mode = g_upscaler_mode.load(std::memory_order_relaxed);
+    uint32_t proj_ea = 0, orig_m00 = 0, orig_m20 = 0, orig_m21 = 0;
+    bool patched = false, jittered = false;
+    const float sx = (float)ctx->fpr[3], sy = (float)ctx->fpr[4];
+    const bool wide_view = sx >= 16.f && sy >= 9.f && sx * 10.f >= sy * 15.f;
+    if (wide_view && (aspect > 1.f || up_mode != RSX_VK_UPSCALE_OFF)) {
+        proj_ea = vm_read32((uint32_t)ctx->gpr[1] + 0xACu);
+        if (proj_ea && vm_read_f32(proj_ea + 0x2Cu) != 0.f && vm_read_f32(proj_ea + 0x3Cu) == 0.f) {
+            if (aspect > 1.f) {
                 orig_m00 = vm_read32(proj_ea);
                 vm_write_f32(proj_ea, from_bits(orig_m00) / aspect);
                 patched = true;
             }
+            if (up_mode != RSX_VK_UPSCALE_OFF && sx >= 1024.f && sy >= 576.f &&
+                std::fabs(vm_read_f32(proj_ea + 0x20u)) < 1e-6f && std::fabs(vm_read_f32(proj_ea + 0x24u)) < 1e-6f) {
+                const uint32_t view_ea = vm_read32((uint32_t)ctx->gpr[1] + 0xA4u);
+                if (view_ea) {
+                    float view[16], proj[16], vp[16], inv_vp[16];
+                    for (uint32_t i = 0; i < 16u; ++i) {
+                        view[i] = vm_read_f32(view_ea + i * 4u);
+                        proj[i] = vm_read_f32(proj_ea + i * 4u);
+                    }
+                    mat4_mul_f64(view, proj, vp);
+                    if (mat4_invert_f64(vp, inv_vp)) {
+                        const uint32_t dw = g_eff_w.load(std::memory_order_relaxed);
+                        const uint32_t dh = g_eff_h.load(std::memory_order_relaxed);
+                        uint32_t rw = dw, rh = dh;
+                        rsx_vk_upscale_render_size(dw, dh, (int)up_mode, &rw, &rh);
+                        if (rw && rh) {
+                            float jx = 0.f, jy = 0.f;
+                            {
+                                std::lock_guard<std::mutex> hold(g_up.lock);
+                                const uint32_t fi = g_up.frame_index++;
+                                rsx_vk_upscale_jitter((int)up_mode, rw, dw, fi, &jx, &jy);
+                                captured_view cv{};
+                                cv.mode = up_mode;
+                                cv.render_w = rw;
+                                cv.render_h = rh;
+                                std::memcpy(cv.view, view, sizeof view);
+                                std::memcpy(cv.curr_vp, vp, sizeof vp);
+                                std::memcpy(cv.inv_curr_vp, inv_vp, sizeof inv_vp);
+                                cv.fwd[0] = view[2];
+                                cv.fwd[1] = view[6];
+                                cv.fwd[2] = view[10];
+                                cv.pos[0] = -(view[12] * view[0] + view[13] * view[1] + view[14] * view[2]);
+                                cv.pos[1] = -(view[12] * view[4] + view[13] * view[5] + view[14] * view[6]);
+                                cv.pos[2] = -(view[12] * view[8] + view[13] * view[9] + view[14] * view[10]);
+                                cv.jx = jx;
+                                cv.jy = jy;
+                                const float m22 = proj[10], m32 = proj[14], m11 = proj[5];
+                                cv.near_clip = std::fabs(m22) > 1e-6f ? std::max(0.01f, -m32 / m22) : 10.f;
+                                cv.far_clip = (m22 > 1.000001f)
+                                    ? std::max(cv.near_clip + 1.f, -m32 / (m22 - 1.f)) : 100000.f;
+                                cv.fov_y = std::fabs(m11) > 1e-6f ? 2.f * std::atan(1.f / std::fabs(m11)) : 1.04719755f;
+                                if (g_up.queue.size() >= 6u) g_up.queue.pop_front();
+                                g_up.queue.push_back(cv);
+                            }
+                            orig_m20 = vm_read32(proj_ea + 0x20u);
+                            orig_m21 = vm_read32(proj_ea + 0x24u);
+                            vm_write_f32(proj_ea + 0x20u, from_bits(orig_m20) + (2.f * jx) / (float)rw);
+                            vm_write_f32(proj_ea + 0x24u, from_bits(orig_m21) + (-2.f * jy) / (float)rh);
+                            jittered = true;
+                        }
+                    }
+                }
+            }
         }
     }
     run(lifted, ctx);
+    if (jittered) {
+        vm_write32(proj_ea + 0x20u, orig_m20);
+        vm_write32(proj_ea + 0x24u, orig_m21);
+    }
     if (patched) vm_write32(proj_ea, orig_m00);
 }
 
 void func_00661DA8(ppu_context* ctx) { widen_scene_view(ctx, func_00661DA8_lifted); }
 void func_00662E70(ppu_context* ctx) { widen_scene_view(ctx, func_00662E70_lifted); }
+
+void func_006784C4(ppu_context* ctx)
+{
+    const uint32_t sr = (uint32_t)ctx->gpr[3];
+    bool main_view = false;
+    float cur_view[16]{};
+    if (sr) {
+        const uint32_t views = vm_read32(sr + 0x58u);
+        const uint32_t count = vm_read32(sr + 0x5Cu);
+        if (views && count) {
+            const float sx = vm_read_f32(views + 0x38u), sy = vm_read_f32(views + 0x3Cu);
+            main_view = sx >= 1024.f && sy >= 576.f;
+            if (main_view) {
+                for (uint32_t i = 0; i < 16u; ++i)
+                    cur_view[i] = vm_read_f32(views + 0x60u + i * 4u);
+            }
+        }
+    }
+    run(func_006784C4_lifted, ctx);
+    if (!main_view) return;
+    const uint32_t up_mode = g_upscaler_mode.load(std::memory_order_relaxed);
+    if (up_mode == RSX_VK_UPSCALE_OFF) {
+        std::lock_guard<std::mutex> hold(g_up.lock);
+        g_up.queue.clear();
+        g_up.has_prev = false;
+        g_up.vel_valid = false;
+        return;
+    }
+    rsx_vk_upscale_frame frame{};
+    {
+        std::lock_guard<std::mutex> hold(g_up.lock);
+        if (g_up.queue.empty()) return;
+        size_t match = g_up.queue.size();
+        for (size_t i = 0; i < g_up.queue.size(); ++i) {
+            if (std::memcmp(g_up.queue[i].view, cur_view, sizeof cur_view) == 0) {
+                match = i;
+                break;
+            }
+        }
+        if (match < g_up.queue.size()) {
+            for (size_t i = 0; i < match; ++i) g_up.queue.pop_front();
+        }
+        const captured_view cv = g_up.queue.front();
+        g_up.queue.pop_front();
+        const auto now = std::chrono::steady_clock::now();
+        float raw_dt_ms = 16.6667f;
+        if (g_up.last_time.time_since_epoch().count() != 0)
+            raw_dt_ms = std::chrono::duration<float, std::milli>(now - g_up.last_time).count();
+        const float dt_ms = std::clamp(raw_dt_ms, 1.f, 250.f);
+        g_up.last_time = now;
+        int reset = (!g_up.has_prev || g_up.prev_mode != cv.mode || g_up.prev_mode != up_mode || raw_dt_ms > 150.f) ? 1 : 0;
+        if (!reset) {
+            const float dot = cv.fwd[0] * g_up.prev_fwd[0] + cv.fwd[1] * g_up.prev_fwd[1] + cv.fwd[2] * g_up.prev_fwd[2];
+            const float dx = cv.pos[0] - g_up.prev_pos[0];
+            const float dy = cv.pos[1] - g_up.prev_pos[1];
+            const float dz = cv.pos[2] - g_up.prev_pos[2];
+            if (dot < 0.85f || (dx * dx + dy * dy + dz * dz) > 10000.f || std::fabs(cv.fov_y - g_up.prev_fov) > 0.08f)
+                reset = 1;
+        }
+        std::memcpy(frame.inv_curr_vp, cv.inv_curr_vp, sizeof frame.inv_curr_vp);
+        std::memcpy(frame.prev_vp, reset ? cv.curr_vp : g_up.prev_vp, sizeof frame.prev_vp);
+        frame.jitter_x = cv.jx;
+        frame.jitter_y = cv.jy;
+        frame.near_clip = cv.near_clip;
+        frame.far_clip = cv.far_clip;
+        frame.fov_y = cv.fov_y;
+        frame.dt_ms = dt_ms;
+        frame.sharpness = (float)g_fsr_sharpness.load(std::memory_order_relaxed) * 0.01f;
+        frame.vel_scale_x = g_up.vel_valid ? g_up.vel_coeff_x * (float)cv.render_w : 0.f;
+        frame.vel_scale_y = g_up.vel_valid ? g_up.vel_coeff_y * (float)cv.render_h : 0.f;
+        frame.prev_jitter_x = reset ? cv.jx : g_up.prev_jx;
+        frame.prev_jitter_y = reset ? cv.jy : g_up.prev_jy;
+        frame.reset = reset;
+        g_up.vel_valid = false;
+        g_up.prev_jx = cv.jx;
+        g_up.prev_jy = cv.jy;
+        g_up.prev_fov = cv.fov_y;
+        std::memcpy(g_up.prev_vp, cv.curr_vp, sizeof g_up.prev_vp);
+        std::memcpy(g_up.prev_fwd, cv.fwd, sizeof g_up.prev_fwd);
+        std::memcpy(g_up.prev_pos, cv.pos, sizeof g_up.prev_pos);
+        g_up.prev_mode = up_mode;
+        g_up.has_prev = true;
+    }
+    flush_guest_gcm();
+    rsx_vk_upscale_trigger(&frame);
+}
 
 extern void func_00D71F04_lifted(ppu_context* ctx);
 

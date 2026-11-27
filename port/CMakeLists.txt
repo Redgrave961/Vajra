@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(AsuraRecomp VERSION 1.0.6 LANGUAGES C CXX)
+project(AsuraRecomp VERSION 1.0.7 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -262,7 +262,9 @@ set_source_files_properties(game_files.cpp PROPERTIES COMPILE_DEFINITIONS PORT_E
 set_source_files_properties(${RECOMP_SOURCES} ${PRX_SOURCES} PROPERTIES COMPILE_OPTIONS "-w;-fms-volatile" COMPILE_DEFINITIONS "PPU_FAST_FP")
 set_source_files_properties("${RECOMP_DIR}/ppu_recomp_024.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_002BE2A8=func_002BE2A8_lifted")
 set_source_files_properties("${RECOMP_DIR}/ppu_recomp_060.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_00661DA8=func_00661DA8_lifted;func_00662E70=func_00662E70_lifted")
+set_source_files_properties("${RECOMP_DIR}/ppu_recomp_061.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_006784C4=func_006784C4_lifted")
 set_source_files_properties("${RECOMP_DIR}/ppu_recomp_128.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_00D71F04=func_00D71F04_lifted")
+set_source_files_properties("${RECOMP_DIR}/ppu_recomp_161.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_010ED3A0=func_010ED3A0_lifted")
 set_source_files_properties("${RECOMP_DIR}/ppu_recomp_179.cpp" PROPERTIES COMPILE_DEFINITIONS "PPU_FAST_FP;func_0136F9A8=func_0136F9A8_lifted")
 set_source_files_properties(${SPU_SOURCES} PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
@@ -280,6 +282,11 @@ if(WIN32)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${PORT_RECOMPLAUNCHER_JSON}" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/recomplauncher.json"
         COMMENT "Copying recomplauncher.json beside Vajra.exe")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/upscalers")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different "${CMAKE_CURRENT_SOURCE_DIR}/upscalers" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/upscalers"
+            COMMENT "Copying upscaler DLLs beside Vajra.exe")
+    endif()
 else()
     set_target_properties(${PROJECT_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PORT_STAGE}")
     set(PORT_RUNTIME "${PORT_STAGE}/runtime-x86_64")

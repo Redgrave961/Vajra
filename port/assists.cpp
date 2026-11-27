@@ -46,6 +46,7 @@ enum HookId : uint32_t {
     hk_sync_is_input,
     hk_sync_get_result,
     hk_anim_rep_pushed,
+    hk_anim_hold_btn,
     hk_seq_fade_rep_update,
     hk_save_is_opened,
     hk_save_is_open_mission,
@@ -71,7 +72,10 @@ constexpr std::pair<const char*, uint32_t> k_hooks[] = {
     { "BCGame.BCAnim_CrossFadeButtonRep.IsPushedButton",     hk_anim_rep_pushed },
     { "BCGame.BCAnim_FadeByButtonRep.IsPushedButton",        hk_anim_rep_pushed },
     { "BCGame.BCAnim_FadeRateByButtonRep.IsPushedButton",    hk_anim_rep_pushed },
+    { "BCGame.BCAnim_FadeByHoldTime.IsHoldButton",           hk_anim_hold_btn },
+    { "BCGame.BCAnim_FadeTimeByHoldTime.IsHoldButton",       hk_anim_hold_btn },
     { "BCGame.BCSeqAct_AnimFadeByButtonRep.Update",          hk_seq_fade_rep_update },
+    { "BCGame.BCSeqAct_AnimFadeByHoldTime.Update",           hk_seq_fade_rep_update },
     { "BCGame.BCSaveParam.IsOpened",                         hk_save_is_opened },
     { "BCGame.BCSaveParam.IsOpenMission",                    hk_save_is_open_mission },
     { "BCGame.BCSaveParam.IsStoryFlg",                       hk_save_is_story_flg },
@@ -311,7 +315,8 @@ uint32_t assists_pre_hook(uint32_t hk, uint32_t self, uint32_t function, uint32_
                 const uint8_t cmd_type = judge_cmd_type(req, req_type);
                 if (flags & ASSIST_AUTO_QTE) {
                     const Elements infos = elements(m_input_info, judge, judges.type);
-                    if (cmd_type == k_cmd_select && infos.count > 0) {
+                    if (!infos.count) continue;
+                    if (cmd_type == k_cmd_select) {
                         for (uint32_t b = 0; b < infos.count; ++b) {
                             m_shown.set_sflag(infos.data + b * infos.stride, infos.type, false);
                             m_succeeded.set_sflag(infos.data + b * infos.stride, infos.type, b == 0);
@@ -435,6 +440,14 @@ uint32_t assists_pre_hook(uint32_t hk, uint32_t self, uint32_t function, uint32_
         }
         if ((flags & ASSIST_HOLD_MASH) && mash_pulse_ready())
             m_anim_last_push.set_flag(self, false);
+        return 0;
+    }
+
+    case hk_anim_hold_btn: {
+        if (flags & ASSIST_AUTO_QTE) {
+            if (result) vm_write32(result, 1u);
+            return (hk << 4) | ASSIST_ACT_SKIP;
+        }
         return 0;
     }
 
