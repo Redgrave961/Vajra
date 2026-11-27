@@ -309,21 +309,24 @@ _Unwind_Reason_Code crash_frame(_Unwind_Context* uc, void* arg)
 
 void crash_signal(int sig, siginfo_t* si, void* ctx)
 {
-    const ucontext_t* uc = static_cast<const ucontext_t*>(ctx);
-    const uintptr_t addr = reinterpret_cast<uintptr_t>(si->si_addr), guard = std::max<size_t>(t_stack_guard, (size_t)getpagesize());
-    const bool fault = sig == SIGSEGV || sig == SIGBUS;
-    if (fault && t_stack_lo && addr < t_stack_lo && addr >= t_stack_lo - guard)
-        std::fprintf(stderr, "\n[crash] stack overflow, thread %ld, last HLE 0x%08X (%s)\n", (long)gettid(), g_last_hle_nid, g_last_hle_name ? g_last_hle_name : "");
-    else
-        std::fprintf(stderr, "\n[crash] signal %d (%s), thread %ld, last HLE 0x%08X (%s)\n", sig, strsignal(sig), (long)gettid(), g_last_hle_nid,
-                     g_last_hle_name ? g_last_hle_name : "");
-    if (fault)
-        std::fprintf(stderr, "[crash] %s of 0x%llX at 0x%llX\n", uc->uc_mcontext.gregs[REG_ERR] & 2 ? "write" : "read", (unsigned long long)addr,
-                     (unsigned long long)uc->uc_mcontext.gregs[REG_RIP]);
-    crash_walk w{ (uintptr_t)uc->uc_mcontext.gregs[REG_RIP], -1 };
-    _Unwind_Backtrace(crash_frame, &w);
-    std::fflush(stderr);
-    raise(sig);
+    static std::atomic<bool> reported{ false };
+    if (!reported.exchange(true, std::memory_order_relaxed)) {
+        const ucontext_t* uc = static_cast<const ucontext_t*>(ctx);
+        const uintptr_t addr = reinterpret_cast<uintptr_t>(si->si_addr), guard = std::max<size_t>(t_stack_guard, (size_t)getpagesize());
+        const bool fault = sig == SIGSEGV || sig == SIGBUS;
+        if (fault && t_stack_lo && addr < t_stack_lo && addr >= t_stack_lo - guard)
+            std::fprintf(stderr, "\n[crash] stack overflow, thread %ld, last HLE 0x%08X (%s)\n", (long)gettid(), g_last_hle_nid, g_last_hle_name ? g_last_hle_name : "");
+        else
+            std::fprintf(stderr, "\n[crash] signal %d (%s), thread %ld, last HLE 0x%08X (%s)\n", sig, strsignal(sig), (long)gettid(), g_last_hle_nid,
+                         g_last_hle_name ? g_last_hle_name : "");
+        if (fault)
+            std::fprintf(stderr, "[crash] %s of 0x%llX at 0x%llX\n", uc->uc_mcontext.gregs[REG_ERR] & 2 ? "write" : "read", (unsigned long long)addr,
+                         (unsigned long long)uc->uc_mcontext.gregs[REG_RIP]);
+        crash_walk w{ (uintptr_t)uc->uc_mcontext.gregs[REG_RIP], -1 };
+        _Unwind_Backtrace(crash_frame, &w);
+        std::fflush(stderr);
+    }
+    _exit(128 + sig);
 }
 
 void install_crash_report()
