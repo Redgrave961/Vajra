@@ -643,9 +643,9 @@ void apply_launch_options(const std::filesystem::path& exe, game_paths& paths, c
             paths.update = std::filesystem::is_regular_file(default_pkg, ec) ? default_pkg : std::filesystem::path{};
         }
     }
-    if (opts.has_dlc_flags) {
+    if (opts.has_dlc_flags && !opts.dlcs.empty()) {
         paths.dlcs.clear();
-    } else if (!opts.game.empty() || !opts.dlcs.empty()) {
+    } else if (!opts.game.empty() || !opts.dlcs.empty() || opts.has_dlc_flags) {
         paths.dlcs.erase(std::remove_if(paths.dlcs.begin(), paths.dlcs.end(), [&](const std::filesystem::path& d) {
             std::error_code d_ec;
             return !std::filesystem::is_regular_file(d, d_ec);
@@ -775,7 +775,7 @@ int prepare_game_files(const std::filesystem::path& exe, const launch_options& o
 bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out, const launch_options& opts)
 {
     game_paths paths = read_paths(exe);
-    const bool cli_override = !opts.game.empty() || !opts.update.empty() || !opts.dlcs.empty() || opts.has_dlc_flags;
+    const bool cli_override = !opts.game.empty() || !opts.update.empty() || !opts.dlcs.empty();
     apply_launch_options(exe, paths, opts);
     std::error_code ec;
     out.user = exe / "user";

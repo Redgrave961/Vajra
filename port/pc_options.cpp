@@ -6,6 +6,7 @@
 #include "ue3_reflect.h"
 #include "vk/rsx_vk.h"
 #include "../ps3recomp/libs/input/pad_bindings.h"
+#include "../ps3recomp/libs/system/cellSaveData.h"
 #include "../ps3recomp/libs/system/cellSysutil.h"
 
 #include <SDL3/SDL_events.h>
@@ -994,6 +995,7 @@ void quit_game()
     SDL_Event e{};
     e.type = SDL_EVENT_QUIT;
     if (SDL_PushEvent(&e)) std::this_thread::sleep_for(std::chrono::seconds(10));
+    ps3_savedata_shutdown();
     std::fflush(nullptr);
     std::_Exit(0);
 }
