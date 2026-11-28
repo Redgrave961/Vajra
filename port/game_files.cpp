@@ -371,8 +371,8 @@ std::string describe(const dlc_status& d)
         return head + "OK" + k_dash + (!d.needs_rap ? std::string("free, no licence needed") : d.rap.empty() ? std::string("unlocked") : "unlocked by " + utf8(d.rap));
     case dlc_state::missing_rap:
         if (!d.rap.empty())
-            return head + "WILL NOT WORK: " + name_of(d.rap) + " is the licence for the other region's copy" + k_dash + "put the " + d.region +
-                   " .rap in " + utf8(d.file.parent_path());
+            return head + "WILL NOT WORK: " + name_of(d.rap) + " is the licence for the other region's copy" + k_dash + "put the " +
+                   region_of(pkg_title_id(d.content_id.c_str())) + " .rap in " + utf8(d.file.parent_path());
         return head + "WILL NOT WORK: its .rap licence is missing" + k_dash + "put its .rap in " + utf8(d.file.parent_path());
     case dlc_state::wrong_rap:
         return head + "WILL NOT WORK: wrong licence" + k_dash + utf8(d.rap) + " does not unlock it";
