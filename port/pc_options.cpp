@@ -175,7 +175,11 @@ const std::vector<rsx_vk_mode>& display_modes()
 }
 
 constexpr uint32_t k_resolution_heights[] = { 720, 900, 1080, 1440, 1800, 2160, 2880, 4320 };
-constexpr std::pair<uint32_t, uint32_t> k_ultrawide_presets[] = {
+constexpr std::pair<uint32_t, uint32_t> k_aspect_presets[] = {
+    { 1280, 1024 }, { 1800, 1440 }, { 2560, 2048 },
+    { 1280, 960 }, { 1440, 1080 }, { 1600, 1200 }, { 2048, 1536 }, { 2880, 2160 },
+    { 1920, 1280 }, { 2160, 1440 }, { 3000, 2000 },
+    { 1280, 800 }, { 1440, 900 }, { 1680, 1050 }, { 1920, 1200 }, { 2560, 1600 }, { 2880, 1800 }, { 3840, 2400 },
     { 2560, 1080 }, { 3440, 1440 }, { 3840, 1600 }, { 5120, 2160 },
     { 3840, 1200 },
     { 3840, 1080 }, { 5120, 1440 }, { 7680, 2160 },
@@ -188,6 +192,10 @@ const char* aspect_tag(uint32_t w, uint32_t h)
 {
     if (!h) return "";
     const double r = (double)w / (double)h;
+    if (std::fabs(r - 5.0 / 4.0) < 0.03) return " (5:4)";
+    if (std::fabs(r - 4.0 / 3.0) < 0.03) return " (4:3)";
+    if (std::fabs(r - 3.0 / 2.0) < 0.03) return " (3:2)";
+    if (std::fabs(r - 16.0 / 10.0) < 0.03) return " (16:10)";
     if (r <= 16.0 / 9.0 + 0.02) return "";
     if (std::fabs(r - 21.0 / 9.0) < 0.08) return " (21:9)";
     if (std::fabs(r - 32.0 / 10.0) < 0.08) return " (32:10)";
@@ -201,10 +209,12 @@ const char* aspect_tag(uint32_t w, uint32_t h)
 constexpr uint32_t pack_resolution(uint32_t w, uint32_t h) { return (w << 16) | (h & 0xFFFFu); }
 constexpr uint32_t res_width(uint32_t packed) { return packed >> 16; }
 constexpr uint32_t res_height(uint32_t packed) { return packed & 0xFFFFu; }
+constexpr bool is_16x9(uint32_t w, uint32_t h) { return (uint64_t)w * 9u == (uint64_t)h * 16u; }
+uint32_t even_edge(double v) { return ((uint32_t)std::lround(v) + 1u) & ~1u; }
 
 bool valid_resolution(uint32_t w, uint32_t h)
 {
-    return w >= 1280u && h >= 720u && w <= 1280u * k_max_scale && h <= 720u * k_max_scale && (uint64_t)w * 9u >= (uint64_t)h * 16u;
+    return w >= 1280u && h >= 720u && w <= 1280u * k_max_scale && h <= 720u * k_max_scale && w >= h;
 }
 
 bool same_aspect(uint32_t aw, uint32_t ah, uint32_t bw, uint32_t bh)
@@ -263,31 +273,22 @@ const Choices& resolution_choices()
                 if (valid_resolution(w, h)) list.push_back(pack_resolution(w, h));
             };
             for (const uint32_t h : k_resolution_heights) add(h * 16u / 9u, h);
-            const auto add_matching_presets = [&](uint32_t aw, uint32_t ah) {
-                for (const auto& [pw, ph] : k_ultrawide_presets)
-                    if (same_aspect(pw, ph, aw, ah)) add(pw, ph);
-            };
-            for (const rsx_vk_mode& m : modes) {
-                if ((uint64_t)m.width * 9u > (uint64_t)m.height * 16u) {
-                    add(m.width, m.height);
-                    add_matching_presets(m.width, m.height);
-                }
-            }
-            const bool native_uw = (uint64_t)native.width * 9u > (uint64_t)native.height * 16u;
+            for (const rsx_vk_mode& m : modes)
+                if (!is_16x9(m.width, m.height)) add(m.width, m.height);
             add(native.width, native.height);
-            if (native_uw) {
-                add_matching_presets(native.width, native.height);
-                const auto even = [](double v) { return ((uint32_t)std::lround(v) + 1u) & ~1u; };
+            if (!is_16x9(native.width, native.height)) {
+                for (const auto& [pw, ph] : k_aspect_presets)
+                    if (same_aspect(pw, ph, native.width, native.height)) add(pw, ph);
                 constexpr std::pair<uint32_t, uint32_t> k_scales[] = { { 3, 4 }, { 5, 4 }, { 3, 2 }, { 2, 1 } };
                 for (const auto& [num, den] : k_scales)
-                    add(even((double)native.width * num / den), even((double)native.height * num / den));
+                    add(even_edge((double)native.width * num / den), even_edge((double)native.height * num / den));
             }
             std::sort(list.begin(), list.end());
             list.erase(std::unique(list.begin(), list.end()), list.end());
             const auto bucket = [&](uint32_t p) -> int {
                 const uint32_t w = res_width(p), h = res_height(p);
                 if (same_aspect(w, h, native.width, native.height)) return 0;
-                if ((uint64_t)w * 9u == (uint64_t)h * 16u) return 1;
+                if (is_16x9(w, h)) return 1;
                 return 2;
             };
             std::sort(list.begin(), list.end(), [&](uint32_t a, uint32_t b) {
@@ -411,7 +412,7 @@ std::atomic<bool> g_depth_of_field{ true };
 std::atomic<bool> g_bloom{ true };
 std::atomic<float> g_mouse_units{ 30.f };
 std::atomic<bool> g_invert_mouse{ false };
-std::atomic<float> g_aspect_scale{ 1.f };
+std::atomic<float> g_aspect{ 1.f };
 std::atomic<bool> g_gfx_aspect_dirty{ false };
 std::atomic<uint32_t> g_fsr_sharpness{ 0u };
 std::atomic<uint32_t> g_eff_w{ 1280u };
@@ -421,20 +422,28 @@ uint32_t g_base_res = pack_resolution(1280u, 720u);
 uint32_t g_win_w = 0, g_win_h = 0;
 uint32_t g_cur_display = RSX_VK_BORDERLESS;
 
+struct Expansion {
+    float x;
+    float y;
+};
+
+Expansion expansion(float aspect) { return { std::max(aspect, 1.f), std::max(1.f / aspect, 1.f) }; }
+
 void apply_effective_resolution_locked()
 {
     uint32_t w = res_width(g_base_res), h = res_height(g_base_res);
     if (g_cur_display == RSX_VK_WINDOWED && g_win_w && g_win_h) {
-        const double win_ar = (double)g_win_w / (double)g_win_h;
-        const double eff_ar = win_ar > 16.0 / 9.0 + 0.01 ? win_ar : 16.0 / 9.0;
-        w = std::clamp(((uint32_t)std::lround((double)h * eff_ar) + 1u) & ~1u, 1280u, 1280u * k_max_scale);
+        const double ar = std::max((double)g_win_w / (double)g_win_h, 1.0);
+        if ((uint64_t)w * 9u < (uint64_t)h * 16u) h = even_edge(w * 9.0 / 16.0);
+        else w = even_edge(h * 16.0 / 9.0);
+        if (ar > 16.0 / 9.0 + 0.01) w = std::clamp(even_edge(h * ar), 1280u, 1280u * k_max_scale);
+        else if (ar < 16.0 / 9.0 - 0.01) h = std::clamp(even_edge(w / ar), 720u, 720u * k_max_scale);
     }
     g_eff_w.store(w, std::memory_order_relaxed);
     g_eff_h.store(h, std::memory_order_relaxed);
     rsx_vk_set_resolution_scale(w, 1280u, h, 720u);
     const float aspect = ((float)w * 9.f) / ((float)h * 16.f);
-    const float clamped = aspect > 1.0001f ? aspect : 1.f;
-    if (g_aspect_scale.exchange(clamped, std::memory_order_relaxed) != clamped)
+    if (g_aspect.exchange(aspect, std::memory_order_relaxed) != aspect)
         g_gfx_aspect_dirty.store(true, std::memory_order_release);
 }
 
@@ -1120,7 +1129,7 @@ void refresh_gfx_viewports(ppu_context* ctx)
     ctx->lr = saved_lr;
 }
 
-void set_gcm_viewport_x(ppu_context* ctx, float scale_x)
+void set_gcm_viewport_scale(ppu_context* ctx, float scale_x, float scale_y)
 {
     const uint32_t gcm = vm_read32(k_gcm_ctx_ptr);
     if (!gcm) return;
@@ -1134,7 +1143,7 @@ void set_gcm_viewport_x(ppu_context* ctx, float scale_x)
         const uint32_t sc = frame.base + 0x80u;
         const uint32_t of = frame.base + 0x90u;
         vm_write_f32(sc + 0x00u, scale_x);
-        vm_write_f32(sc + 0x04u, -360.f);
+        vm_write_f32(sc + 0x04u, scale_y);
         vm_write_f32(sc + 0x08u, 1.f);
         vm_write_f32(sc + 0x0Cu, 0.f);
         vm_write_f32(of + 0x00u, 640.f);
@@ -1617,18 +1626,21 @@ static void widen_scene_view(ppu_context* ctx, void (*lifted)(ppu_context*))
 {
     if (__builtin_expect(g_gfx_aspect_dirty.exchange(false, std::memory_order_acq_rel), 0))
         refresh_gfx_viewports(ctx);
-    const float aspect = g_aspect_scale.load(std::memory_order_relaxed);
+    const float aspect = g_aspect.load(std::memory_order_relaxed);
     const uint32_t up_mode = (uint32_t)rsx_vk_upscaler_active();
-    uint32_t proj_ea = 0, orig_m00 = 0, orig_m20 = 0, orig_m21 = 0;
+    uint32_t proj_ea = 0, orig_m00 = 0, orig_m11 = 0, orig_m20 = 0, orig_m21 = 0;
     bool patched = false, jittered = false;
     const float sx = (float)ctx->fpr[3], sy = (float)ctx->fpr[4];
     const bool wide_view = sx >= 16.f && sy >= 9.f && sx * 10.f >= sy * 15.f;
-    if (wide_view && (aspect > 1.f || up_mode != RSX_VK_UPSCALE_OFF)) {
+    if (wide_view && (aspect != 1.f || up_mode != RSX_VK_UPSCALE_OFF)) {
         proj_ea = vm_read32((uint32_t)ctx->gpr[1] + 0xACu);
         if (proj_ea && vm_read_f32(proj_ea + 0x2Cu) != 0.f && vm_read_f32(proj_ea + 0x3Cu) == 0.f) {
-            if (aspect > 1.f) {
+            if (aspect != 1.f) {
+                const Expansion ex = expansion(aspect);
                 orig_m00 = vm_read32(proj_ea);
-                vm_write_f32(proj_ea, from_bits(orig_m00) / aspect);
+                orig_m11 = vm_read32(proj_ea + 0x14u);
+                vm_write_f32(proj_ea, from_bits(orig_m00) / ex.x);
+                vm_write_f32(proj_ea + 0x14u, from_bits(orig_m11) / ex.y);
                 patched = true;
             }
             if (up_mode != RSX_VK_UPSCALE_OFF && sx >= 1024.f && sy >= 576.f &&
@@ -1691,7 +1703,10 @@ static void widen_scene_view(ppu_context* ctx, void (*lifted)(ppu_context*))
         vm_write32(proj_ea + 0x20u, orig_m20);
         vm_write32(proj_ea + 0x24u, orig_m21);
     }
-    if (patched) vm_write32(proj_ea, orig_m00);
+    if (patched) {
+        vm_write32(proj_ea, orig_m00);
+        vm_write32(proj_ea + 0x14u, orig_m11);
+    }
 }
 
 void func_00661DA8(ppu_context* ctx) { widen_scene_view(ctx, func_00661DA8_lifted); }
@@ -1789,7 +1804,7 @@ void func_00D71F04(ppu_context* ctx)
 {
     if (__builtin_expect(g_gfx_aspect_dirty.exchange(false, std::memory_order_acq_rel), 0))
         refresh_gfx_viewports(ctx);
-    const float aspect = g_aspect_scale.load(std::memory_order_relaxed);
+    const float aspect = g_aspect.load(std::memory_order_relaxed);
     const uint32_t vp = (uint32_t)ctx->gpr[4];
     uint32_t orig_ar = 0;
     bool patched = false;
@@ -1814,9 +1829,12 @@ extern void func_002BE2A8_lifted(ppu_context* ctx);
 
 void func_002BE2A8(ppu_context* ctx)
 {
-    const float aspect = g_aspect_scale.load(std::memory_order_relaxed);
-    const bool pillarbox = aspect > 1.f && (uint32_t)ctx->lr == k_bink_fullscreen_lr;
-    if (pillarbox) set_gcm_viewport_x(ctx, 640.f / aspect);
+    const float aspect = g_aspect.load(std::memory_order_relaxed);
+    const bool boxed = aspect != 1.f && (uint32_t)ctx->lr == k_bink_fullscreen_lr;
+    if (boxed) {
+        const Expansion ex = expansion(aspect);
+        set_gcm_viewport_scale(ctx, 640.f / ex.x, -360.f / ex.y);
+    }
     run(func_002BE2A8_lifted, ctx);
-    if (pillarbox) set_gcm_viewport_x(ctx, 640.f);
+    if (boxed) set_gcm_viewport_scale(ctx, 640.f, -360.f);
 }

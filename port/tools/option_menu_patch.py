@@ -964,17 +964,21 @@ def start_tags(page, cls, name, params, path, resize, prompt, extra=None):
 
 
 def wide_cover_init(g):
-    def widen(g, name):
+    horizontal = ('_xscale', '_x', 640)
+    vertical = ('_yscale', '_y', 360)
+
+    def widen(g, name, axes):
         mc = R(2)
         g.stmt(store(mc, get(var('_root'), name)))
-        if_(g, land(neq(mc, UNDEFINED), less(get(mc, '_xscale'), 200)), lambda g: (
-            g.emit(setm(mc, '_xscale', mul(get(mc, '_xscale'), 4))),
-            g.emit(setm(mc, '_x', add(640, mul(sub(get(mc, '_x'), 640), 4)))),
-        ))
+        if_(g, land(neq(mc, UNDEFINED), less(get(mc, '_xscale'), 200)), lambda g: [
+            (g.emit(setm(mc, scale, mul(get(mc, scale), 4))),
+             g.emit(setm(mc, pos, add(mid, mul(sub(get(mc, pos), mid), 4)))))
+            for scale, pos, mid in axes
+        ])
 
     def tick(g):
-        widen(g, 'mcInst_Fade')
-        widen(g, 'mcInst_LetterBox')
+        widen(g, 'mcInst_Fade', (horizontal, vertical))
+        widen(g, 'mcInst_LetterBox', (horizontal,))
 
     w = R(2)
     if_(g, eq(get(var('_root'), '__pcWide'), UNDEFINED), lambda g: (
