@@ -206,6 +206,7 @@ void crash_dump(const EXCEPTION_POINTERS* ep, const char* kind)
         DWORD64 frame;
         RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, ctx.Rip, f, &ctx, &data, &frame, nullptr);
     }
+    rsx_vk_on_crash();
     std::fflush(stderr);
 }
 
@@ -324,6 +325,7 @@ void crash_signal(int sig, siginfo_t* si, void* ctx)
                          (unsigned long long)uc->uc_mcontext.gregs[REG_RIP]);
         crash_walk w{ (uintptr_t)uc->uc_mcontext.gregs[REG_RIP], -1 };
         _Unwind_Backtrace(crash_frame, &w);
+        rsx_vk_on_crash();
         std::fflush(stderr);
     }
     _exit(128 + sig);

@@ -33,7 +33,7 @@ constexpr double k_tick = 1.0 / 30;
 
 constexpr double k_aim_stick_per_unit = 3.14159265358979 / 32768 / 1.2;
 
-enum class Mode : uint8_t { Add, Ratio, Press, Lerp, LerpRev, Homing, SmaReset, SmaRate, Scale, Approach, LerpScale, LerpDt, Ramp, Clamp, TimerTick, Look, LerpLook, Aim };
+enum class Mode : uint8_t { Add, Ratio, Press, Lerp, LerpRev, Homing, SmaReset, SmaRate, Scale, Approach, LerpScale, LerpDt, Ramp, Clamp, TimerTick, Look, LerpLook, Aim, LerpSource, LerpOffset };
 
 struct Site {
     const char* path;
@@ -72,6 +72,15 @@ thread_local bool t_mouse_turned;
 std::atomic<bool> g_mouse_camera{false};
 std::atomic<uint32_t> g_can_assist{0};
 thread_local std::unordered_map<uint32_t, std::deque<float>> t_frame_times;
+
+struct LerpOutput {
+    uint32_t object = 0;
+    uint32_t offset = 0;
+    uint32_t value[3]{};
+    double ratio = 1;
+};
+
+thread_local LerpOutput t_lerp_output;
 
 double read_f64(uint32_t ea)
 {
@@ -318,6 +327,12 @@ void look(void (*body)(ppu_context*), ppu_context* ctx, uint32_t stack)
     }
 }
 
+double lerp_offset_scale(uint32_t stack, const Site* site, const uint32_t* before)
+{
+    const LerpOutput& o = t_lerp_output;
+    return o.object == vm_read32(stack + 0x14) && o.offset == site->extra && std::equal(o.value, o.value + 3, before) ? o.ratio : 1;
+}
+
 void compound(void (*body)(ppu_context*), ppu_context* ctx, const Shape& shape)
 {
     const uint32_t stack = (uint32_t)ctx->gpr[4];
@@ -342,7 +357,7 @@ void compound(void (*body)(ppu_context*), ppu_context* ctx, const Shape& shape)
     ctx->gpr[4] = stack;
     ctx->gpr[5] = result;
     run(body, ctx);
-    const double k = tick_scale();
+    const double k = site->mode == Mode::LerpOffset ? lerp_offset_scale(stack, site, before) : tick_scale();
     double press = 0;
     if (site->mode == Mode::Press || site->mode == Mode::Ramp) {
         probe(ctx, stack, script(stack) + site->extra, scratch);
@@ -431,8 +446,9 @@ void lerp_op(void (*body)(ppu_context*), ppu_context* ctx, const char* signature
     const double k = tick_scale();
     if (site->mode == Mode::Homing && k > 1)
         return homing(ctx, stack, site, values, read_f32(alpha), k, (uint32_t)result, stream);
-    write_f32(alpha, site->mode == Mode::Approach ? approach(ctx, stack, site, read_f32(alpha), k, stream)
-                                                  : corrected_alpha(site->mode, read_f32(alpha), k));
+    const float original = read_f32(alpha);
+    const float corrected = site->mode == Mode::Approach ? approach(ctx, stack, site, original, k, stream) : corrected_alpha(site->mode, original, k);
+    write_f32(alpha, corrected);
     uint32_t out = stream;
     at = values;
     for (const char* p = signature; *p; at += param_size(*p++)) {
@@ -452,6 +468,11 @@ void lerp_op(void (*body)(ppu_context*), ppu_context* ctx, const char* signature
     ctx->gpr[4] = proxy;
     ctx->gpr[5] = result;
     run(body, ctx);
+    if (site->mode != Mode::LerpSource)
+        return;
+    t_lerp_output = {vm_read32(stack + 0x14), site->offset, {}, original > 0 && original < 1 ? corrected / original : 1.0};
+    for (uint32_t i = 0; i < 3; ++i)
+        t_lerp_output.value[i] = vm_read32((uint32_t)result + 4 * i);
 }
 
 void rotate(void (*body)(ppu_context*), ppu_context* ctx, bool per_tick)
