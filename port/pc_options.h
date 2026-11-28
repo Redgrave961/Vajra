@@ -23,6 +23,7 @@ static inline uint32_t pc_options_call(uint32_t self, uint32_t function)
     }
 }
 void pc_options_returned(uint32_t hook, uint32_t result);
+void pc_options_movie(uint32_t name);
 bool pc_options_controller_screen();
 uint32_t pc_options_stick_lit();
 void pc_options_mouse_scale(float* yaw, float* pitch);

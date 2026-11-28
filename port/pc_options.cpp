@@ -410,6 +410,10 @@ bool g_settings_parsed;
 std::atomic<bool> g_motion_blur{ true };
 std::atomic<bool> g_depth_of_field{ true };
 std::atomic<bool> g_bloom{ true };
+std::atomic<bool> g_letterbox{ true };
+constexpr const char* k_letterboxed_movies[] = { "AW_NEXT", "AW_S000_A000", "AW_S010_A0030", "AW_S040_A0100", "COLLECTIONMOVIE_101" };
+constexpr uint32_t k_movie_picture_rows = 608;
+std::atomic<uint32_t> g_movie_rows{ 720u };
 std::atomic<float> g_mouse_units{ 30.f };
 std::atomic<bool> g_invert_mouse{ false };
 std::atomic<float> g_aspect{ 1.f };
@@ -508,6 +512,7 @@ void apply_frame_rate(uint32_t value)
 void apply_motion_blur(uint32_t value) { g_motion_blur.store(value != 0, std::memory_order_relaxed); }
 void apply_depth_of_field(uint32_t value) { g_depth_of_field.store(value != 0, std::memory_order_relaxed); }
 void apply_bloom(uint32_t value) { g_bloom.store(value != 0, std::memory_order_relaxed); }
+void apply_letterbox(uint32_t value) { g_letterbox.store(value != 0, std::memory_order_relaxed); }
 void apply_language(uint32_t value) { ps3_sysutil_set_language((int32_t)value); }
 void apply_sensitivity(uint32_t value) { g_mouse_units.store(value * k_mouse_units_per_step, std::memory_order_relaxed); }
 void apply_invert_mouse(uint32_t value) { g_invert_mouse.store(value != 0, std::memory_order_relaxed); }
@@ -542,6 +547,7 @@ constexpr Option k_options[] = {
     { "motion_blur", "Motion Blur", "Blur from camera and object motion.", switch_choices, "on", nullptr, apply_motion_blur },
     { "depth_of_field", "Depth of Field", "Blur outside the camera's focus, mainly in cutscenes.", switch_choices, "on", nullptr, apply_depth_of_field },
     { "bloom", "Bloom", "Glow around bright lights.", switch_choices, "on", nullptr, apply_bloom },
+    { "letterbox", "Cinematic Letterbox", "Black bars in cutscenes. Off shows the full picture and enlarges letterboxed movies on wide screens.", switch_choices, "on", nullptr, apply_letterbox },
     { "language", "Language", "Text and menu language. Takes effect after restarting the game.", language_choices, "auto", nullptr, apply_language },
     { "god_mode", "God Mode", "Invincibility and full health.", switch_choices, "off", nullptr, apply_god_mode },
     { "inf_burst", "Infinite Burst", "Any Burst gauge gain fills the gauge completely. Spending it works normally, so scripted Burst scenes play as intended.", switch_choices, "off", nullptr, apply_inf_burst },
@@ -1196,6 +1202,7 @@ bool external_call(ppu_context* ctx)
     else if (!std::strcmp(op, "Prompt")) first ? remember(g_prompt, movie_player(ctx)) : g_prompt.store(0, std::memory_order_relaxed);
     else if (!std::strcmp(op, "StartText")) reply(ctx, 0, start_text(text_argument(ctx, 0)).c_str());
     else if (!std::strcmp(op, "Diagram")) g_controller_screen.store(first != 0, std::memory_order_relaxed);
+    else if (!std::strcmp(op, "Letterbox")) reply_number(ctx, g_letterbox.load(std::memory_order_relaxed));
     else if (!std::strcmp(op, "Quit")) quit_game();
     return true;
 }
@@ -1234,7 +1241,7 @@ Menu g_menus[] = {
     { 84243, 0x5577A21354B4EAFFull, k_start_menu_tags },
     { 45352, 0xC58DF766DDD3BC80ull, k_logo_menu_tags },
     { 30905, 0x6EDFF88E0597725Cull, k_wide_cover_tags },
-    { 51014, 0x8722369DB976359Cull, k_wide_cover_tags },
+    { 51014, 0x8722369DB976359Cull, k_cinema_cover_tags },
 };
 std::mutex g_menu_lock;
 
@@ -1320,6 +1327,19 @@ uint32_t pc_options_call_hook(uint32_t hook, uint32_t self)
 void pc_options_returned(uint32_t hook, uint32_t result)
 {
     remember(hook == hook_save_param ? g_save_param : g_scene_manager, vm_read32(result));
+}
+
+void pc_options_movie(uint32_t name)
+{
+    std::string id;
+    for (uint32_t i = 0; i < 64u; i++) {
+        const uint16_t c = vm_read16(name + 2 * i);
+        if (!c) break;
+        id += (char)(c >= 'a' && c <= 'z' ? c - 32 : c);
+    }
+    const bool boxed = std::any_of(std::begin(k_letterboxed_movies), std::end(k_letterboxed_movies),
+                                   [&](const char* prefix) { return id.starts_with(prefix); });
+    g_movie_rows.store(boxed ? k_movie_picture_rows : 720u, std::memory_order_relaxed);
 }
 
 bool pc_options_controller_screen()
@@ -1830,11 +1850,10 @@ extern void func_002BE2A8_lifted(ppu_context* ctx);
 void func_002BE2A8(ppu_context* ctx)
 {
     const float aspect = g_aspect.load(std::memory_order_relaxed);
-    const bool boxed = aspect != 1.f && (uint32_t)ctx->lr == k_bink_fullscreen_lr;
-    if (boxed) {
-        const Expansion ex = expansion(aspect);
-        set_gcm_viewport_scale(ctx, 640.f / ex.x, -360.f / ex.y);
-    }
+    const float zoom = g_letterbox.load(std::memory_order_relaxed) ? 1.f : 720.f / (float)g_movie_rows.load(std::memory_order_relaxed);
+    const float sx = 640.f * std::min(1.f, zoom / aspect), sy = -360.f * std::min(zoom, aspect);
+    const bool fitted = (sx != 640.f || sy != -360.f) && (uint32_t)ctx->lr == k_bink_fullscreen_lr;
+    if (fitted) set_gcm_viewport_scale(ctx, sx, sy);
     run(func_002BE2A8_lifted, ctx);
-    if (boxed) set_gcm_viewport_scale(ctx, 640.f, -360.f);
+    if (fitted) set_gcm_viewport_scale(ctx, 640.f, -360.f);
 }

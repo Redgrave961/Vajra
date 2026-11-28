@@ -963,7 +963,7 @@ def start_tags(page, cls, name, params, path, resize, prompt, extra=None):
     return sprite(page, b'') + export((page, 'PCOpt_Start')) + init_action(page, g)
 
 
-def wide_cover_init(g):
+def wide_cover_init(g, letterbox_option):
     horizontal = ('_xscale', '_x', 640)
     vertical = ('_yscale', '_y', 360)
 
@@ -979,6 +979,10 @@ def wide_cover_init(g):
     def tick(g):
         widen(g, 'mcInst_Fade', (horizontal, vertical))
         widen(g, 'mcInst_LetterBox', (horizontal,))
+        if letterbox_option:
+            lb = R(2)
+            g.stmt(store(lb, get(var('_root'), 'mcInst_LetterBox')))
+            if_(g, neq(lb, UNDEFINED), lambda g: g.emit(setm(lb, '_visible', ei('PCOpt_Letterbox'))))
 
     w = R(2)
     if_(g, eq(get(var('_root'), '__pcWide'), UNDEFINED), lambda g: (
@@ -987,9 +991,9 @@ def wide_cover_init(g):
     ))
 
 
-def wide_cover_tags():
+def wide_cover_tags(letterbox_option=False):
     g = Gen()
-    wide_cover_init(g)
+    wide_cover_init(g, letterbox_option)
     return sprite(60000, b'') + export((60000, 'PCOpt_Wide')) + init_action(60000, g)
 
 
@@ -1011,7 +1015,8 @@ def write_inc(path):
                           + array('k_pause_menu_tags', pause_tags() + wide_cover_tags()) + '\n'
                           + array('k_start_menu_tags', title_start_tags()) + '\n'
                           + array('k_logo_menu_tags', logo_start_tags()) + '\n'
-                          + array('k_wide_cover_tags', wide_cover_tags()),
+                          + array('k_wide_cover_tags', wide_cover_tags()) + '\n'
+                          + array('k_cinema_cover_tags', wide_cover_tags(True)),
                           encoding='ascii', newline='\n')
 
 

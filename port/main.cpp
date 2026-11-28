@@ -536,7 +536,11 @@ void use_game_files(const game_files& files)
 void func_0013A02C(ppu_context* ctx)
 {
     const uint32_t player = (uint32_t)ctx->gpr[3];
-    if (!skipped_intro((uint32_t)ctx->gpr[6])) return run(func_0013A02C_lifted, ctx);
+    const uint32_t name = (uint32_t)ctx->gpr[6];
+    if (!skipped_intro(name)) {
+        pc_options_movie(name);
+        return run(func_0013A02C_lifted, ctx);
+    }
     const uint32_t started = vm_read32(player + 0xC);
     ctx->gpr[3] = started;
     guest_call(ctx, vm_read32(vm_read32(started) + 0xC));
