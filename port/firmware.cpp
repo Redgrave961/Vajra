@@ -1,6 +1,8 @@
 #include "firmware.h"
 
+#include "game_files.h"
 #include "../ps3recomp/libs/filesystem/ps3_aes.h"
+#include "../ps3recomp/runtime/platform/ps3_utf8_fs.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -165,9 +167,7 @@ bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::p
                 if (f.name == std::string("dev_flash/") + want) {
                     const std::filesystem::path dst = flash / want;
                     std::filesystem::create_directories(dst.parent_path(), ec);
-                    std::ofstream out(dst, std::ios::binary);
-                    out.write(reinterpret_cast<const char*>(tar.data() + at + 512), (std::streamsize)f.size);
-                    if (!out) {
+                    if (!write_file_atomic(dst, std::string_view(reinterpret_cast<const char*>(tar.data() + at + 512), (size_t)f.size))) {
                         error = "Write failed";
                         return false;
                     }
@@ -186,15 +186,21 @@ bool firmware_extract(const std::filesystem::path& pup, const std::filesystem::p
 
 namespace {
 
+constexpr const char* k_curl_args[] = { "-fsSL", "--retry", "3", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "60" };
+
 bool download_file(const char* url, uint64_t expected_size, const std::filesystem::path& dst, std::atomic<float>& progress, std::string& error,
                    const std::atomic<bool>* cancel)
 {
     std::error_code ec;
     std::filesystem::create_directories(dst.parent_path(), ec);
-    std::filesystem::remove(dst, ec);
+    std::filesystem::path part = dst;
+    part += ".part";
+    std::filesystem::remove(part, ec);
     bool cancelled = false;
 #ifdef _WIN32
-    std::wstring cmd = L"curl.exe -fsSL --retry 3 -o \"" + dst.wstring() + L"\" " + std::filesystem::path(url).wstring();
+    std::wstring cmd = L"curl.exe";
+    for (const char* arg : k_curl_args) cmd += L" " + std::filesystem::path(arg).wstring();
+    cmd += L" -o \"" + part.wstring() + L"\" " + std::filesystem::path(url).wstring();
     STARTUPINFOW si{};
     si.cb = sizeof si;
     PROCESS_INFORMATION pi = {};
@@ -210,7 +216,7 @@ bool download_file(const char* url, uint64_t expected_size, const std::filesyste
             break;
         }
         ec.clear();
-        const auto sz = std::filesystem::file_size(dst, ec);
+        const auto sz = std::filesystem::file_size(part, ec);
         if (!ec) progress = std::clamp((float)sz / (float)expected_size, 0.f, 1.f);
     }
     DWORD code = 1;
@@ -218,10 +224,21 @@ bool download_file(const char* url, uint64_t expected_size, const std::filesyste
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 #else
-    const std::string out = dst.string();
-    const char* argv[] = { "curl", "-fsSL", "--retry", "3", "-o", out.c_str(), url, nullptr };
+    const std::string out = part.string();
+    std::vector<const char*> argv{ "curl" };
+    argv.insert(argv.end(), std::begin(k_curl_args), std::end(k_curl_args));
+    argv.insert(argv.end(), { "-o", out.c_str(), url, nullptr });
+    posix_spawnattr_t attr;
+    sigset_t defaults;
+    posix_spawnattr_init(&attr);
+    sigemptyset(&defaults);
+    sigaddset(&defaults, SIGPIPE);
+    posix_spawnattr_setsigdefault(&attr, &defaults);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGDEF);
     pid_t pid;
-    if (posix_spawnp(&pid, "curl", nullptr, nullptr, const_cast<char* const*>(argv), environ)) {
+    const int spawned = posix_spawnp(&pid, "curl", nullptr, &attr, const_cast<char* const*>(argv.data()), environ);
+    posix_spawnattr_destroy(&attr);
+    if (spawned) {
         error = "curl not found";
         return false;
     }
@@ -241,14 +258,16 @@ bool download_file(const char* url, uint64_t expected_size, const std::filesyste
             break;
         }
         ec.clear();
-        const auto sz = std::filesystem::file_size(dst, ec);
+        const auto sz = std::filesystem::file_size(part, ec);
         if (!ec) progress = std::clamp((float)sz / (float)expected_size, 0.f, 1.f);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 #endif
-    if (cancelled || code) {
-        std::filesystem::remove(dst, ec);
-        error = cancelled ? "Cancelled" : "Download failed";
+    ec.clear();
+    const bool complete = !cancelled && !code && std::filesystem::file_size(part, ec) == expected_size && !ec;
+    if (!complete || ps3_utf8_replace_file(utf8_from_path(part).c_str(), utf8_from_path(dst).c_str())) {
+        std::filesystem::remove(part, ec);
+        error = cancelled ? "Cancelled" : code ? "Download failed" : !complete ? "Download incomplete" : "Could not save the download";
         return false;
     }
     progress = 1.f;
@@ -267,4 +286,10 @@ bool update_download(const std::filesystem::path& pkg, std::atomic<float>& progr
 {
     const char* url = title_id == "BLUS30721" ? k_update_url_us : k_update_url_eu;
     return download_file(url, k_update_size, pkg, progress, error, cancel);
+}
+
+bool update_pkg_complete(const std::filesystem::path& pkg)
+{
+    std::error_code ec;
+    return std::filesystem::file_size(pkg, ec) == k_update_size && !ec;
 }

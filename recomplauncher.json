@@ -26,7 +26,7 @@
     },
     {
       "id": "dlc1",
-      "label": "DLC: Episode 11.5 (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Episode 11.5 (.pkg, EU or US). Optional. Put its .rap licence in the same folder as the .pkg.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -35,7 +35,7 @@
     },
     {
       "id": "dlc2",
-      "label": "DLC: Episode 15.5 (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Episode 15.5 (.pkg, EU or US). Optional. Put its .rap licence in the same folder as the .pkg.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -44,7 +44,7 @@
     },
     {
       "id": "dlc3",
-      "label": "DLC: Part IV Nirvana (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Part IV Nirvana (.pkg, EU or US). Optional. Put its .rap licence in the same folder as the .pkg.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -53,7 +53,7 @@
     },
     {
       "id": "dlc4",
-      "label": "DLC: Lost Episode 1 (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Lost Episode 1 (.pkg, EU or US). Optional. Put its .rap licence in the same folder as the .pkg.",
       "role": "dlc",
       "optional": true,
       "formats": [
@@ -62,26 +62,18 @@
     },
     {
       "id": "dlc5",
-      "label": "DLC: Lost Episode 2 (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
-      "role": "dlc",
-      "optional": true,
-      "formats": [
-        { "type": "file", "extensions": ["pkg"] }
-      ]
-    },
-    {
-      "id": "dlc6",
-      "label": "DLC: Devastator / Infinity Pack (.pkg, EU or US). Optional. Keep its matching .rap key beside the .pkg or in exdata/.",
+      "label": "DLC: Lost Episode 2 (.pkg, EU or US). Optional. Put its .rap licence in the same folder as the .pkg.",
       "role": "dlc",
       "optional": true,
       "formats": [
         { "type": "file", "extensions": ["pkg"] }
       ]
     }
+
   ],
   "prepare": {
     "program": ["Vajra.exe", "Vajra-x86_64.AppImage"],
-    "args": ["--prepare", "--data", "{data}", "--game={input:game}", "--update={input:update}", "--dlc1={input:dlc1}", "--dlc2={input:dlc2}", "--dlc3={input:dlc3}", "--dlc4={input:dlc4}", "--dlc5={input:dlc5}", "--dlc6={input:dlc6}"],
+    "args": ["--prepare", "--data", "{data}", "--game={input:game}", "--update={input:update}", "--dlc1={input:dlc1}", "--dlc2={input:dlc2}", "--dlc3={input:dlc3}", "--dlc4={input:dlc4}", "--dlc5={input:dlc5}"],
     "label": "Official 1.02 update and PS3 audio codecs",
     "done": [
       "{data}/user/dev_flash/sys/external/flashMP3.pic",
@@ -91,7 +83,7 @@
   },
   "start": {
     "program": ["Vajra.exe", "Vajra-x86_64.AppImage"],
-    "args": ["--data", "{data}", "--game={input:game}", "--update={input:update}", "--dlc1={input:dlc1}", "--dlc2={input:dlc2}", "--dlc3={input:dlc3}", "--dlc4={input:dlc4}", "--dlc5={input:dlc5}", "--dlc6={input:dlc6}"]
+    "args": ["--data", "{data}", "--game={input:game}", "--update={input:update}", "--dlc1={input:dlc1}", "--dlc2={input:dlc2}", "--dlc3={input:dlc3}", "--dlc4={input:dlc4}", "--dlc5={input:dlc5}"]
   },
   "config": [
     {
@@ -401,8 +393,8 @@
     },
     {
       "id": "open-exdata",
-      "label": "Open DLC Keys (exdata) Folder",
-      "help": "Place .rap license files here (or next to your DLC .pkg files) to unlock paid DLC.",
+      "label": "Open DLC Licences (exdata) Folder",
+      "help": "Vajra keeps the .rap licences it has found here. You can also drop .rap files here instead of next to the DLC .pkg files.",
       "open": "exdata"
     },
     {
@@ -420,7 +412,10 @@
     "3": "No BLES01227 or BLUS30721 game copy was provided.",
     "4": "Failed to download the official 1.02 update from Sony. Check your internet connection or select the .pkg manually.",
     "5": "Failed to download or extract the PS3 firmware audio codecs from Sony. Check your internet connection.",
-    "6": "The selected game copy or update failed verification. Make sure you have a decrypted BLES01227 (EU) or BLUS30721 (US) dump."
+    "6": "The selected game copy or update failed verification. Make sure you have a decrypted BLES01227 (EU) or BLUS30721 (US) dump.",
+    "7": "A DLC you added will not work: its .rap licence is missing or wrong, it belongs to another game, or the .pkg is unreadable. The setup details list each DLC that is missing its .rap.",
+    "8": "This PC's processor is not supported. Vajra needs a CPU with AVX2 (Intel Haswell / AMD Excavator or newer).",
+    "9": "Vajra cannot start its renderer, usually because no graphics card has a Vulkan 1.3 driver. Update the graphics driver from NVIDIA, AMD or Intel; the error window says exactly what is missing."
   },
   "system": {
     "windows": {

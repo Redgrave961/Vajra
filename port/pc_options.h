@@ -7,7 +7,8 @@
 
 extern std::atomic<uint64_t> g_pc_options_hooks[64];
 
-void pc_options_boot(const std::filesystem::path& dir);
+void pc_options_load(const std::filesystem::path& dir);
+void pc_options_boot();
 void pc_options_link(uint32_t function, const std::string& path);
 uint32_t pc_options_call_hook(uint32_t hook, uint32_t self);
 static inline uint32_t pc_options_call(uint32_t self, uint32_t function)

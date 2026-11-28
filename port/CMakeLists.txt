@@ -151,6 +151,7 @@ if(WIN32)
   <application xmlns=\"urn:schemas-microsoft-com:asm.v3\">
     <windowsSettings>
       <activeCodePage xmlns=\"http://schemas.microsoft.com/SMI/2019/WindowsSettings\">UTF-8</activeCodePage>
+      <longPathAware xmlns=\"http://schemas.microsoft.com/SMI/2016/WindowsSettings\">true</longPathAware>
     </windowsSettings>
   </application>
 </assembly>
@@ -197,6 +198,7 @@ set_source_files_properties(setup_window.cpp PROPERTIES OBJECT_DEPENDS "${PORT_L
 
 add_executable(${PROJECT_NAME}
     ${PORT_PLATFORM_SOURCES}
+    cpu_check.c
     main.cpp
     button_prompts.cpp
     prompt_art.cpp
@@ -243,6 +245,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 find_package(SDL3 CONFIG REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE ps3recomp_runtime rl_achievements SDL3::SDL3)
 set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX WIN32_EXECUTABLE TRUE OUTPUT_NAME Vajra)
+set_source_files_properties(cpu_check.c PROPERTIES COMPILE_OPTIONS "-march=x86-64;-fno-lto;-fno-profile-instr-generate;-fno-profile-instr-use")
+target_link_options(${PROJECT_NAME} PRIVATE -Wl,-e,vajra_entry)
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE winmm)
     target_link_options(${PROJECT_NAME} PRIVATE -static)

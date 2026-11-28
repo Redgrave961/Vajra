@@ -11,3 +11,4 @@ bool firmware_download(const std::filesystem::path& pup, std::atomic<float>& pro
                        const std::atomic<bool>* cancel = nullptr);
 bool update_download(const std::filesystem::path& pkg, std::atomic<float>& progress, std::string& error,
                      const std::atomic<bool>* cancel = nullptr, const std::string& title_id = "BLES01227");
+bool update_pkg_complete(const std::filesystem::path& pkg);

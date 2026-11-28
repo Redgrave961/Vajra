@@ -58,7 +58,7 @@ enum action { a_game_folder, a_game_iso, a_update_download, a_dlc_add, a_dlc_cle
 
 struct face {
     SDL_Texture* tex = nullptr;
-    std::array<stbtt_packedchar, 96 + 96 + 3> chars{};
+    std::array<stbtt_packedchar, 96 + 96 + 4> chars{};
     float size = 0, ascent = 0;
     int aw = 0, ah = 0;
 };
@@ -70,6 +70,7 @@ int glyph_index(uint32_t cp)
     if (cp == 0x2013) return 192;
     if (cp == 0x2026) return 193;
     if (cp == 0x00B7) return 194;
+    if (cp == 0x2014) return 195;
     return '?' - 32;
 }
 
@@ -104,15 +105,22 @@ struct bg_job {
     std::filesystem::path result;
 };
 
+struct check_job {
+    std::thread worker;
+    std::atomic<bool> done{ false };
+    game_paths paths;
+    game_check check;
+    game_add_result added;
+};
+
 struct pick_state {
     std::mutex lock;
     bool alive = true;
-    std::vector<std::pair<std::filesystem::path, game_add_mode>> items;
+    std::vector<std::filesystem::path> items;
 };
 
 struct pick_req {
     std::shared_ptr<pick_state> state;
-    game_add_mode mode = game_add_mode::any;
 };
 
 float sd_seg(float px, float py, float ax, float ay, float bx, float by)
@@ -124,8 +132,10 @@ float sd_seg(float px, float py, float ax, float ay, float bx, float by)
 
 class setup_ui {
 public:
-    setup_ui(const std::filesystem::path& exe, game_paths& paths, game_check check) : exe(exe), paths(paths), check(std::move(check))
+    setup_ui(const std::filesystem::path& exe, game_paths& paths, game_check check, std::vector<report_line> notes)
+        : exe(exe), paths(paths), check(std::move(check)), notes(std::move(notes))
     {
+        refresh_report();
         uint32_t seed = 0x9E3779B9u;
         auto rng = [&] {
             seed ^= seed << 13;
@@ -205,6 +215,7 @@ public:
         }
         job.cancel.store(true, std::memory_order_relaxed);
         if (job.worker.joinable()) job.worker.join();
+        if (checking.worker.joinable()) checking.worker.join();
         for (SDL_Gamepad* g : gamepads) SDL_CloseGamepad(g);
         gamepads.clear();
         if (cur_pointer) SDL_DestroyCursor(cur_pointer);
@@ -230,8 +241,9 @@ public:
                     if (!handle(e)) return false;
                 } while (SDL_PollEvent(&e));
             }
-            apply_picks();
+            finish_check();
             finish_job();
+            start_check();
             if (play) return true;
             draw();
         }
@@ -470,18 +482,19 @@ private:
         aa_rect(pr, 14.f, c_panel);
         aa_border(pr, 14.f, c_panel_border);
 
-        const char* names[] = { "Game", "Update 1.02", "DLC", "Licenses", "Firmware" };
+        const char* names[] = { "Game", "Update 1.02", "DLC", "Licences", "Firmware" };
         const char* hints[] = {
             "BLES01227 (EU) or BLUS30721 (US) disc folder or decrypted ISO",
             "Official 1.02 patch (automatic Sony download)",
             "Optional DLC .pkg packages",
-            "Optional .rap keys for DLC",
+            "Optional .rap licences for DLC",
             "PS3 audio codecs (automatic Sony download)",
         };
         const item_status* items[] = { &check.game, &check.update, &check.dlc, &check.licences, &check.firmware };
         for (int i = 0; i < 5; i++) draw_row(i, names[i], hints[i], *items[i], dt);
 
         for (size_t i = 0; i < buttons.size(); i++) draw_button(buttons[i], kbd_nav && (int)i == focus, dt, t);
+        draw_report(dt);
 
         const float drop_target = dragging ? 1.f : 0.f;
         drop_alpha += (drop_target - drop_alpha) * std::min(1.f, dt * 14.f);
@@ -510,8 +523,8 @@ private:
         stbtt_pack_range ranges[3] = {};
         ranges[0] = { f.size, 32, nullptr, 96, f.chars.data(), 0, 0 };
         ranges[1] = { f.size, 160, nullptr, 96, f.chars.data() + 96, 0, 0 };
-        int special[3] = { 0x2013, 0x2026, 0x00B7 };
-        ranges[2] = { f.size, 0, special, 3, f.chars.data() + 192, 0, 0 };
+        int special[4] = { 0x2013, 0x2026, 0x00B7, 0x2014 };
+        ranges[2] = { f.size, 0, special, 4, f.chars.data() + 192, 0, 0 };
         stbtt_PackFontRanges(&pc, src.ttf.data(), 0, ranges, 3);
         stbtt_PackEnd(&pc);
         int ascent = 0, descent = 0, gap = 0;
@@ -549,6 +562,27 @@ private:
             if (measure(f, t) <= width) return t;
         }
         return "\xE2\x80\xA6";
+    }
+
+    std::vector<std::string> wrap(const face& f, const std::string& str, float width) const
+    {
+        std::vector<std::string> lines;
+        std::string line;
+        for (size_t at = 0; at <= str.size();) {
+            size_t end = str.find(' ', at);
+            if (end == std::string::npos) end = str.size();
+            const std::string word = str.substr(at, end - at);
+            at = end + 1;
+            const std::string joined = line.empty() ? word : line + " " + word;
+            if (line.empty() || measure(f, joined) <= width) {
+                line = joined;
+            } else {
+                lines.push_back(fit(f, line, width));
+                line = word;
+            }
+        }
+        if (!line.empty()) lines.push_back(fit(f, line, width));
+        return lines;
     }
 
     void text(const face& f, const std::string& str, float x, float y, rgba c, float track = 0.f)
@@ -614,7 +648,8 @@ private:
     void layout()
     {
         buttons.clear();
-        const bool busy = job.phase == 1 || job.phase == 2;
+        const bool checking_files = checking.worker.joinable();
+        const bool busy = job.phase == 1 || job.phase == 2 || checking_files;
 
         auto add_row_btns = [&](int row, std::initializer_list<std::tuple<const char*, action, btn_style>> items) {
             const SDL_FRect r = row_rect(row);
@@ -640,7 +675,7 @@ private:
 
         const bool ready = check.ready() && !busy;
         buttons.push_back({ { k_pad, k_h - 78.f, k_w - 2 * k_pad, 54.f },
-                            ready ? "Play" : "Complete required setup above to play",
+                            ready ? "Play" : checking_files ? "Checking files\xE2\x80\xA6" : "Complete required setup above to play",
                             a_play, ready, btn_style::play });
         focus = std::clamp(focus, 0, (int)buttons.size() - 1);
     }
@@ -683,13 +718,30 @@ private:
             return;
         }
         const bool failed = i == job.row.load() && job.phase == 3;
-        const bool has_notice = (i == 2 && !dlc_notice.empty()) || (i == 3 && !rap_notice.empty());
-        const std::string detail = failed ? job_error
-                                 : i == 2 && !dlc_notice.empty() ? dlc_notice
-                                 : i == 3 && !rap_notice.empty() ? rap_notice
-                                 : (st.state == item_state::missing ? std::string(hint) : st.text);
+        const bool has_notice = i == 2 && !notice.empty();
+        const std::string detail = failed ? job_error : has_notice ? notice : (st.state == item_state::missing ? std::string(hint) : st.text);
         const rgba c = failed || has_notice || st.state == item_state::bad ? c_bad : st.state == item_state::warn ? c_warn : st.state == item_state::ok ? c_sub : c_dim;
         text(body, fit(body, detail, width), r.x + 64.f, r.y + 41.f, c);
+    }
+
+    void draw_report(float dt)
+    {
+        const bool over = hit(row_rect(2), mouse_x, mouse_y) || hit(row_rect(3), mouse_x, mouse_y);
+        report_alpha += ((over && !report.empty() ? 1.f : 0.f) - report_alpha) * std::min(1.f, dt * 14.f);
+        if (report_alpha < 0.01f || report.empty()) return;
+        constexpr float line_h = 22.f, pad = 14.f;
+        const float w = k_w - 2 * k_pad - 40.f;
+        std::vector<std::pair<std::string, bool>> lines;
+        for (const report_line& l : report)
+            for (std::string& t : wrap(body, l.text, w - 2 * pad)) lines.emplace_back(std::move(t), l.problem);
+        const float h = pad * 2 + line_h * (float)lines.size();
+        const SDL_FRect r{ k_pad + 20.f, std::max(8.f, row_rect(2).y - h - 6.f), w, h };
+        const auto fade = [&](rgba c) { return rgba{ c.r, c.g, c.b, (uint8_t)(c.a * report_alpha) }; };
+        aa_shadow(r, 10.f, 12.f, fade({ 0, 0, 0, 170 }));
+        aa_rect(r, 12.f, fade({ 18, 12, 13, 246 }));
+        aa_border(r, 12.f, fade(c_panel_border));
+        for (size_t i = 0; i < lines.size(); i++)
+            text(body, lines[i].first, r.x + pad, r.y + pad + line_h * (float)i, fade(lines[i].second ? c_bad : c_sub));
     }
 
     void draw_button(const button& b, bool focused, float dt, float t)
@@ -815,7 +867,7 @@ private:
             break;
         case SDL_EVENT_DROP_FILE: {
             std::lock_guard<std::mutex> hold(picks->lock);
-            picks->items.emplace_back(path_from_utf8(e.drop.data), game_add_mode::any);
+            picks->items.push_back(path_from_utf8(e.drop.data));
             break;
         }
         case SDL_EVENT_KEY_DOWN:
@@ -873,57 +925,66 @@ private:
         std::lock_guard<std::mutex> hold(req->state->lock);
         if (!req->state->alive) return;
         for (; *list; list++)
-            req->state->items.emplace_back(path_from_utf8(*list), req->mode);
+            req->state->items.push_back(path_from_utf8(*list));
     }
 
     void activate(action id)
     {
         static const SDL_DialogFileFilter f_iso[] = { { "PS3 ISO Image", "iso;ISO" }, { "All Files", "*" } };
-        static const SDL_DialogFileFilter f_dlc[] = { { "PS3 DLC / License", "pkg;PKG;rap;RAP" }, { "All Files", "*" } };
-        static const SDL_DialogFileFilter f_rap[] = { { "PS3 License (.rap)", "rap;RAP" }, { "All Files", "*" } };
+        static const SDL_DialogFileFilter f_dlc[] = { { "PS3 DLC / Licence", "pkg;PKG;rap;RAP" }, { "All Files", "*" } };
+        static const SDL_DialogFileFilter f_rap[] = { { "PS3 Licence (.rap)", "rap;RAP" }, { "All Files", "*" } };
         switch (id) {
-        case a_game_folder: SDL_ShowOpenFolderDialog(on_pick, new pick_req{ picks, game_add_mode::any }, window, nullptr, false); break;
-        case a_game_iso: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks, game_add_mode::any }, window, f_iso, 2, nullptr, false); break;
+        case a_game_folder: SDL_ShowOpenFolderDialog(on_pick, new pick_req{ picks }, window, nullptr, false); break;
+        case a_game_iso: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks }, window, f_iso, 2, nullptr, false); break;
         case a_update_download: start_update_job(); break;
-        case a_dlc_add: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks, game_add_mode::dlc }, window, f_dlc, 2, nullptr, true); break;
+        case a_dlc_add: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks }, window, f_dlc, 2, nullptr, true); break;
         case a_dlc_clear:
             paths.dlcs.clear();
-            dlc_notice.clear();
-            rap_notice.clear();
-            recheck();
+            notes.clear();
+            recheck_wanted = true;
             break;
-        case a_rap_add: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks, game_add_mode::rap }, window, f_rap, 2, nullptr, true); break;
+        case a_rap_add: SDL_ShowOpenFileDialog(on_pick, new pick_req{ picks }, window, f_rap, 2, nullptr, true); break;
         case a_download: start_job({}); break;
         case a_play: play = true; break;
         }
     }
 
-    void apply_picks()
+    void start_check()
     {
-        std::vector<std::pair<std::filesystem::path, game_add_mode>> items;
+        if (checking.worker.joinable()) return;
+        std::vector<std::filesystem::path> items;
         {
             std::lock_guard<std::mutex> hold(picks->lock);
             items.swap(picks->items);
         }
-        if (items.empty()) return;
-        dlc_notice.clear();
-        rap_notice.clear();
-        draw();
-        std::filesystem::path pup;
-        for (const auto& [item, mode] : items) {
-            const game_add_result r = add_game_items(exe, paths, { item }, mode);
-            if (!r.pup.empty()) pup = r.pup;
-            if (!r.dlc_notice.empty()) dlc_notice = r.dlc_notice;
-            if (!r.rap_notice.empty()) rap_notice = r.rap_notice;
-        }
-        if (!pup.empty() && job.phase != 1 && job.phase != 2) start_job(pup);
-        recheck();
+        if (items.empty() && !recheck_wanted) return;
+        if (!items.empty()) notes.clear();
+        recheck_wanted = false;
+        checking.paths = paths;
+        checking.done.store(false, std::memory_order_relaxed);
+        checking.worker = std::thread([this, items = std::move(items)] {
+            checking.added = add_game_items(exe, checking.paths, items);
+            checking.check = check_game_paths(exe, checking.paths);
+            checking.done.store(true, std::memory_order_release);
+        });
     }
 
-    void recheck()
+    void finish_check()
     {
-        draw();
-        check = check_game_paths(exe, paths);
+        if (!checking.worker.joinable() || !checking.done.load(std::memory_order_acquire)) return;
+        checking.worker.join();
+        paths = std::move(checking.paths);
+        check = std::move(checking.check);
+        notes.insert(notes.end(), checking.added.notes.begin(), checking.added.notes.end());
+        refresh_report();
+        if (!checking.added.pup.empty() && job.phase != 1 && job.phase != 2) start_job(checking.added.pup);
+    }
+
+    void refresh_report()
+    {
+        report = dlc_report(check, notes);
+        const auto last = std::find_if(notes.rbegin(), notes.rend(), [](const report_line& l) { return l.problem; });
+        notice = last == notes.rend() ? std::string() : last->text;
     }
 
     void start_update_job()
@@ -977,7 +1038,7 @@ private:
 
     void finish_job()
     {
-        if (job.phase < 3 || !job.worker.joinable()) return;
+        if (job.phase < 3 || !job.worker.joinable() || checking.worker.joinable()) return;
         job.worker.join();
         const int target = job.row.load();
         const bool ok = job.phase == 4;
@@ -991,7 +1052,7 @@ private:
             job.phase = 0;
             if (target == 1 && !result.empty()) {
                 paths.update = result;
-                recheck();
+                recheck_wanted = true;
             } else if (target == 4) {
                 check.firmware = firmware_installed(firmware_dir(exe, paths)) ? item_status{ item_state::ok, "Installed" } : check.firmware;
             }
@@ -1001,6 +1062,11 @@ private:
     std::filesystem::path exe;
     game_paths& paths;
     game_check check;
+    std::vector<report_line> notes, report;
+    std::string notice;
+    check_job checking;
+    bool recheck_wanted = false;
+    float report_alpha = 0.f;
     SDL_Window* window = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Cursor* cur_default = nullptr;
@@ -1024,7 +1090,7 @@ private:
     std::vector<button> buttons;
     std::array<btn_anim, 8> anims{};
     float row_hover[5]{};
-    std::string job_error, dlc_notice, rap_notice;
+    std::string job_error;
     std::shared_ptr<pick_state> picks = std::make_shared<pick_state>();
     std::vector<SDL_Gamepad*> gamepads;
     std::array<ember, 26> embers{};
@@ -1033,8 +1099,8 @@ private:
 
 }
 
-bool run_setup(const std::filesystem::path& exe, const std::filesystem::path& icon, game_paths& paths, game_check check)
+bool run_setup(const std::filesystem::path& exe, const std::filesystem::path& icon, game_paths& paths, game_check check, std::vector<report_line> notes)
 {
-    setup_ui ui(exe, paths, std::move(check));
+    setup_ui ui(exe, paths, std::move(check), std::move(notes));
     return ui.open(icon) && ui.run();
 }

@@ -5,6 +5,8 @@
 #include "../ps3recomp/libs/filesystem/npdrm.h"
 #include "../ps3recomp/libs/filesystem/ps3_self.h"
 #include "../ps3recomp/libs/filesystem/ps3_vfs.h"
+#include "../ps3recomp/libs/system/cellSysutil.h"
+#include "../ps3recomp/runtime/platform/ps3_utf8_fs.h"
 
 #include <algorithm>
 #include <array>
@@ -16,6 +18,8 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <iterator>
+#include <map>
 #include <thread>
 
 namespace {
@@ -24,6 +28,7 @@ constexpr const char* k_title_id_eu = "BLES01227";
 constexpr const char* k_title_id_us = "BLUS30721";
 constexpr const char* k_eboot_sha256_us = "065c1f0c5f6203c4007730dbbd53edcf9f80d242ee78ab91d8e69198b723a342";
 constexpr const char* k_update_version = "01.02";
+constexpr const char* k_dash = " \xE2\x80\x94 ";
 
 bool is_supported_title(const std::string& tid) { return tid == k_title_id_eu || tid == k_title_id_us; }
 
@@ -34,7 +39,11 @@ const char* eboot_sha256_for(const std::string& tid)
     return "";
 }
 
+std::string region_of(const std::string& tid) { return tid == k_title_id_eu ? "EU" : tid == k_title_id_us ? "US" : tid; }
+
 std::string utf8(const std::filesystem::path& p, bool generic = false) { return utf8_from_path(p, generic); }
+
+std::string name_of(const std::filesystem::path& p) { return utf8(p.filename()); }
 
 std::string trim(const std::string& s)
 {
@@ -145,7 +154,20 @@ std::string sfo_string(const std::filesystem::path& path, const char* key)
 
 std::filesystem::path path_of(const std::string& value) { return path_from_utf8(value); }
 
-game_paths read_paths(const std::filesystem::path& exe)
+bool same_file(const std::filesystem::path& a, const std::filesystem::path& b)
+{
+    if (a == b) return true;
+    std::error_code ec;
+    return std::filesystem::equivalent(a, b, ec) && !ec;
+}
+
+void add_unique(std::vector<std::filesystem::path>& list, const std::filesystem::path& file)
+{
+    if (std::none_of(list.begin(), list.end(), [&](const std::filesystem::path& existing) { return same_file(existing, file); }))
+        list.push_back(file);
+}
+
+game_paths read_paths(const std::filesystem::path& exe, bool launcher)
 {
     game_paths p;
     std::ifstream ini(exe / "asura_paths.ini");
@@ -157,7 +179,7 @@ game_paths read_paths(const std::filesystem::path& exe)
         if (value.empty()) continue;
         if (key == "game") p.game = path_of(value);
         else if (key == "update") p.update = path_of(value);
-        else if (key == "dlc") p.dlcs.push_back(path_of(value));
+        else if (key == "setup_dlc" || (key == "dlc" && !launcher)) p.dlcs.push_back(path_of(value));
         else if (key == "firmware") p.firmware = path_of(value);
     }
     return p;
@@ -165,14 +187,15 @@ game_paths read_paths(const std::filesystem::path& exe)
 
 void write_paths(const std::filesystem::path& exe, const game_paths& p)
 {
-    std::ofstream ini(exe / "asura_paths.ini", std::ios::binary);
+    std::string ini;
     auto line = [&](const char* key, const std::filesystem::path& v) {
-        if (!v.empty()) ini << key << '=' << utf8(v) << '\n';
+        if (!v.empty()) ini += std::string(key) + '=' + utf8(v) + '\n';
     };
     line("game", p.game);
     line("update", p.update);
-    for (const auto& d : p.dlcs) line("dlc", d);
+    for (const auto& d : p.dlcs) line("setup_dlc", d);
     line("firmware", p.firmware);
+    write_file_atomic(exe / "asura_paths.ini", ini);
 }
 
 struct mounted {
@@ -202,6 +225,13 @@ std::string upper_ascii(std::string s)
 {
     for (char& c : s) c = (char)std::toupper((unsigned char)c);
     return s;
+}
+
+std::string lower_ext(const std::filesystem::path& file)
+{
+    std::string ext = utf8(file.extension());
+    for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+    return ext;
 }
 
 std::filesystem::path normalize_game_dir(std::filesystem::path p)
@@ -241,11 +271,6 @@ std::string detect_game_title(const std::filesystem::path& exe, const std::files
     return tid;
 }
 
-bool is_our_iso(const std::filesystem::path& exe, const std::filesystem::path& iso)
-{
-    return is_supported_title(detect_game_title(exe, iso));
-}
-
 bool write_rap_file(const std::filesystem::path& exdata, const std::string& filename, const uint8_t rap[16])
 {
     std::error_code ec;
@@ -253,9 +278,7 @@ bool write_rap_file(const std::filesystem::path& exdata, const std::string& file
     const std::filesystem::path dst = exdata / path_of(filename);
     if (std::filesystem::exists(dst, ec))
         std::filesystem::permissions(dst, std::filesystem::perms::owner_write, std::filesystem::perm_options::add, ec);
-    std::ofstream out(dst, std::ios::binary | std::ios::trunc);
-    out.write(reinterpret_cast<const char*>(rap), 16);
-    return (bool)out;
+    return write_file_atomic(dst, std::string_view(reinterpret_cast<const char*>(rap), 16));
 }
 
 std::string pkg_title_id(const char cid[37])
@@ -314,165 +337,632 @@ bool read_rap_bytes(const std::filesystem::path& file, std::array<uint8_t, 16>& 
     return true;
 }
 
-bool is_valid_update_pkg(const std::filesystem::path& exe, const std::filesystem::path& file)
+struct update_probe {
+    std::string version;
+    bool valid = false;
+};
+
+update_probe probe_update_pkg(const std::filesystem::path& exe, const std::filesystem::path& file)
 {
     const std::filesystem::path probe = exe / "user" / "check" / "probe_upd";
     ps3_vfs_unmount_all();
     char cid[37] = {};
-    bool match = false;
+    update_probe u;
     if (!ps3_vfs_mount_pkg(utf8(probe, true).c_str(), utf8(file).c_str(), cid)) {
         const std::string tid = pkg_title_id(cid);
-        if (is_supported_title(tid)) {
-            std::vector<uint8_t> self;
-            uint8_t* elf = nullptr;
-            size_t elf_size = 0;
-            if (read_all(probe / tid / "USRDIR" / "EBOOT.BIN", self) && !ps3_self_decrypt(self.data(), self.size(), &elf, &elf_size)) {
-                match = hex(sha256(elf, elf_size)) == eboot_sha256_for(tid);
-                std::free(elf);
-            }
+        u.version = sfo_string(probe / tid / "PARAM.SFO", "APP_VER");
+        std::vector<uint8_t> self;
+        uint8_t* elf = nullptr;
+        size_t elf_size = 0;
+        if (read_all(probe / tid / "USRDIR" / "EBOOT.BIN", self) && !ps3_self_decrypt(self.data(), self.size(), &elf, &elf_size)) {
+            u.valid = hex(sha256(elf, elf_size)) == eboot_sha256_for(tid);
+            std::free(elf);
         }
     }
     ps3_vfs_unmount_all();
-    return match;
+    return u;
 }
 
-void sort_file(const std::filesystem::path& exe, game_paths& paths, const std::filesystem::path& file, game_add_result& res, game_add_mode mode)
+std::string describe(const dlc_status& d)
 {
-    std::string ext = utf8(file.extension());
-    for (char& c : ext) c = (char)std::tolower((unsigned char)c);
-    std::error_code ec;
-    if (ext == ".iso") {
-        if (is_our_iso(exe, file)) paths.game = file;
-    } else if (ext == ".pkg") {
-        char cid[37] = {};
-        int has_eboot = 0;
-        if (ps3_vfs_pkg_info(utf8(file).c_str(), cid, &has_eboot)) {
-            res.dlc_notice = "Unreadable package: " + utf8(file.filename());
-            return;
-        }
-        const std::string tid = pkg_title_id(cid);
-        if (!is_supported_title(tid)) {
-            res.dlc_notice = "Wrong game (" + (tid.empty() ? std::string("unknown") : tid) + ", needs BLES01227 or BLUS30721): " + utf8(file.filename());
-            return;
-        }
-        if (has_eboot && mode == game_add_mode::any && is_valid_update_pkg(exe, file)) {
-            paths.update = file;
-        } else {
-            auto already = std::find_if(paths.dlcs.begin(), paths.dlcs.end(), [&](const std::filesystem::path& existing) {
-                if (existing == file) return true;
-                std::error_code eq_ec;
-                return std::filesystem::equivalent(existing, file, eq_ec) && !eq_ec;
-            });
-            if (already == paths.dlcs.end()) paths.dlcs.push_back(file);
-        }
-    } else if (ext == ".rap" || mode == game_add_mode::rap) {
-        std::array<uint8_t, 16> rap{};
-        if (!read_rap_bytes(file, rap)) {
-            res.rap_notice = "Invalid .rap (expected 16 bytes or 32 hex chars): " + utf8(file.filename());
-            return;
-        }
-        const std::string stem = utf8(file.stem());
-        const std::string embedded_cid = extract_content_id(stem);
-        const std::string target_name = !embedded_cid.empty()
-                                            ? (embedded_cid + ".rap")
-                                            : ((stem.empty() ? std::string("rap") : stem) + "_" + hex(sha256(rap.data(), rap.size())).substr(0, 16) + ".rap");
-        if (!write_rap_file(exdata_dir(exe), target_name, rap.data()))
-            res.rap_notice = "Failed to save .rap: " + utf8(file.filename());
-    } else if (ext == ".pup") {
-        res.pup = file;
+    const std::string head = d.name + (d.region.empty() ? std::string() : " (" + d.region + ")") + k_dash;
+    switch (d.state) {
+    case dlc_state::ok:
+        return head + "OK" + k_dash + (!d.needs_rap ? std::string("free, no licence needed") : d.rap.empty() ? std::string("unlocked") : "unlocked by " + utf8(d.rap));
+    case dlc_state::missing_rap:
+        if (!d.rap.empty())
+            return head + "WILL NOT WORK: " + name_of(d.rap) + " is the licence for the other region's copy" + k_dash + "put the " + d.region +
+                   " .rap in " + utf8(d.file.parent_path());
+        return head + "WILL NOT WORK: its .rap licence is missing" + k_dash + "put its .rap in " + utf8(d.file.parent_path());
+    case dlc_state::wrong_rap:
+        return head + "WILL NOT WORK: wrong licence" + k_dash + utf8(d.rap) + " does not unlock it";
+    case dlc_state::wrong_game:
+        return head + "WRONG GAME" + k_dash + d.detail;
+    case dlc_state::unreadable:
+        return head + "UNREADABLE" + k_dash + "not a PS3 package, or damaged";
+    case dlc_state::duplicate:
+        return head + "DUPLICATE" + k_dash + d.detail;
+    }
+    return head;
+}
+
+dlc_status rejected_pkg(const std::filesystem::path& file, const char cid[37], bool readable)
+{
+    dlc_status d;
+    d.file = file;
+    d.name = name_of(file);
+    d.content_id = cid;
+    d.state = readable ? dlc_state::wrong_game : dlc_state::unreadable;
+    const std::string tid = pkg_title_id(cid);
+    d.detail = "a package for " + (tid.empty() ? std::string("another game") : tid) + ", needs BLES01227 or BLUS30721";
+    return d;
+}
+
+struct add_context {
+    const std::filesystem::path& exe;
+    game_paths& paths;
+    game_add_result& res;
+    game_add_target target;
+    std::string game_tid{};
+    bool game_tid_known = false;
+    size_t skipped = 0;
+};
+
+void note(add_context& a, std::string text, bool problem) { a.res.notes.push_back({ std::move(text), problem }); }
+
+const std::string& game_title(add_context& a)
+{
+    if (!a.game_tid_known) {
+        a.game_tid = detect_game_title(a.exe, a.paths.game);
+        a.game_tid_known = true;
+    }
+    return a.game_tid;
+}
+
+void use_game(add_context& a, const std::filesystem::path& game)
+{
+    if (a.target.game_fixed && !same_file(a.paths.game, game)) {
+        note(a, name_of(game) + " is a game copy, but the game is already set" + k_dash + "ignored", false);
+        return;
+    }
+    a.paths.game = game;
+    a.game_tid_known = false;
+}
+
+void use_pkg(add_context& a, const std::filesystem::path& file)
+{
+    char cid[37] = {};
+    int has_eboot = 0;
+    if (ps3_vfs_pkg_info(utf8(file).c_str(), cid, &has_eboot)) {
+        note(a, describe(rejected_pkg(file, cid, false)) + k_dash + "ignored", true);
+        return;
+    }
+    const std::string tid = pkg_title_id(cid);
+    if (!is_supported_title(tid)) {
+        note(a, describe(rejected_pkg(file, cid, true)) + k_dash + "ignored", true);
+        return;
+    }
+    if (!has_eboot) {
+        add_unique(a.target.launch ? a.paths.launch_dlcs : a.paths.dlcs, file);
+        return;
+    }
+    const update_probe u = probe_update_pkg(a.exe, file);
+    const std::string what = name_of(file) + k_dash + "GAME UPDATE (" + (u.version.empty() ? std::string("unknown version") : "version " + u.version) + ", " +
+                             region_of(tid) + ")" + k_dash;
+    const std::string& game_tid = game_title(a);
+    if (!u.valid) note(a, what + "not DLC and not the " + k_update_version + " update" + k_dash + "ignored", false);
+    else if (is_supported_title(game_tid) && tid != game_tid) note(a, what + "not DLC, and the game is " + region_of(game_tid) + k_dash + "ignored", false);
+    else if (a.target.update_fixed && !same_file(a.paths.update, file)) note(a, what + "not DLC, and an update is already set" + k_dash + "ignored", false);
+    else {
+        a.paths.update = file;
+        note(a, what + "used as the update", false);
     }
 }
 
-struct pkg_edat_check {
-    std::string exdata;
-    std::vector<std::string> missing;
-    std::vector<std::pair<std::string, std::string>> locked_files;
+void use_rap(add_context& a, const std::filesystem::path& file, const std::array<uint8_t, 16>& rap)
+{
+    const std::string stem = utf8(file.stem());
+    const std::string embedded_cid = extract_content_id(stem);
+    const std::string target_name = !embedded_cid.empty()
+                                        ? (embedded_cid + ".rap")
+                                        : ((stem.empty() ? std::string("rap") : stem) + "_" + hex(sha256(rap.data(), rap.size())).substr(0, 16) + ".rap");
+    if (write_rap_file(exdata_dir(a.exe), target_name, rap.data())) note(a, name_of(file) + k_dash + "licence added as " + target_name, false);
+    else note(a, name_of(file) + k_dash + "licence could not be saved to the exdata folder", true);
+}
+
+void sort_file(add_context& a, const std::filesystem::path& file, bool direct)
+{
+    const std::string ext = lower_ext(file);
+    std::array<uint8_t, 16> rap{};
+    if (ext == ".iso") {
+        if (is_supported_title(detect_game_title(a.exe, file))) use_game(a, file);
+        else note(a, name_of(file) + " is not a BLES01227 or BLUS30721 disc image" + k_dash + "ignored", false);
+    } else if (ext == ".pkg") {
+        use_pkg(a, file);
+    } else if (ext == ".pup") {
+        a.res.pup = file;
+    } else if (ext == ".rap") {
+        if (read_rap_bytes(file, rap)) use_rap(a, file, rap);
+        else note(a, name_of(file) + k_dash + "INVALID RAP" + k_dash + "expected 16 bytes or 32 hex digits" + k_dash + "ignored", true);
+    } else if (direct && read_rap_bytes(file, rap)) {
+        use_rap(a, file, rap);
+    } else if (direct) {
+        note(a, name_of(file) + " is not a game, update, DLC or licence file" + k_dash + "ignored", false);
+    } else {
+        a.skipped++;
+    }
+}
+
+void append_utf8(std::string& out, uint32_t c)
+{
+    if (c < 0x80) out += (char)c;
+    else if (c < 0x800) out += { (char)(0xC0 | c >> 6), (char)(0x80 | (c & 0x3F)) };
+    else if (c < 0x10000) out += { (char)(0xE0 | c >> 12), (char)(0x80 | (c >> 6 & 0x3F)), (char)(0x80 | (c & 0x3F)) };
+    else out += { (char)(0xF0 | c >> 18), (char)(0x80 | (c >> 12 & 0x3F)), (char)(0x80 | (c >> 6 & 0x3F)), (char)(0x80 | (c & 0x3F)) };
+}
+
+std::string utf8_from_utf16(const uint8_t* p, size_t units)
+{
+    std::string out;
+    for (size_t i = 0; i < units; i++) {
+        uint32_t c = p[i * 2] | (uint32_t)p[i * 2 + 1] << 8;
+        if (c >= 0xD800 && c < 0xDC00 && i + 1 < units) {
+            const uint32_t low = p[i * 2 + 2] | (uint32_t)p[i * 2 + 3] << 8;
+            if (low >= 0xDC00 && low < 0xE000) {
+                c = 0x10000 + ((c - 0xD800) << 10) + (low - 0xDC00);
+                i++;
+            }
+        }
+        if (!c) break;
+        append_utf8(out, c);
+    }
+    return out;
+}
+
+std::string utf8_from_latin1(const uint8_t* p, size_t n)
+{
+    std::string out;
+    for (size_t i = 0; i < n && p[i]; i++) append_utf8(out, p[i]);
+    return out;
+}
+
+std::string decode_text(const std::vector<uint8_t>& d)
+{
+    if (d.size() >= 2 && d[0] == 0xFF && d[1] == 0xFE) return utf8_from_utf16(d.data() + 2, (d.size() - 2) / 2);
+    return utf8_from_latin1(d.data(), d.size());
+}
+
+struct ini_entry {
+    std::string section, key, value;
 };
 
-void check_pkg_entry(const char* full_path, void* user)
+std::vector<ini_entry> parse_ini(const std::string& text)
 {
-    auto* ctx = static_cast<pkg_edat_check*>(user);
+    std::vector<ini_entry> out;
+    std::string section;
+    for (size_t at = 0; at < text.size();) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        const std::string line = trim(text.substr(at, end - at));
+        at = end + 1;
+        if (line.empty() || line[0] == ';') continue;
+        if (line.front() == '[' && line.back() == ']') {
+            section = line.substr(1, line.size() - 2);
+            continue;
+        }
+        const size_t eq = line.find('=');
+        if (eq != std::string::npos) out.push_back({ section, trim(line.substr(0, eq)), trim(line.substr(eq + 1)) });
+    }
+    return out;
+}
+
+struct coalesced_reader {
+    const std::vector<uint8_t>& d;
+    size_t at = 0;
+    bool ok = true;
+
+    int32_t count()
+    {
+        if (d.size() - at < 4) {
+            ok = false;
+            return 0;
+        }
+        const uint32_t v = (uint32_t)d[at] << 24 | (uint32_t)d[at + 1] << 16 | (uint32_t)d[at + 2] << 8 | d[at + 3];
+        at += 4;
+        return (int32_t)v;
+    }
+
+    std::string text()
+    {
+        const int64_t n = count();
+        const uint64_t bytes = n < 0 ? (uint64_t)-n * 2 : (uint64_t)n;
+        if (!ok || bytes > d.size() - at) {
+            ok = false;
+            return {};
+        }
+        std::string s = n < 0 ? utf8_from_utf16(d.data() + at, (size_t)bytes / 2) : utf8_from_latin1(d.data() + at, (size_t)bytes);
+        at += (size_t)bytes;
+        return s;
+    }
+};
+
+struct localization {
+    std::map<std::string, std::string> titles, chapters, numbers;
+    std::string episode;
+};
+
+std::string game_language()
+{
+    switch (ps3_sysutil_language()) {
+    case CELL_SYSUTIL_LANG_JAPANESE: return "JPN";
+    case CELL_SYSUTIL_LANG_FRENCH: return "FRA";
+    case CELL_SYSUTIL_LANG_SPANISH: return "ESN";
+    case CELL_SYSUTIL_LANG_GERMAN: return "DEU";
+    case CELL_SYSUTIL_LANG_ITALIAN: return "ITA";
+    default: return "INT";
+    }
+}
+
+bool read_localization(const std::filesystem::path& bdvd, const std::string& lang, localization& loc)
+{
+    std::vector<uint8_t> d;
+    if (!read_all(bdvd / "PS3_GAME" / "USRDIR" / "BCGAME" / "COOKEDPS3" / ("COALESCED_" + lang + ".BIN"), d)) return false;
+    std::string ext = lang;
+    for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+    const std::string base = "..\\..\\BCGame\\Localization\\" + lang + "\\";
+    const std::string game_file = base + "BCGame." + ext, common_file = base + "Common." + ext;
+    coalesced_reader r{ d };
+    for (int32_t files = r.count(); r.ok && files-- > 0;) {
+        const std::string file = r.text();
+        for (int32_t sections = r.count(); r.ok && sections-- > 0;) {
+            const std::string section = r.text();
+            std::map<std::string, std::string>* into = file == game_file && section == "Title"     ? &loc.titles
+                                                       : file == game_file && section == "Chapter" ? &loc.chapters
+                                                       : file == common_file && section == "Number" ? &loc.numbers
+                                                                                                    : nullptr;
+            const bool story = file == common_file && section == "Story";
+            for (int32_t keys = r.count(); r.ok && keys-- > 0;) {
+                const std::string key = r.text(), value = r.text();
+                if (into) into->insert_or_assign(key, value);
+                else if (story && key == "STORY") loc.episode = value;
+            }
+        }
+    }
+    return r.ok && !loc.titles.empty();
+}
+
+localization load_localization(const std::filesystem::path& bdvd, const std::string& lang)
+{
+    localization loc;
+    if (!bdvd.empty() && !read_localization(bdvd, lang, loc) && lang != "INT") {
+        loc = {};
+        read_localization(bdvd, "INT", loc);
+    }
+    return loc;
+}
+
+struct dlc_episode {
+    std::string stage, chapter, story;
+};
+
+struct dlc_probe {
+    dlc_status status;
+    std::vector<std::string> stages;
+    std::vector<dlc_episode> episodes;
+    std::map<std::string, std::string> numbers;
+};
+
+std::vector<dlc_episode> episodes_of(const std::string& ini)
+{
+    std::vector<dlc_episode> out;
+    std::string current;
+    for (const ini_entry& e : parse_ini(ini)) {
+        if (e.section.rfind("MapProvider_", 0) != 0 || e.section.find("BCUIDataProvider_ChapterInfo") == std::string::npos) continue;
+        if (e.section != current) {
+            current = e.section;
+            out.emplace_back();
+        }
+        if (e.key == "MapName" && e.value.rfind("BC-", 0) == 0) out.back().stage = e.value.substr(3);
+        else if (e.key == "ChapterNo") out.back().chapter = e.value;
+        else if (e.key == "StoryNo") out.back().story = e.value;
+    }
+    return out;
+}
+
+std::string decrypt_text(const std::string& path)
+{
+    ps3_vfile* f = ps3_vfile_open(path.c_str(), "rb");
+    if (!f) return {};
+    npdrm_file* d = npdrm_open(f);
+    if (!d) {
+        ps3_vfile_close(f);
+        return {};
+    }
+    std::vector<uint8_t> data((size_t)npdrm_size(d));
+    const int64_t got = npdrm_read(d, 0, data.data(), data.size());
+    npdrm_close(d);
+    data.resize(got < 0 ? 0 : (size_t)got);
+    return decode_text(data);
+}
+
+std::string dlc_name(const dlc_probe& pr, const localization& loc)
+{
+    auto lookup = [](const std::map<std::string, std::string>& m, const std::string& key) {
+        const auto it = m.find(key);
+        return it == m.end() ? std::string() : it->second;
+    };
+    std::string name;
+    auto add = [&](const std::string& part) {
+        if (!part.empty()) name += (name.empty() ? "" : " / ") + part;
+    };
+    if (pr.episodes.empty()) {
+        for (const std::string& stage : pr.stages) add(lookup(loc.titles, stage));
+        return name.empty() ? pr.status.name : name;
+    }
+    auto number = [&](std::string story) {
+        std::replace(story.begin(), story.end(), '.', '_');
+        const std::string own = lookup(pr.numbers, "N" + story);
+        return own.empty() ? lookup(loc.numbers, "N" + story) : own;
+    };
+    auto episode = [&](const std::string& first, const std::string& tail) {
+        const size_t star = loc.episode.find('*');
+        if (star == std::string::npos || first.empty() || first.find_first_not_of("0123456789.") != std::string::npos) return first + tail;
+        return loc.episode.substr(0, star) + first + tail + loc.episode.substr(star + 1);
+    };
+    const dlc_episode& front = pr.episodes.front();
+    const std::string chapter = lookup(loc.chapters, "C" + front.chapter);
+    const bool one_chapter = std::all_of(pr.episodes.begin(), pr.episodes.end(), [&](const dlc_episode& e) { return e.chapter == front.chapter; });
+    if (pr.episodes.size() > 1 && one_chapter && !chapter.empty())
+        return chapter + k_dash + episode(number(front.story), "\xE2\x80\x93" + number(pr.episodes.back().story));
+    for (const dlc_episode& e : pr.episodes) {
+        const std::string label = episode(number(e.story), ""), title = lookup(loc.titles, e.stage);
+        add(label.empty() ? title : title.empty() ? label : label + ": " + title);
+    }
+    return name.empty() ? pr.status.name : name;
+}
+
+struct dlc_scan {
+    std::string exdata;
+    std::string language;
+    std::string rap_id;
+    std::string first;
+    std::vector<std::string> locked;
+    std::vector<std::string> stages;
+    std::string ini;
+    std::string common;
+};
+
+void scan_dlc(const char* full_path, void* user)
+{
+    auto& s = *static_cast<dlc_scan*>(user);
+    const char* slash = std::strrchr(full_path, '/');
+    const std::string name = upper_ascii(slash ? slash + 1 : full_path);
+    if (name.size() > 7 && name.rfind("BC-S", 0) == 0 && std::isdigit((unsigned char)name[4]) && std::isdigit((unsigned char)name[5]) &&
+        std::isdigit((unsigned char)name[6]) && std::find(s.stages.begin(), s.stages.end(), name.substr(3, 4)) == s.stages.end())
+        s.stages.push_back(name.substr(3, 4));
+    if (name == "PS3-BCGAME.INI.EDAT") s.ini = full_path;
+    if (name == "COMMON." + s.language || (name == "COMMON.INT" && s.common.empty())) s.common = full_path;
     ps3_vfile* f = ps3_vfile_open(full_path, "rb");
     if (!f) return;
     char cid[49] = {};
-    if (npdrm_check_vfile(f, ctx->exdata.c_str(), cid) && cid[0]) {
-        const std::string s(cid);
-        if (std::find(ctx->missing.begin(), ctx->missing.end(), s) == ctx->missing.end()) ctx->missing.push_back(s);
-        ctx->locked_files.emplace_back(full_path, s);
-    }
+    const int locked = npdrm_check_vfile(f, s.exdata.c_str(), cid);
     ps3_vfile_close(f);
+    if (!cid[0]) return;
+    if (s.rap_id.empty()) {
+        s.rap_id = cid;
+        s.first = full_path;
+    }
+    if (locked) s.locked.emplace_back(full_path);
 }
 
-void auto_import_nearby_raps(const std::filesystem::path& exe, const game_paths& p, pkg_edat_check& edat_check)
+std::vector<std::filesystem::path> rap_dirs(const std::filesystem::path& exe, const game_paths& p)
 {
-    if (edat_check.locked_files.empty()) return;
     std::error_code ec;
     std::vector<std::filesystem::path> dirs;
     auto push_dir = [&](const std::filesystem::path& d) {
-        if (d.empty() || !std::filesystem::is_directory(d, ec)) return;
-        for (const auto& existing : dirs) {
-            if (existing == d) return;
-            std::error_code eq_ec;
-            if (std::filesystem::equivalent(existing, d, eq_ec) && !eq_ec) return;
-        }
-        dirs.push_back(d);
+        if (!d.empty() && std::filesystem::is_directory(d, ec)) add_unique(dirs, d);
     };
     push_dir(exe / "exdata");
-    for (const auto& d : p.dlcs) {
-        const std::filesystem::path par = d.parent_path();
-        push_dir(par);
-        push_dir(par / "exdata");
-        push_dir(par / "rap");
-        push_dir(par / "raps");
-        if (par.has_parent_path()) {
-            push_dir(par.parent_path() / "exdata");
-            push_dir(par.parent_path() / "rap");
-            push_dir(par.parent_path() / "raps");
+    for (const auto* list : { &p.dlcs, &p.launch_dlcs })
+        for (const auto& d : *list) {
+            const std::filesystem::path par = d.parent_path();
+            push_dir(par);
+            for (const std::filesystem::path& base : { par, par.parent_path() }) {
+                push_dir(base / "exdata");
+                push_dir(base / "rap");
+                push_dir(base / "raps");
+            }
         }
-    }
     if (!p.game.empty()) {
         push_dir(p.game.parent_path() / "exdata");
         if (std::filesystem::is_directory(p.game, ec)) push_dir(p.game / "exdata");
     }
-    if (dirs.empty()) return;
+    return dirs;
+}
 
-    const std::filesystem::path exdata = exdata_dir(exe);
-    std::vector<std::string> still_missing;
-    for (const auto& [full_path, cid] : edat_check.locked_files) {
-        ps3_vfile* f = ps3_vfile_open(full_path.c_str(), "rb");
-        if (!f) {
-            if (std::find(still_missing.begin(), still_missing.end(), cid) == still_missing.end()) still_missing.push_back(cid);
-            continue;
+std::filesystem::path rap_file_with(const std::filesystem::path& dir, const std::string& rap_id, const uint8_t rap[16])
+{
+    std::array<uint8_t, 16> got{};
+    const std::filesystem::path named = dir / path_of(rap_id + ".rap");
+    if (read_rap_bytes(named, got) && !std::memcmp(got.data(), rap, 16)) return named;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(dir, std::filesystem::directory_options::skip_permission_denied, ec);
+         !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (lower_ext(it->path()) == ".rap" && read_rap_bytes(it->path(), got) && !std::memcmp(got.data(), rap, 16)) return it->path();
+    }
+    return {};
+}
+
+std::filesystem::path sibling_rap(const std::vector<std::filesystem::path>& dirs, const std::string& rap_id)
+{
+    const std::string id = upper_ascii(rap_id);
+    for (const auto& dir : dirs) {
+        std::error_code ec;
+        for (auto it = std::filesystem::directory_iterator(dir, std::filesystem::directory_options::skip_permission_denied, ec);
+             !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+            if (lower_ext(it->path()) != ".rap") continue;
+            const std::string stem = upper_ascii(utf8(it->path().stem()));
+            if (stem.size() == id.size() && stem != id && short_id(stem) == short_id(id)) return it->path();
         }
-        bool unlocked = npdrm_check_vfile(f, edat_check.exdata.c_str(), nullptr) == 0;
-        for (const auto& cand_dir : dirs) {
-            if (unlocked) break;
-            uint8_t rap[16];
-            char found_cid[49] = {};
-            if (npdrm_find_rap_in_dir(f, utf8(cand_dir, true).c_str(), rap, found_cid)) {
-                const std::string out_cid = found_cid[0] ? std::string(found_cid) : cid;
-                write_rap_file(exdata, out_cid + ".rap", rap);
-                unlocked = true;
+    }
+    return {};
+}
+
+bool still_locked(const std::string& full_path, const std::string& exdata)
+{
+    ps3_vfile* f = ps3_vfile_open(full_path.c_str(), "rb");
+    if (!f) return true;
+    const bool locked = npdrm_check_vfile(f, exdata.c_str(), nullptr) != 0;
+    ps3_vfile_close(f);
+    return locked;
+}
+
+void settle_licence(dlc_status& d, const dlc_scan& s, const std::vector<std::filesystem::path>& dirs, const std::filesystem::path& exdata)
+{
+    uint8_t rap[16];
+    char found[49] = {};
+    if (ps3_vfile* f = ps3_vfile_open((s.locked.empty() ? s.first : s.locked.front()).c_str(), "rb")) {
+        if (s.locked.empty()) {
+            if (npdrm_find_rap_in_dir(f, s.exdata.c_str(), rap, found)) d.rap = rap_file_with(exdata, d.rap_id, rap);
+        } else {
+            for (const auto& dir : dirs) {
+                if (!npdrm_find_rap_in_dir(f, utf8(dir, true).c_str(), rap, found)) continue;
+                write_rap_file(exdata, (found[0] ? std::string(found) : d.rap_id) + ".rap", rap);
+                d.rap = rap_file_with(dir, d.rap_id, rap);
+                break;
             }
         }
         ps3_vfile_close(f);
-        if (!unlocked && std::find(still_missing.begin(), still_missing.end(), cid) == still_missing.end())
-            still_missing.push_back(cid);
     }
-    edat_check.missing = std::move(still_missing);
+    if (std::none_of(s.locked.begin(), s.locked.end(), [&](const std::string& path) { return still_locked(path, s.exdata); })) return;
+    std::vector<std::filesystem::path> where{ exdata };
+    where.insert(where.end(), dirs.begin(), dirs.end());
+    d.rap.clear();
+    for (const auto& dir : where) {
+        std::error_code ec;
+        const std::filesystem::path named = dir / path_of(d.rap_id + ".rap");
+        if (!std::filesystem::exists(named, ec)) continue;
+        d.rap = named;
+        break;
+    }
+    d.state = d.rap.empty() ? dlc_state::missing_rap : dlc_state::wrong_rap;
+    if (d.rap.empty()) d.rap = sibling_rap(where, d.rap_id);
+}
+
+std::vector<dlc_probe> inspect_dlcs(const std::filesystem::path& exe, const game_paths& p, const std::filesystem::path& probe, const std::string& language)
+{
+    std::vector<std::filesystem::path> files = p.dlcs;
+    for (const auto& d : p.launch_dlcs) add_unique(files, d);
+    const std::vector<std::filesystem::path> dirs = rap_dirs(exe, p);
+    const std::filesystem::path exdata = exdata_dir(exe);
+    const std::string probe_dir = utf8(probe, true);
+    std::vector<dlc_probe> out;
+    ps3_vfs_unmount_all();
+    for (size_t i = 0; i < files.size(); i++) {
+        const std::string slot = "dlc" + std::to_string(i);
+        char cid[37] = {};
+        const int rc = ps3_vfs_mount_pkg_as(probe_dir.c_str(), slot.c_str(), utf8(files[i]).c_str(), cid);
+        dlc_probe pr;
+        if (rc || !is_supported_title(pkg_title_id(cid))) {
+            pr.status = rejected_pkg(files[i], cid, rc == 0);
+        } else {
+            dlc_status& d = pr.status;
+            d.file = files[i];
+            d.content_id = cid;
+            d.name = name_of(d.file);
+            dlc_scan s{ utf8(exdata, true), language, {}, {}, {}, {}, {}, {} };
+            ps3_vfs_enum_last_mount(scan_dlc, &s);
+            d.needs_rap = !s.rap_id.empty();
+            d.rap_id = s.rap_id;
+            if (d.needs_rap) settle_licence(d, s, dirs, exdata);
+            pr.stages = s.stages;
+            std::vector<uint8_t> common;
+            if (!s.common.empty() && read_all(path_of(s.common), common))
+                for (const ini_entry& e : parse_ini(decode_text(common)))
+                    if (e.section == "Number") pr.numbers.insert_or_assign(e.key, e.value);
+            if (d.state == dlc_state::ok && !s.ini.empty()) pr.episodes = episodes_of(decrypt_text(s.ini));
+        }
+        pr.status.given = std::any_of(p.launch_dlcs.begin(), p.launch_dlcs.end(), [&](const std::filesystem::path& g) { return same_file(g, files[i]); });
+        out.push_back(std::move(pr));
+    }
+    ps3_vfs_unmount_all();
+    return out;
+}
+
+bool mountable(const dlc_status& d) { return d.state == dlc_state::ok || d.state == dlc_state::missing_rap || d.state == dlc_state::wrong_rap; }
+
+void finish_dlcs(std::vector<dlc_status>& dlcs, const std::string& game_tid)
+{
+    auto tid_of = [](const dlc_status& d) { return pkg_title_id(d.content_id.c_str()); };
+    for (dlc_status& d : dlcs) {
+        if (!mountable(d)) continue;
+        const std::string tid = tid_of(d);
+        d.region = region_of(tid) + (is_supported_title(game_tid) && tid != game_tid ? ", game is " + region_of(game_tid) : std::string());
+    }
+    auto better = [&](const dlc_status& a, const dlc_status& b) {
+        if ((a.state == dlc_state::ok) != (b.state == dlc_state::ok)) return a.state == dlc_state::ok;
+        return tid_of(a) == game_tid && tid_of(b) != game_tid;
+    };
+    for (size_t i = 0; i < dlcs.size(); i++) {
+        if (!mountable(dlcs[i])) continue;
+        const std::string id = short_id(dlcs[i].content_id);
+        size_t w = i;
+        for (size_t j = i + 1; j < dlcs.size(); j++)
+            if (mountable(dlcs[j]) && short_id(dlcs[j].content_id) == id && better(dlcs[j], dlcs[w])) w = j;
+        for (size_t j = i; j < dlcs.size(); j++) {
+            if (j == w || !mountable(dlcs[j]) || short_id(dlcs[j].content_id) != id) continue;
+            dlcs[j].state = dlc_state::duplicate;
+            dlcs[j].detail = "the " + region_of(tid_of(dlcs[w])) + " copy " + name_of(dlcs[w].file) + " is used";
+        }
+    }
+}
+
+std::vector<std::filesystem::path> unused_raps(const std::filesystem::path& exe, const std::vector<dlc_status>& dlcs)
+{
+    std::vector<std::filesystem::path> out;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(exdata_dir(exe), std::filesystem::directory_options::skip_permission_denied, ec);
+         !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (lower_ext(it->path()) != ".rap") continue;
+        const std::string cid = extract_content_id(utf8(it->path().stem()));
+        const bool used = std::any_of(dlcs.begin(), dlcs.end(), [&](const dlc_status& d) {
+            return (!cid.empty() && upper_ascii(d.rap_id) == cid) || (!d.rap.empty() && same_file(d.rap, it->path()));
+        });
+        if (!used) out.push_back(it->path());
+    }
+    return out;
+}
+
+std::string dlc_summary(const std::vector<dlc_status>& dlcs)
+{
+    size_t ready = 0, locked = 0, unusable = 0, duplicate = 0;
+    for (const dlc_status& d : dlcs) {
+        if (d.state == dlc_state::ok) ready++;
+        else if (d.state == dlc_state::missing_rap || d.state == dlc_state::wrong_rap) locked++;
+        else if (d.state == dlc_state::duplicate) duplicate++;
+        else unusable++;
+    }
+    std::string text;
+    auto part = [&](size_t n, const char* what) {
+        if (n) text += (text.empty() ? "" : ", ") + std::to_string(n) + " " + what;
+    };
+    part(ready, "ready");
+    part(locked, "will not work without its licence");
+    part(unusable, "unusable");
+    part(duplicate, duplicate == 1 ? "duplicate" : "duplicates");
+    return text.empty() ? std::string("None") : text;
 }
 
 mounted mount(const std::filesystem::path& exe, const game_paths& p, const std::filesystem::path& root)
 {
-    ps3_vfs_unmount_all();
     mounted m;
     game_check& c = m.check;
-    const std::filesystem::path exdata = exdata_dir(exe);
+    const std::string language = game_language();
+    std::vector<dlc_probe> probes = inspect_dlcs(exe, p, root / "dlc_probe", language);
     const std::filesystem::path game_root = root / "dev_hdd0" / "game";
     std::error_code ec;
     std::filesystem::create_directories(game_root, ec);
     const std::string game_dir = utf8(game_root, true);
-    const std::string exdata_str = utf8(exdata, true);
 
     std::string game_tid;
     if (p.game.empty()) c.game = { item_state::missing, "Not set" };
@@ -487,7 +977,7 @@ mounted mount(const std::filesystem::path& exe, const game_paths& p, const std::
         else {
             game_tid = title;
             c.title_id = title;
-            c.game = { item_state::ok, utf8(p.game.filename()) + " (" + title + ")" };
+            c.game = { item_state::ok, name_of(p.game) + " (" + title + ")" };
         }
     }
 
@@ -501,29 +991,33 @@ mounted mount(const std::filesystem::path& exe, const game_paths& p, const std::
         }
     }
 
-    pkg_edat_check edat_check{ exdata_str, {}, {} };
-    c.dlc = { item_state::ok, p.dlcs.empty() ? "None" : std::to_string(p.dlcs.size()) + " package" + (p.dlcs.size() == 1 ? "" : "s") };
-    for (const auto& d : p.dlcs) {
-        char cid[37] = {};
-        const char* mount_tid = target_dlc_tid.empty() ? nullptr : target_dlc_tid.c_str();
-        if (ps3_vfs_mount_pkg_as(game_dir.c_str(), mount_tid, utf8(d).c_str(), cid)) {
-            c.dlc = { item_state::bad, "Unreadable: " + utf8(d.filename()) };
-            continue;
-        }
-        const std::string tid = pkg_title_id(cid);
-        if (!is_supported_title(tid)) {
-            c.dlc = { item_state::bad, "Wrong game (" + (tid.empty() ? std::string("unknown") : tid) + ", needs BLES01227 or BLUS30721): " + utf8(d.filename()) };
-            continue;
-        }
-        ps3_vfs_enum_last_mount(check_pkg_entry, &edat_check);
+    const localization loc = load_localization(m.bdvd, language);
+    for (dlc_probe& pr : probes) {
+        if (!loc.titles.empty()) pr.status.name = dlc_name(pr, loc);
+        c.dlcs.push_back(std::move(pr.status));
     }
-    auto_import_nearby_raps(exe, p, edat_check);
-    std::string locked;
-    for (const std::string& mcid : edat_check.missing)
-        locked += (locked.empty() ? "" : ", ") + short_id(mcid);
-    if (p.dlcs.empty()) c.licences = { item_state::ok, "Not needed" };
+    finish_dlcs(c.dlcs, target_dlc_tid);
+    const char* mount_tid = target_dlc_tid.empty() ? nullptr : target_dlc_tid.c_str();
+    for (const dlc_status& d : c.dlcs) {
+        char cid[37] = {};
+        if (mountable(d)) ps3_vfs_mount_pkg_as(game_dir.c_str(), mount_tid, utf8(d.file).c_str(), cid);
+    }
+    c.unused_raps = unused_raps(exe, c.dlcs);
+    const auto broken = std::find_if(c.dlcs.begin(), c.dlcs.end(), [](const dlc_status& d) {
+        return d.state == dlc_state::wrong_game || d.state == dlc_state::unreadable;
+    });
+    std::vector<const dlc_status*> locked;
+    bool licensed = false;
+    for (const dlc_status& d : c.dlcs) {
+        if (!mountable(d) || !d.needs_rap) continue;
+        licensed = true;
+        if (d.state != dlc_state::ok) locked.push_back(&d);
+    }
+    if (broken != c.dlcs.end()) c.dlc = { item_state::bad, (broken->state == dlc_state::wrong_game ? "Wrong game: " : "Unreadable: ") + name_of(broken->file) };
+    else c.dlc = { locked.empty() ? item_state::ok : item_state::warn, dlc_summary(c.dlcs) };
+    if (!licensed) c.licences = { item_state::ok, "Not needed" };
     else if (locked.empty()) c.licences = { item_state::ok, "All unlocked" };
-    else c.licences = { item_state::warn, "Missing: " + locked };
+    else c.licences = { item_state::warn, "Missing for " + locked.front()->name + (locked.size() > 1 ? " and " + std::to_string(locked.size() - 1) + " more" : "") };
 
     if (p.update.empty()) c.update = { item_state::missing, "Not set" };
     else {
@@ -544,7 +1038,7 @@ mounted mount(const std::filesystem::path& exe, const game_paths& p, const std::
             std::free(elf);
             if (c.title_id.empty()) c.title_id = tid;
             const std::string found = sfo_string(title_dir / "PARAM.SFO", "APP_VER");
-            c.update = match ? item_status{ item_state::ok, utf8(p.update.filename()) }
+            c.update = match ? item_status{ item_state::ok, name_of(p.update) }
                              : item_status{ item_state::bad, "Version " + found + ", needs " + k_update_version };
         }
     }
@@ -557,9 +1051,25 @@ mounted mount(const std::filesystem::path& exe, const game_paths& p, const std::
 
 bool game_check::ready() const
 {
-    for (const item_status* s : { &game, &update, &dlc, &firmware })
+    for (const item_status* s : { &game, &update, &firmware })
         if (s->state != item_state::ok) return false;
-    return true;
+    return dlc.state != item_state::bad;
+}
+
+bool dlc_blocks(const dlc_status& dlc)
+{
+    return dlc.state == dlc_state::wrong_game || dlc.state == dlc_state::unreadable ||
+           (dlc.given && (dlc.state == dlc_state::missing_rap || dlc.state == dlc_state::wrong_rap));
+}
+
+std::vector<report_line> dlc_report(const game_check& check, const std::vector<report_line>& notes)
+{
+    std::vector<report_line> lines = notes;
+    for (const dlc_status& d : check.dlcs)
+        lines.push_back({ describe(d), d.state != dlc_state::ok && d.state != dlc_state::duplicate });
+    for (const auto& rap : check.unused_raps)
+        lines.push_back({ name_of(rap) + k_dash + "UNUSED LICENCE" + k_dash + "matches no added DLC", false });
+    return lines;
 }
 
 std::filesystem::path firmware_dir(const std::filesystem::path& exe, const game_paths& paths)
@@ -574,40 +1084,62 @@ std::filesystem::path default_update_pkg(const std::filesystem::path& exe, const
     return exe / "user" / name;
 }
 
+bool write_file_atomic(const std::filesystem::path& path, std::string_view data)
+{
+    if (std::ifstream in{ path, std::ios::binary }) {
+        const std::string current{ std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>() };
+        if (!in.bad() && current == data) return true;
+    }
+    const std::string dst = utf8(path), tmp = dst + ".tmp";
+    FILE* f = ps3_utf8_fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
+    ok = ps3_file_sync(f) == 0 && ok;
+    ok = std::fclose(f) == 0 && ok;
+    if (ok && ps3_utf8_replace_file(tmp.c_str(), dst.c_str()) == 0) return true;
+    ps3_utf8_remove(tmp.c_str());
+    return false;
+}
+
 game_add_result add_game_items(const std::filesystem::path& exe, game_paths& paths, const std::vector<std::filesystem::path>& items,
-                               game_add_mode mode)
+                               game_add_target target)
 {
     game_add_result res;
+    add_context a{ exe, paths, res, target };
     std::error_code ec;
     for (const auto& item : items) {
         if (!std::filesystem::is_directory(item, ec)) {
-            sort_file(exe, paths, item, res, mode);
+            sort_file(a, item, true);
             continue;
         }
         const std::filesystem::path root = normalize_game_dir(item);
         if (is_game_folder(root)) {
-            paths.game = root;
+            use_game(a, root);
             continue;
         }
+        a.skipped = 0;
         const auto opts = std::filesystem::directory_options::skip_permission_denied;
         for (auto it = std::filesystem::recursive_directory_iterator(item, opts, ec); !ec && it != std::filesystem::recursive_directory_iterator();
              it.increment(ec)) {
             if (it->is_directory(ec)) {
                 if (is_game_folder(it->path())) {
-                    paths.game = it->path();
+                    use_game(a, it->path());
                     it.disable_recursion_pending();
                 }
             } else {
-                sort_file(exe, paths, it->path(), res, mode);
+                sort_file(a, it->path(), false);
             }
         }
+        if (a.skipped)
+            note(a, std::to_string(a.skipped) + (a.skipped == 1 ? " file in " : " files in ") + name_of(strip_trailing_sep(item)) +
+                        (a.skipped == 1 ? " is" : " are") + " not a game, update, DLC or licence file" + k_dash + "ignored", false);
     }
     return res;
 }
 
 game_check check_game_paths(const std::filesystem::path& exe, const game_paths& paths)
 {
-    static int n = 0;
+    static std::atomic<int> n{ 0 };
     return mount(exe, paths, exe / "user" / "check" / std::to_string(++n)).check;
 }
 
@@ -622,37 +1154,33 @@ bool pkg_matches_title(const std::filesystem::path& pkg, const std::string& tid)
     return !ps3_vfs_pkg_info(utf8(pkg).c_str(), ucid, &has_eboot) && has_eboot != 0 && pkg_title_id(ucid) == tid;
 }
 
-void apply_launch_options(const std::filesystem::path& exe, game_paths& paths, const launch_options& opts,
-                          std::string* out_tid = nullptr, bool* out_encrypted = nullptr)
+std::vector<report_line> apply_launch_options(const std::filesystem::path& exe, game_paths& paths, const launch_options& opts,
+                                              std::string* out_tid = nullptr, bool* out_encrypted = nullptr)
 {
     std::error_code ec;
-    if (!opts.game.empty())
-        paths.game = normalize_game_dir(opts.game);
-    const bool need_update_check = opts.update.empty() &&
+    if (!opts.game.empty()) paths.game = normalize_game_dir(opts.game);
+    if (!opts.update.empty()) paths.update = opts.update;
+    std::erase_if(paths.dlcs, [](const std::filesystem::path& d) {
+        std::error_code d_ec;
+        return !std::filesystem::is_regular_file(d, d_ec);
+    });
+    const std::filesystem::path chosen_update = paths.update;
+    game_add_result res = add_game_items(exe, paths, opts.items, { true, !opts.game.empty(), !opts.update.empty() });
+    if (!res.pup.empty()) res.notes.push_back({ name_of(res.pup) + " is PS3 firmware, which Vajra downloads itself" + k_dash + "ignored", false });
+    const bool need_update_check = paths.update == chosen_update && opts.update.empty() &&
                                    (!opts.game.empty() || (!paths.update.empty() && !std::filesystem::is_regular_file(paths.update, ec)));
     std::string detected_tid;
     if ((need_update_check || out_tid) && !paths.game.empty())
         detected_tid = detect_game_title(exe, paths.game, out_encrypted);
     if (out_tid) *out_tid = detected_tid;
-    if (!opts.update.empty()) {
-        paths.update = opts.update;
-    } else if (need_update_check) {
+    if (need_update_check) {
         const std::string want_tid = is_supported_title(detected_tid) ? detected_tid : k_title_id_eu;
         if (!pkg_matches_title(paths.update, want_tid)) {
             const std::filesystem::path default_pkg = default_update_pkg(exe, want_tid);
-            paths.update = std::filesystem::is_regular_file(default_pkg, ec) ? default_pkg : std::filesystem::path{};
+            paths.update = update_pkg_complete(default_pkg) ? default_pkg : std::filesystem::path{};
         }
     }
-    if (opts.has_dlc_flags && !opts.dlcs.empty()) {
-        paths.dlcs.clear();
-    } else if (!opts.game.empty() || !opts.dlcs.empty() || opts.has_dlc_flags) {
-        paths.dlcs.erase(std::remove_if(paths.dlcs.begin(), paths.dlcs.end(), [&](const std::filesystem::path& d) {
-            std::error_code d_ec;
-            return !std::filesystem::is_regular_file(d, d_ec);
-        }), paths.dlcs.end());
-    }
-    if (!opts.dlcs.empty())
-        add_game_items(exe, paths, opts.dlcs, game_add_mode::dlc);
+    return std::move(res.notes);
 }
 
 bool run_with_progress(float start_p, float end_p, const char* label, const std::function<bool(std::atomic<float>&, std::string&)>& fn, std::string& error)
@@ -690,10 +1218,10 @@ int prepare_game_files(const std::filesystem::path& exe, const launch_options& o
 {
     std::error_code ec;
     std::filesystem::create_directories(exe / "user", ec);
-    game_paths paths = read_paths(exe);
+    game_paths paths = read_paths(exe, opts.launcher);
     std::string detected_tid;
     bool game_encrypted = false;
-    apply_launch_options(exe, paths, opts, &detected_tid, &game_encrypted);
+    const std::vector<report_line> notes = apply_launch_options(exe, paths, opts, &detected_tid, &game_encrypted);
 
     std::printf("progress 0.05 Checking game files\n");
     std::fflush(stdout);
@@ -723,7 +1251,7 @@ int prepare_game_files(const std::filesystem::path& exe, const launch_options& o
         return 6;
     }
     if (!update_matches_region && opts.update.empty()) {
-        if (std::filesystem::is_regular_file(default_pkg, ec)) {
+        if (update_pkg_complete(default_pkg)) {
             paths.update = default_pkg;
         } else {
             std::string error;
@@ -754,29 +1282,43 @@ int prepare_game_files(const std::filesystem::path& exe, const launch_options& o
         }
     }
 
-    std::printf("progress 0.95 Verifying game and update\n");
+    std::printf("progress 0.95 Verifying game, update and DLC\n");
     std::fflush(stdout);
     mounted m = mount(exe, paths, exe / "user");
-    if (!m.check.ready()) {
+    const std::vector<report_line> report = dlc_report(m.check, notes);
+    for (const bool problems : { false, true })
+        for (const report_line& line : report)
+            if (line.problem == problems) std::fprintf(stderr, "%s\n", line.text.c_str());
+    if (m.check.game.state != item_state::ok || m.check.update.state != item_state::ok || m.check.firmware.state != item_state::ok) {
         if (m.check.game.state != item_state::ok) std::fprintf(stderr, "Game check failed: %s\n", m.check.game.text.c_str());
         if (m.check.update.state != item_state::ok) std::fprintf(stderr, "Update 1.02 check failed: %s\n", m.check.update.text.c_str());
-        if (m.check.dlc.state != item_state::ok) std::fprintf(stderr, "DLC check failed: %s\n", m.check.dlc.text.c_str());
         if (m.check.firmware.state != item_state::ok) std::fprintf(stderr, "Firmware check failed: %s\n", m.check.firmware.text.c_str());
         return 6;
+    }
+    std::string unusable;
+    auto add_unusable = [&](const std::string& what) { unusable += (unusable.empty() ? "" : "; ") + what; };
+    for (const report_line& line : notes)
+        if (line.problem) add_unusable(line.text.substr(0, line.text.find(k_dash)));
+    for (const dlc_status& d : m.check.dlcs)
+        if (dlc_blocks(d)) add_unusable(d.name + (d.state == dlc_state::missing_rap || d.state == dlc_state::wrong_rap ? " needs its .rap in " + utf8(d.file.parent_path()) : std::string(" is unusable")));
+    if (!unusable.empty()) {
+        std::fprintf(stderr, "These DLC will not work: %s. Add the missing .rap files, or remove those DLC, then set up again.\n", unusable.c_str());
+        return 7;
     }
 
     write_paths(exe, paths);
     std::filesystem::remove_all(exe / "user" / "check", ec);
-    std::printf("progress 1.00 Ready\n");
+    if (m.check.dlcs.empty()) std::printf("progress 1.00 Ready\n");
+    else if (m.check.licences.state == item_state::warn) std::printf("progress 1.00 Ready. DLC: %s. %s\n", m.check.dlc.text.c_str(), m.check.licences.text.c_str());
+    else std::printf("progress 1.00 Ready. DLC: %s\n", m.check.dlc.text.c_str());
     std::fflush(stdout);
     return 0;
 }
 
 bool load_game_files(const std::filesystem::path& exe, const std::filesystem::path& icon, game_files& out, const launch_options& opts)
 {
-    game_paths paths = read_paths(exe);
-    const bool cli_override = !opts.game.empty() || !opts.update.empty() || !opts.dlcs.empty();
-    apply_launch_options(exe, paths, opts);
+    game_paths paths = read_paths(exe, opts.launcher);
+    const std::vector<report_line> notes = apply_launch_options(exe, paths, opts);
     std::error_code ec;
     out.user = exe / "user";
     out.hdd0 = out.user / "dev_hdd0";
@@ -784,16 +1326,15 @@ bool load_game_files(const std::filesystem::path& exe, const std::filesystem::pa
     std::filesystem::create_directories(out.hdd1, ec);
 
     mounted m = mount(exe, paths, out.user);
-    if (!m.check.ready()) {
-        const bool ok = run_setup(exe, icon, paths, m.check);
+    if (!m.check.ready() || m.check.licences.state == item_state::warn) {
+        const bool ok = run_setup(exe, icon, paths, m.check, notes);
         std::filesystem::remove_all(exe / "user" / "check", ec);
         if (!ok) return false;
-        write_paths(exe, paths);
         m = mount(exe, paths, out.user);
         if (!m.check.ready()) return false;
-    } else if (cli_override) {
-        write_paths(exe, paths);
     }
+    write_paths(exe, paths);
+    for (const report_line& line : dlc_report(m.check, notes)) std::fprintf(stderr, "[dlc] %s\n", line.text.c_str());
     out.flash = firmware_dir(exe, paths);
     out.bdvd = m.bdvd;
     out.elf = std::move(m.elf);

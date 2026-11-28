@@ -1,16 +1,14 @@
 #include "assists.h"
+#include "game_files.h"
 #include "guest.h"
 #include "pc_options.h"
-#include "presence.h"
-#include "rl_achievements.h"
 #include "ue3_reflect.h"
 #include "rsx_core.h"
 #include "vk/rsx_vk.h"
 #include "../ps3recomp/libs/input/pad_bindings.h"
-#include "../ps3recomp/libs/system/cellSaveData.h"
 #include "../ps3recomp/libs/system/cellSysutil.h"
+#include "../ps3recomp/libs/system/sysPrxForUser.h"
 
-#include <SDL3/SDL_events.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -25,10 +23,7 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
-
-extern "C" void ppu_fs_set_open_callback(void (*cb)(const char*));
 
 namespace {
 
@@ -663,27 +658,45 @@ std::atomic<uint64_t> g_hud{ 0 };
 std::atomic<bool> g_controller_screen{ false };
 std::string g_saved[k_rows];
 std::optional<uint32_t> g_applied[k_rows];
+std::vector<std::string> g_foreign;
 std::mutex g_settings_lock;
 std::filesystem::path g_settings_path;
 
+std::string trimmed(std::string_view s)
+{
+    const size_t a = s.find_first_not_of(" \t\r");
+    const size_t b = s.find_last_not_of(" \t\r");
+    return a == std::string_view::npos ? std::string() : std::string(s.substr(a, b - a + 1));
+}
+
 void load()
 {
-    std::ifstream f(g_settings_path);
+    std::ifstream f(g_settings_path, std::ios::binary);
     if (!f) return;
     bool legacy_perfect_qte = false;
     for (std::string line; std::getline(f, line);) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("\xEF\xBB\xBF", 0) == 0) line.erase(0, 3);
         const size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string key = line.substr(0, eq);
-        const std::string val = line.substr(eq + 1);
-        if (key == "perfect_qte" && val == "on") legacy_perfect_qte = true;
+        const std::string whole = trimmed(line);
+        if (eq == std::string::npos) {
+            if (!whole.empty()) g_foreign.push_back(whole);
+            continue;
+        }
+        const std::string key = trimmed(std::string_view(line).substr(0, eq));
+        const std::string val = trimmed(std::string_view(line).substr(eq + 1));
+        if (key == "perfect_qte") {
+            legacy_perfect_qte = val == "on";
+            continue;
+        }
+        bool known = false;
         for (uint32_t r = 0; r < k_rows; r++)
-            if (key == k_options[r].key) g_saved[r] = val;
-        if (key.rfind(k_bind_prefix, 0) != 0) continue;
-        const std::string act = key.substr(sizeof k_bind_prefix - 1);
-        for (int a = 0; a < PAD_ACTION_COUNT; a++) {
-            if (act != k_action_keys[a]) continue;
+            if (key == k_options[r].key) {
+                g_saved[r] = val;
+                known = true;
+            }
+        for (int a = 0; a < PAD_ACTION_COUNT && key.rfind(k_bind_prefix, 0) == 0; a++) {
+            if (key.compare(sizeof k_bind_prefix - 1, std::string::npos, k_action_keys[a])) continue;
+            known = true;
             const char* at = val.c_str();
             for (int s = 0; s < PAD_BINDING_SLOTS; s++, at += *at == ',') {
                 char* end = nullptr;
@@ -691,6 +704,7 @@ void load()
                 at = end;
             }
         }
+        if (!known) g_foreign.push_back(whole);
     }
     if (legacy_perfect_qte) {
         for (uint32_t r = 0; r < k_rows; r++)
@@ -730,24 +744,22 @@ void sync(uint32_t row)
 
 void save()
 {
-    std::ofstream f(g_settings_path, std::ios::binary | std::ios::trunc);
-    if (!f) return;
+    std::string ini;
     for (uint32_t r = 0; r < k_rows; r++) {
         std::string token = g_saved[r];
         if (token.empty()) {
             const Choices& list = k_options[r].choices();
             if (const auto c = selected(r, list)) token = list[*c].token;
         }
-        if (!token.empty()) f << k_options[r].key << '=' << token << '\n';
+        if (!token.empty()) ini += std::string(k_options[r].key) + '=' + token + '\n';
     }
     for (int a = 0; a < PAD_ACTION_COUNT; a++) {
-        f << k_bind_prefix << k_action_keys[a] << '=';
-        for (int s = 0; s < PAD_BINDING_SLOTS; s++) {
-            if (s) f << ',';
-            f << pad_binding(a, s);
-        }
-        f << '\n';
+        ini += std::string(k_bind_prefix) + k_action_keys[a] + '=';
+        for (int s = 0; s < PAD_BINDING_SLOTS; s++) ini += (s ? "," : "") + std::to_string(pad_binding(a, s));
+        ini += '\n';
     }
+    for (const std::string& line : g_foreign) ini += line + '\n';
+    write_file_atomic(g_settings_path, ini);
 }
 
 void set(uint32_t row, uint32_t index)
@@ -1087,21 +1099,6 @@ std::string start_text(std::string text)
     return text;
 }
 
-void quit_game()
-{
-    static std::atomic<bool> quitting{ false };
-    if (quitting.exchange(true, std::memory_order_acq_rel)) return;
-    ppu_fs_set_open_callback(nullptr);
-    presence_shutdown();
-    rl_ach_shutdown();
-    SDL_Event e{};
-    e.type = SDL_EVENT_QUIT;
-    if (SDL_PushEvent(&e)) std::this_thread::sleep_for(std::chrono::seconds(10));
-    ps3_savedata_shutdown();
-    std::fflush(nullptr);
-    std::_Exit(0);
-}
-
 void refresh_gfx_viewports(ppu_context* ctx)
 {
     const uint32_t engine = vm_read32(k_gfx_engine);
@@ -1203,7 +1200,7 @@ bool external_call(ppu_context* ctx)
     else if (!std::strcmp(op, "StartText")) reply(ctx, 0, start_text(text_argument(ctx, 0)).c_str());
     else if (!std::strcmp(op, "Diagram")) g_controller_screen.store(first != 0, std::memory_order_relaxed);
     else if (!std::strcmp(op, "Letterbox")) reply_number(ctx, g_letterbox.load(std::memory_order_relaxed));
-    else if (!std::strcmp(op, "Quit")) quit_game();
+    else if (!std::strcmp(op, "Quit")) ps3_process_exit(0);
     return true;
 }
 
@@ -1265,11 +1262,17 @@ void build_menu(ppu_context* ctx, const uint8_t* swf, Menu& menu)
 
 std::atomic<uint64_t> g_pc_options_hooks[64]{};
 
-void pc_options_boot(const std::filesystem::path& dir)
+void pc_options_load(const std::filesystem::path& dir)
 {
     std::lock_guard<std::mutex> hold(g_settings_lock);
     g_settings_path = dir / "asura_settings.ini";
     load();
+    sync(row_language);
+}
+
+void pc_options_boot()
+{
+    std::lock_guard<std::mutex> hold(g_settings_lock);
     rsx_vk_on_display_toggle(display_toggled);
     rsx_vk_on_display_modes(display_modes_changed);
     rsx_vk_on_window_resize(window_resized);

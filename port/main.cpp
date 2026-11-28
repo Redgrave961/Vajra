@@ -10,6 +10,7 @@
 #include "vm_track.h"
 #include "../ps3recomp/libs/network/sceNpTrophy.h"
 #include "../ps3recomp/libs/system/cellSaveData.h"
+#include "../ps3recomp/libs/system/sysPrxForUser.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -23,7 +24,9 @@
 
 #ifdef _WIN32
 #include <atomic>
+#include <cwchar>
 #include <windows.h>
+#include <process.h>
 #include <shellapi.h>
 #include <timeapi.h>
 #else
@@ -47,8 +50,9 @@ extern const char* ppu_vfs_root;
 extern uint32_t g_last_hle_nid;
 extern const char* g_last_hle_name;
 extern const char* ppu_hle_inflight_name(unsigned tid);
-extern int g_sys_process_exit_called;
-extern int32_t g_sys_process_exit_code;
+#ifdef ASURA_PGO_GEN
+int __llvm_profile_write_file(void);
+#endif
 
 uint32_t ppu_load_elf(const char* path);
 uint32_t ppu_load_elf_image(const uint8_t* file, uint64_t size);
@@ -74,6 +78,7 @@ namespace {
 
 constexpr uint64_t k_vm_size = 0x100010000ull;
 constexpr uint32_t k_stack_top = 0x0FF00000u;
+constexpr size_t k_guest_stack = 256u << 20;
 
 void guest_caller(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                   uint64_t a7)
@@ -175,12 +180,15 @@ char* __cdecl cached_getenv(const char* name)
 
 void crash_frame(int i, DWORD64 pc)
 {
+    static wchar_t path[32768];
+    static char name[1024];
     HMODULE m = nullptr;
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(pc), &m);
-    char path[MAX_PATH] = "?";
-    if (m) GetModuleFileNameA(m, path, sizeof path);
-    const char* name = std::strrchr(path, '\\');
-    std::fprintf(stderr, "[crash]   #%d %s+0x%llX\n", i, name ? name + 1 : path, (unsigned long long)(pc - reinterpret_cast<DWORD64>(m)));
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(pc), &m);
+    const DWORD n = m ? GetModuleFileNameW(m, path, (DWORD)std::size(path)) : 0;
+    path[n < std::size(path) ? n : 0] = 0;
+    const wchar_t* base = std::wcsrchr(path, L'\\');
+    if (!WideCharToMultiByte(CP_UTF8, 0, n ? (base ? base + 1 : path) : L"?", -1, name, (int)sizeof name, nullptr, nullptr)) std::strcpy(name, "?");
+    std::fprintf(stderr, "[crash]   #%d %s+0x%llX\n", i, name, (unsigned long long)(pc - reinterpret_cast<DWORD64>(m)));
 }
 
 void crash_dump(const EXCEPTION_POINTERS* ep, const char* kind)
@@ -344,8 +352,7 @@ void install_crash_report()
 
 void debug_console(const char* path)
 {
-    char out_path[1024];
-    std::snprintf(out_path, sizeof out_path, "%s.out", path);
+    const std::string out_path = std::string(path) + ".out";
     const auto t0 = std::chrono::steady_clock::now();
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -358,7 +365,7 @@ void debug_console(const char* path)
         cmd[std::strcspn(cmd, "\r\n")] = 0;
         if (!cmd[0]) continue;
         if (FILE* t = std::fopen(path, "wb")) std::fclose(t);
-        FILE* o = std::fopen(out_path, "ab");
+        FILE* o = std::fopen(out_path.c_str(), "ab");
         if (!o) continue;
         unsigned a = 0, b = 0;
         std::fprintf(o, "> %s\n", cmd);
@@ -410,9 +417,15 @@ namespace {
 #ifdef _WIN32
 std::filesystem::path executable_dir()
 {
-    wchar_t path[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    return std::filesystem::path(std::wstring(path, n)).parent_path();
+    std::wstring path(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(nullptr, path.data(), (DWORD)path.size());
+        if (n < path.size()) {
+            path.resize(n);
+            return std::filesystem::path(path).parent_path();
+        }
+        path.resize(path.size() * 2);
+    }
 }
 
 void default_env(const char* name, const std::filesystem::path& value)
@@ -440,6 +453,19 @@ void precise_timers() { timeBeginPeriod(1); }
 uint8_t* reserve_guest_memory() { return static_cast<uint8_t*>(VirtualAlloc(nullptr, k_vm_size, MEM_RESERVE, PAGE_READWRITE)); }
 
 std::filesystem::path desktop_identity() { return {}; }
+
+unsigned __stdcall guest_main(void* entry)
+{
+    ULONG guarantee = 256 * 1024;
+    SetThreadStackGuarantee(&guarantee);
+    ps3_process_exit(ppu_run((uint32_t)(uintptr_t)entry, k_stack_top) < 0 ? 1 : 0);
+}
+
+void run_guest(uint32_t entry)
+{
+    const HANDLE thread = (HANDLE)_beginthreadex(nullptr, (unsigned)k_guest_stack, guest_main, (void*)(uintptr_t)entry, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    if (thread) WaitForSingleObject(thread, INFINITE);
+}
 #else
 std::filesystem::path executable_dir()
 {
@@ -478,6 +504,23 @@ std::filesystem::path desktop_identity()
     SDL_SetAppMetadata("Vajra", VAJRA_VERSION ".0", "Vajra");
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland,x11");
     return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "Vajra.png";
+}
+
+void* guest_main(void* entry)
+{
+    ps3_process_exit(ppu_run((uint32_t)(uintptr_t)entry, k_stack_top) < 0 ? 1 : 0);
+}
+
+void run_guest(uint32_t entry)
+{
+    for (const size_t stack : { k_guest_stack, size_t(0) }) {
+        pthread_attr_t attr;
+        pthread_t thread;
+        pthread_attr_init(&attr);
+        const bool started = (!stack || !pthread_attr_setstacksize(&attr, stack)) && !pthread_create(&thread, &attr, guest_main, (void*)(uintptr_t)entry);
+        pthread_attr_destroy(&attr);
+        if (started) pthread_join(thread, nullptr);
+    }
 }
 #endif
 
@@ -552,6 +595,13 @@ void func_0013A02C(ppu_context* ctx)
 
 int main(int argc, char** argv)
 {
+    install_crash_report();
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN);
+#endif
+#ifdef ASURA_PGO_GEN
+    ps3_process_at_exit([] { __llvm_profile_write_file(); });
+#endif
     const std::filesystem::path exe = executable_dir();
     std::filesystem::path data_dir;
     launch_options opts;
@@ -581,23 +631,21 @@ int main(int argc, char** argv)
             }
             return false;
         };
-        auto take_dlc = [&](std::filesystem::path& out) -> bool {
-            if (take("--rap", out)) return true;
-            if (take("--dlc", out, true)) { opts.has_dlc_flags = true; return true; }
-            if (a.size() >= 6 && a.starts_with("--dlc") && a[5] >= '1' && a[5] <= '9') {
-                const std::string_view numbered = a.substr(0, 6);
-                if (take(numbered, out, true)) { opts.has_dlc_flags = true; return true; }
-            }
-            return false;
+        auto take_item = [&](std::filesystem::path& out) -> bool {
+            if (take("--rap", out, true) || take("--dlc", out, true)) return true;
+            if (a.size() < 6 || !a.starts_with("--dlc") || a[5] < '1' || a[5] > '9' || !take(a.substr(0, 6), out, true)) return false;
+            opts.launcher = true;
+            return true;
         };
-        std::filesystem::path dlc_item;
+        std::filesystem::path item;
         if (a == "--prepare") opts.prepare = true;
         else if (take("--data", data_dir)) {}
         else if (take("--game", opts.game)) {}
         else if (take("--update", opts.update)) {}
-        else if (take_dlc(dlc_item)) { if (!dlc_item.empty()) opts.dlcs.push_back(std::move(dlc_item)); }
+        else if (take_item(item)) { if (!item.empty()) opts.items.push_back(std::move(item)); }
         else if (!a.starts_with("-") && !elf) elf = owned_args[i].c_str();
     }
+    if (const char* launcher = std::getenv("RECOMPLAUNCHER"); launcher && *launcher && std::strcmp(launcher, "0")) opts.launcher = true;
 
     if (data_dir.empty()) {
 #ifdef _WIN32
@@ -616,6 +664,7 @@ int main(int argc, char** argv)
         std::error_code data_ec;
         std::filesystem::create_directories(data_dir, data_ec);
     }
+    pc_options_load(data_dir);
 
     if (opts.prepare) {
         std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -627,11 +676,10 @@ int main(int argc, char** argv)
     game_files files;
     if (!load_game_files(data_dir, icon, files, opts)) return 2;
     use_game_files(files);
-    pc_options_boot(data_dir);
+    pc_options_boot();
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     precise_timers();
-    install_crash_report();
     vm_base = reserve_guest_memory();
     ppu_vm_size = 0;
     if (!vm_base) {
@@ -669,9 +717,7 @@ int main(int argc, char** argv)
     init_recomp_achievements();
     presence_init();
     ppu_fs_set_open_callback(presence_on_file_open);
-    ppu_run(entry, k_stack_top);
-    ppu_fs_set_open_callback(nullptr);
-    presence_shutdown();
-    rl_ach_shutdown();
-    return g_sys_process_exit_called ? (int)g_sys_process_exit_code : 0;
+    run_guest(entry);
+    std::fprintf(stderr, "[ppu] cannot start the guest main thread\n");
+    ps3_process_exit(1);
 }

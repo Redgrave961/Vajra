@@ -2,7 +2,6 @@
 #include "rl_achievements.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -87,8 +86,6 @@ std::string json_escape(std::string_view s)
 
 class discord_ipc {
 public:
-    ~discord_ipc() { close(); }
-
     bool connected() const
     {
 #ifdef _WIN32
@@ -98,11 +95,11 @@ public:
 #endif
     }
 
-    bool connect(const char* app_id, const std::atomic<bool>& running)
+    bool connect(const char* app_id)
     {
         if (connected()) return true;
 #ifdef _WIN32
-        for (int i = 0; i < 10 && running.load(std::memory_order_relaxed); i++) {
+        for (int i = 0; i < 10; i++) {
             char name[64];
             std::snprintf(name, sizeof name, "\\\\.\\pipe\\discord-ipc-%d", i);
             HANDLE h = CreateFileA(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -130,7 +127,7 @@ public:
         push_unique("/tmp");
 
         for (const std::string& d : dirs) {
-            for (int i = 0; i < 10 && running.load(std::memory_order_relaxed); i++) {
+            for (int i = 0; i < 10; i++) {
                 std::string path = d + "/discord-ipc-" + std::to_string(i);
                 struct sockaddr_un sa {};
                 if (path.size() >= sizeof(sa.sun_path) || access(path.c_str(), F_OK) != 0) continue;
@@ -150,11 +147,11 @@ public:
 #endif
         if (!connected()) return false;
         const std::string hs = std::string("{\"v\":1,\"client_id\":\"") + app_id + "\"}";
-        if (!write_frame(0, hs, running)) {
+        if (!write_frame(0, hs)) {
             close();
             return false;
         }
-        for (int tries = 0; tries < 25 && connected() && running.load(std::memory_order_relaxed); tries++) {
+        for (int tries = 0; tries < 25 && connected(); tries++) {
             if (drain_once() > 0) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
@@ -162,7 +159,7 @@ public:
         return connected();
     }
 
-    bool send_activity(const std::string& details, const std::string& state, int64_t start_ts, uint32_t seq, const std::atomic<bool>& running)
+    bool send_activity(const std::string& details, const std::string& state, int64_t start_ts, uint32_t seq)
     {
         if (!connected()) return false;
         drain();
@@ -178,7 +175,7 @@ public:
         payload += ",\"timestamps\":{\"start\":" + std::to_string(start_ts) + "}";
         payload += ",\"assets\":{\"large_image\":\"" + std::string(k_large_image) + "\",\"large_text\":\"" + std::string(k_large_text) + "\"}";
         payload += "}},\"nonce\":\"" + std::to_string(seq) + "\"}";
-        if (!write_frame(1, payload, running)) {
+        if (!write_frame(1, payload)) {
             close();
             return false;
         }
@@ -202,11 +199,10 @@ public:
     }
 
 private:
-    bool write_all(const void* data, size_t n, const std::atomic<bool>& running)
+    bool write_all(const void* data, size_t n)
     {
         const uint8_t* p = static_cast<const uint8_t*>(data);
 #ifdef _WIN32
-        (void)running;
         while (n > 0) {
             DWORD w = 0;
             if (!WriteFile(pipe, p, (DWORD)n, &w, nullptr) || w == 0) return false;
@@ -225,7 +221,7 @@ private:
                 continue;
             }
             if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-                if (!running.load(std::memory_order_relaxed) || ++retries > 100) return false;
+                if (++retries > 100) return false;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
@@ -235,10 +231,10 @@ private:
 #endif
     }
 
-    bool write_frame(uint32_t op, const std::string& json, const std::atomic<bool>& running)
+    bool write_frame(uint32_t op, const std::string& json)
     {
         uint32_t hdr[2] = { op, (uint32_t)json.size() };
-        return write_all(hdr, sizeof hdr, running) && write_all(json.data(), json.size(), running);
+        return write_all(hdr, sizeof hdr) && write_all(json.data(), json.size());
     }
 
     int drain_once()
@@ -284,8 +280,7 @@ private:
 
 std::mutex g_lock;
 std::condition_variable g_cv;
-std::thread g_worker;
-std::atomic<bool> g_running{ false };
+bool g_started = false;
 bool g_dirty = true;
 int64_t g_start_ts = 0;
 std::string g_details;
@@ -313,10 +308,10 @@ void worker_loop()
     discord_ipc ipc;
     uint32_t seq = 1;
     std::unique_lock<std::mutex> lk(g_lock);
-    while (g_running.load(std::memory_order_relaxed)) {
+    for (;;) {
         if (!ipc.connected()) {
             lk.unlock();
-            const bool ok = ipc.connect(k_discord_app_id, g_running);
+            const bool ok = ipc.connect(k_discord_app_id);
             lk.lock();
             if (ok) g_dirty = true;
         }
@@ -325,17 +320,15 @@ void worker_loop()
             const int64_t ts = g_start_ts;
             g_dirty = false;
             lk.unlock();
-            if (!ipc.send_activity(d, s, ts, seq++, g_running)) {
+            if (!ipc.send_activity(d, s, ts, seq++)) {
                 lk.lock();
                 g_dirty = true;
                 continue;
             }
             lk.lock();
         }
-        g_cv.wait_for(lk, std::chrono::seconds(ipc.connected() ? 5 : 15),
-                      [&] { return !g_running.load(std::memory_order_relaxed) || (g_dirty && ipc.connected()); });
+        g_cv.wait_for(lk, std::chrono::seconds(ipc.connected() ? 5 : 15), [&] { return g_dirty && ipc.connected(); });
     }
-    ipc.close();
 }
 
 }
@@ -343,14 +336,14 @@ void worker_loop()
 void presence_init()
 {
     std::lock_guard<std::mutex> lk(g_lock);
-    if (g_running.load(std::memory_order_relaxed)) return;
+    if (g_started) return;
+    g_started = true;
     g_start_ts = (int64_t)std::time(nullptr);
     g_details = "Main Menu";
     g_state.clear();
     g_dirty = true;
-    g_running.store(true, std::memory_order_release);
     update_rl_presence_locked();
-    g_worker = std::thread(worker_loop);
+    std::thread(worker_loop).detach();
 }
 
 void presence_on_file_open(const char* guest_path)
@@ -400,15 +393,4 @@ void presence_on_file_open(const char* guest_path)
             return;
         }
     }
-}
-
-void presence_shutdown()
-{
-    {
-        std::lock_guard<std::mutex> lk(g_lock);
-        if (!g_running.load(std::memory_order_relaxed)) return;
-        g_running.store(false, std::memory_order_release);
-        g_cv.notify_all();
-    }
-    if (g_worker.joinable()) g_worker.join();
 }

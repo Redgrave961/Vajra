@@ -13,11 +13,10 @@
 #  include <windows.h>
 typedef HANDLE rl_conn;
 #  define RL_NO_CONN INVALID_HANDLE_VALUE
-static CRITICAL_SECTION g_lock;
-static int g_lock_ready;
-static void lock_init(void) { if (!g_lock_ready) { InitializeCriticalSection(&g_lock); g_lock_ready = 1; } }
-static void lock(void) { EnterCriticalSection(&g_lock); }
-static void unlock(void) { LeaveCriticalSection(&g_lock); }
+typedef SRWLOCK rl_lock;
+#  define RL_LOCK_INIT SRWLOCK_INIT
+static void hold(rl_lock* l) { AcquireSRWLockExclusive(l); }
+static void release(rl_lock* l) { ReleaseSRWLockExclusive(l); }
 #else
 #  include <errno.h>
 #  include <fcntl.h>
@@ -27,11 +26,15 @@ static void unlock(void) { LeaveCriticalSection(&g_lock); }
 #  include <unistd.h>
 typedef int rl_conn;
 #  define RL_NO_CONN (-1)
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static void lock_init(void) {}
-static void lock(void) { pthread_mutex_lock(&g_lock); }
-static void unlock(void) { pthread_mutex_unlock(&g_lock); }
+typedef pthread_mutex_t rl_lock;
+#  define RL_LOCK_INIT PTHREAD_MUTEX_INITIALIZER
+static void hold(rl_lock* l) { pthread_mutex_lock(l); }
+static void release(rl_lock* l) { pthread_mutex_unlock(l); }
 #endif
+
+static rl_lock g_conn_lock = RL_LOCK_INIT;
+static rl_lock g_frame_lock = RL_LOCK_INIT;
+static rl_lock g_state_lock = RL_LOCK_INIT;
 
 #define RL_MAX_LINE (256 * 1024)   /* a whole list arrives as one line */
 #define RL_MAX_PEEK 256
@@ -135,11 +138,14 @@ static void send_obj(cJSON* o) {
   char* s = cJSON_PrintUnformatted(o);
   cJSON_Delete(o);
   if (!s) return;
-  lock();
+  hold(&g_conn_lock);
   send_line_locked(s);
-  unlock();
+  release(&g_conn_lock);
   free(s);
 }
+
+static int is_ready(void) { return __atomic_load_n(&g.ready, __ATOMIC_ACQUIRE); }
+static double frame_now(void) { return (double)__atomic_load_n(&g.frame, __ATOMIC_RELAXED); }
 
 static cJSON* msg(const char* type) {
   cJSON* o = cJSON_CreateObject();
@@ -171,12 +177,22 @@ static uint32_t peek(uint32_t address, uint8_t* buffer, uint32_t num_bytes, void
   return g.read ? g.read(address, buffer, num_bytes, g.read_ud) : 0;
 }
 
+static void notify_unlock(uint32_t id) {
+  rl_ach_unlock_fn fn;
+  void* ud;
+  hold(&g_state_lock);
+  fn = g.on_unlock;
+  ud = g.on_unlock_ud;
+  release(&g_state_lock);
+  if (fn) fn(id, ud);
+}
+
 static void report_unlock(uint32_t id) {
   cJSON* o = msg("unlock");
   cJSON_AddNumberToObject(o, "id", id);
-  cJSON_AddNumberToObject(o, "frame", (double)g.frame);
+  cJSON_AddNumberToObject(o, "frame", frame_now());
   send_obj(o);
-  if (g.on_unlock) g.on_unlock(id, g.on_unlock_ud);
+  notify_unlock(id);
 }
 
 static void on_event(const rc_runtime_event_t* e) {
@@ -196,13 +212,13 @@ static void on_event(const rc_runtime_event_t* e) {
   } else if (e->type == RC_RUNTIME_EVENT_LBOARD_STARTED || e->type == RC_RUNTIME_EVENT_LBOARD_CANCELED) {
     cJSON* o = msg(e->type == RC_RUNTIME_EVENT_LBOARD_STARTED ? "lboard_start" : "lboard_cancel");
     cJSON_AddNumberToObject(o, "id", e->id);
-    cJSON_AddNumberToObject(o, "frame", (double)g.frame);
+    cJSON_AddNumberToObject(o, "frame", frame_now());
     send_obj(o);
   } else if (e->type == RC_RUNTIME_EVENT_LBOARD_TRIGGERED) {
     cJSON* o = msg("lboard");
     cJSON_AddNumberToObject(o, "id", e->id);
     cJSON_AddNumberToObject(o, "value", e->value);
-    cJSON_AddNumberToObject(o, "frame", (double)g.frame);
+    cJSON_AddNumberToObject(o, "frame", frame_now());
     send_obj(o);
   } else if (e->type == RC_RUNTIME_EVENT_LBOARD_DISABLED) {
     cJSON* o = msg("broken");
@@ -223,7 +239,9 @@ static void runtime_reset(void) {
   g.rules = 0;
   g.boards = 0;
   g.has_rp = 0;
+  hold(&g_state_lock);
   g.presence[0] = 0;
+  release(&g_state_lock);
 }
 
 /* {"achievements":[{"id":1,"trigger":"0xH0010=7"}, ...]} -- entries without a
@@ -308,7 +326,7 @@ static void handle_line(const char* line) {
       cJSON_AddBoolToObject(o, "presence", g.has_rp);
       send_obj(o);
     } else if (strcmp(t->valuestring, "quiet") == 0) {
-      g.quiet = 1;
+      __atomic_store_n(&g.quiet, 1, __ATOMIC_RELAXED);
     } else if (strcmp(t->valuestring, "peek") == 0 && g.read) {
       /* The launcher's dev tools: read a little memory for the memory viewer. */
       const cJSON* ad = cJSON_GetObjectItemCaseSensitive(m, "address");
@@ -335,12 +353,12 @@ static void handle_line(const char* line) {
 static void pump(void) {
   char chunk[8192];
   int r;
-  if (!g.inbuf || g.conn == RL_NO_CONN) return;
+  if (!g.inbuf) return;
   for (;;) {
-    lock();
+    hold(&g_conn_lock);
     r = g.conn == RL_NO_CONN ? -1 : conn_read(chunk, (int)sizeof chunk);
     if (r < 0) conn_close();
-    unlock();
+    release(&g_conn_lock);
     if (r <= 0) return;
     if (g.inlen + (size_t)r > RL_MAX_LINE) { g.inlen = 0; continue; } /* oversized: drop it */
     memcpy(g.inbuf + g.inlen, chunk, (size_t)r);
@@ -359,37 +377,50 @@ static void pump(void) {
 }
 
 static void send_natives(void) {
+  cJSON* list = NULL;
   cJSON* o;
-  if (!g.natives_dirty || !g.natives || g.conn == RL_NO_CONN) return;
+  hold(&g_state_lock);
+  if (g.natives_dirty && g.natives) {
+    list = cJSON_Duplicate(g.natives, 1);
+    g.natives_dirty = 0;
+  }
+  release(&g_state_lock);
+  if (!list) return;
   o = msg("native_list");
-  cJSON_AddItemToObject(o, "achievements", cJSON_Duplicate(g.natives, 1));
+  cJSON_AddItemToObject(o, "achievements", list);
   send_obj(o);
-  g.natives_dirty = 0;
 }
 
 /* ---- public calls -------------------------------------------------------- */
 
 void rl_ach_set_info(const char* game_id, const char* version) {
+  hold(&g_frame_lock);
   snprintf(g.game, sizeof g.game, "%s", game_id ? game_id : "");
   snprintf(g.version, sizeof g.version, "%s", version ? version : "");
+  release(&g_frame_lock);
 }
 
 int rl_ach_init(const char* console, rl_ach_read_fn read, void* ud) {
   const char* session = getenv("RL_SESSION");
-  lock_init();
-  if (g.ready) return g.conn != RL_NO_CONN;
-  g.conn = RL_NO_CONN;
-  g.ready = 1;
+  rl_conn conn = RL_NO_CONN;
+  int connected;
+  hold(&g_frame_lock);
+  if (is_ready()) {
+    release(&g_frame_lock);
+    return rl_ach_connected();
+  }
   g.read = read;
   g.read_ud = ud;
   snprintf(g.console, sizeof g.console, "%s", console ? console : "");
   runtime_reset();
-  if (!session || !*session) return 0;
-  g.conn = conn_open(session);
-  if (g.conn == RL_NO_CONN) return 0;
-  g.inbuf = (char*)malloc(RL_MAX_LINE);
-  if (!g.inbuf) { conn_close(); return 0; }
-  {
+  if (session && *session) conn = conn_open(session);
+  if (conn != RL_NO_CONN) g.inbuf = (char*)malloc(RL_MAX_LINE);
+  hold(&g_conn_lock);
+  g.conn = conn;
+  if (!g.inbuf) conn_close();
+  release(&g_conn_lock);
+  __atomic_store_n(&g.ready, 1, __ATOMIC_RELEASE);
+  if (g.inbuf) {
     cJSON* o = msg("hello");
     cJSON_AddNumberToObject(o, "sdk", RL_ACH_SDK_VERSION);
     cJSON_AddStringToObject(o, "console", g.console);
@@ -397,74 +428,89 @@ int rl_ach_init(const char* console, rl_ach_read_fn read, void* ud) {
     if (g.game[0]) cJSON_AddStringToObject(o, "game", g.game);
     if (g.version[0]) cJSON_AddStringToObject(o, "version", g.version);
     send_obj(o);
+    send_natives();
   }
-  send_natives();
-  return 1;
+  connected = g.inbuf != NULL;
+  release(&g_frame_lock);
+  return connected;
 }
 
 void rl_ach_frame(void) {
-  if (!g.ready) return;
-  g.frame++;
-  pump();
-  send_natives();
-  if ((g.rules > 0 || g.boards > 0 || g.has_rp) && g.read) rc_runtime_do_frame(&g.runtime, on_event, peek, NULL, NULL);
-  /* Rich presence: checked about every 5 seconds (300 frames), sent only when it changes. */
-  if (g.has_rp && g.read && g.frame - g.presence_at >= 300) {
-    char buf[256];
-    g.presence_at = g.frame;
-    if (rc_runtime_get_richpresence(&g.runtime, buf, sizeof buf, peek, NULL, NULL) > 0) rl_ach_presence(buf);
+  hold(&g_frame_lock);
+  if (is_ready()) {
+    const uint64_t frame = __atomic_add_fetch(&g.frame, 1, __ATOMIC_RELAXED);
+    pump();
+    send_natives();
+    if ((g.rules > 0 || g.boards > 0 || g.has_rp) && g.read) rc_runtime_do_frame(&g.runtime, on_event, peek, NULL, NULL);
+    /* Rich presence: checked about every 5 seconds (300 frames), sent only when it changes. */
+    if (g.has_rp && g.read && frame - g.presence_at >= 300) {
+      char buf[256];
+      g.presence_at = frame;
+      if (rc_runtime_get_richpresence(&g.runtime, buf, sizeof buf, peek, NULL, NULL) > 0) rl_ach_presence(buf);
+    }
   }
+  release(&g_frame_lock);
 }
 
 void rl_ach_lboard(uint32_t id, int32_t value) {
   cJSON* o;
-  if (!g.ready) return;
+  if (!is_ready()) return;
   o = msg("lboard");
   cJSON_AddNumberToObject(o, "id", id);
   cJSON_AddNumberToObject(o, "value", value);
-  cJSON_AddNumberToObject(o, "frame", (double)g.frame);
+  cJSON_AddNumberToObject(o, "frame", frame_now());
   send_obj(o);
 }
 
 void rl_ach_presence(const char* text) {
   cJSON* o;
-  if (!g.ready || !text) return;
-  if (strncmp(text, g.presence, sizeof g.presence - 1) == 0) return;
-  strncpy(g.presence, text, sizeof g.presence - 1);
-  g.presence[sizeof g.presence - 1] = 0;
+  int changed;
+  if (!is_ready() || !text) return;
+  hold(&g_state_lock);
+  changed = strncmp(text, g.presence, sizeof g.presence - 1) != 0;
+  if (changed) {
+    strncpy(g.presence, text, sizeof g.presence - 1);
+    g.presence[sizeof g.presence - 1] = 0;
+  }
+  release(&g_state_lock);
+  if (!changed) return;
   o = msg("presence");
-  cJSON_AddStringToObject(o, "text", g.presence);
+  cJSON_AddStringToObject(o, "text", text);
   send_obj(o);
 }
 
 void rl_ach_native(uint32_t id) {
   cJSON* o;
-  if (!g.ready) return;
+  if (!is_ready()) return;
   o = msg("native");
   cJSON_AddNumberToObject(o, "id", id);
-  cJSON_AddNumberToObject(o, "frame", (double)g.frame);
+  cJSON_AddNumberToObject(o, "frame", frame_now());
   send_obj(o);
-  if (g.on_unlock) g.on_unlock(id, g.on_unlock_ud);
+  notify_unlock(id);
 }
 
 void rl_ach_native_define(uint32_t id, const char* title, const char* description, uint32_t gamerscore) {
-  cJSON* a;
-  lock_init();
-  if (!g.natives) g.natives = cJSON_CreateArray();
-  if (!g.natives) return;
-  a = cJSON_CreateObject();
+  cJSON* a = cJSON_CreateObject();
+  if (!a) return;
   cJSON_AddNumberToObject(a, "id", id);
   cJSON_AddStringToObject(a, "title", title ? title : "");
   cJSON_AddStringToObject(a, "description", description ? description : "");
   cJSON_AddNumberToObject(a, "gamerscore", gamerscore);
-  cJSON_AddItemToArray(g.natives, a);
-  g.natives_dirty = 1;
-  if (g.ready) send_natives();
+  hold(&g_state_lock);
+  if (!g.natives) g.natives = cJSON_CreateArray();
+  if (g.natives) {
+    cJSON_AddItemToArray(g.natives, a);
+    g.natives_dirty = 1;
+  } else {
+    cJSON_Delete(a);
+  }
+  release(&g_state_lock);
+  if (is_ready()) send_natives();
 }
 
 void rl_ach_native_earlier(uint32_t id) {
   cJSON* o;
-  if (!g.ready) return;
+  if (!is_ready()) return;
   o = msg("native");
   cJSON_AddNumberToObject(o, "id", id);
   cJSON_AddBoolToObject(o, "earlier", 1);
@@ -473,56 +519,74 @@ void rl_ach_native_earlier(uint32_t id) {
 
 void rl_ach_event(const char* name) {
   cJSON* o;
-  if (!g.ready || !name) return;
+  if (!is_ready() || !name) return;
   o = msg("event");
   cJSON_AddStringToObject(o, "name", name);
-  cJSON_AddNumberToObject(o, "frame", (double)g.frame);
+  cJSON_AddNumberToObject(o, "frame", frame_now());
   send_obj(o);
 }
 
 void rl_ach_save_loaded(void) {
   cJSON* o;
-  if (!g.ready) return;
+  if (!is_ready()) return;
   o = msg("save_loaded");
-  cJSON_AddNumberToObject(o, "frame", (double)g.frame);
+  cJSON_AddNumberToObject(o, "frame", frame_now());
   send_obj(o);
 }
 
 void rl_ach_casual(const char* reason) {
   cJSON* o;
-  if (!g.ready) return;
+  if (!is_ready()) return;
   o = msg("casual");
   cJSON_AddStringToObject(o, "reason", reason ? reason : "");
   send_obj(o);
 }
 
-int rl_ach_quiet_toasts(void) { return g.quiet; }
-int rl_ach_connected(void) { return g.ready && g.conn != RL_NO_CONN; }
+int rl_ach_quiet_toasts(void) { return __atomic_load_n(&g.quiet, __ATOMIC_RELAXED); }
+
+int rl_ach_connected(void) {
+  int live;
+  hold(&g_conn_lock);
+  live = g.conn != RL_NO_CONN;
+  release(&g_conn_lock);
+  return is_ready() && live;
+}
 
 int rl_ach_load_list(const char* json) {
   cJSON* m = cJSON_Parse(json);
   int n;
   if (!m) return 0;
-  if (!g.ready) { lock_init(); runtime_reset(); }
+  hold(&g_frame_lock);
+  if (!is_ready()) runtime_reset();
   n = load_list(m);
+  release(&g_frame_lock);
   cJSON_Delete(m);
   return n;
 }
 
-void rl_ach_on_unlock(rl_ach_unlock_fn fn, void* ud) { g.on_unlock = fn; g.on_unlock_ud = ud; }
+void rl_ach_on_unlock(rl_ach_unlock_fn fn, void* ud) {
+  hold(&g_state_lock);
+  g.on_unlock = fn;
+  g.on_unlock_ud = ud;
+  release(&g_state_lock);
+}
 
 void rl_ach_shutdown(void) {
-  lock();
+  hold(&g_frame_lock);
+  __atomic_store_n(&g.ready, 0, __ATOMIC_RELEASE);
+  hold(&g_conn_lock);
   conn_close();
-  unlock();
+  release(&g_conn_lock);
   if (g.runtime_ready) rc_runtime_destroy(&g.runtime);
   g.runtime_ready = 0;
   free(g.inbuf);
   g.inbuf = NULL;
+  g.inlen = 0;
+  g.rules = 0;
+  hold(&g_state_lock);
   cJSON_Delete(g.natives);
   g.natives = NULL;
   g.natives_dirty = 0;
-  g.inlen = 0;
-  g.ready = 0;
-  g.rules = 0;
+  release(&g_state_lock);
+  release(&g_frame_lock);
 }
